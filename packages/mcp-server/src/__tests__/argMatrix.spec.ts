@@ -27,8 +27,7 @@
  */
 
 import { describe, it, expect, afterEach } from "vitest";
-import { spawn, type ChildProcess } from "child_process";
-import { createRequire } from "node:module";
+import { type ChildProcess } from "child_process";
 import { fileURLToPath } from "node:url";
 import * as fs from "fs";
 import * as os from "os";
@@ -36,9 +35,9 @@ import * as path from "path";
 import { createHash } from "crypto";
 import { unsafeGuardedWorkspaceRootForTests } from "../write/guardedWorkspace.js";
 import { killServerGroup } from "./helpers/killServerGroup.js";
+import { TSX_NODE_ARGS } from "./helpers/tsxNode.js";
+import { pooledSpawn } from "./helpers/serverPool.js";
 
-const nodeRequire = createRequire(import.meta.url);
-const TSX_CLI = nodeRequire.resolve("tsx/cli");
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BIN_TS = path.resolve(HERE, "..", "bin.ts");
 
@@ -77,11 +76,11 @@ function shaOfText(text: string): string {
 
 let idCounter = 1;
 
-function startServer(opts: { cwd: string; args: string[] }): ServerHandle {
-  const child: ChildProcess = spawn(
+function startServer(opts: { cwd: string; args: string[]; env?: Record<string, string> }): ServerHandle {
+  const child: ChildProcess = pooledSpawn(
     process.execPath,
-    [TSX_CLI, "--liftoff-only", BIN_TS, ...opts.args],
-    { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", env: { ...process.env } },
+    [...TSX_NODE_ARGS, BIN_TS, ...opts.args],
+    { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", env: { ...process.env, ...opts.env } },
   );
 
   let stdoutBuf = "";
@@ -165,9 +164,9 @@ afterEach(() => {
   }
 });
 
-async function newServer(tag: string): Promise<{ ws: string; srv: ServerHandle }> {
+async function newServer(tag: string, env?: Record<string, string>): Promise<{ ws: string; srv: ServerHandle }> {
   const ws = mkDir(tag);
-  const srv = startServer({ cwd: ws, args: [ws, "--allow-write"] });
+  const srv = startServer({ cwd: ws, args: [ws, "--allow-write"], env });
   servers.push(srv);
   await srv.initialize();
   return { ws, srv };
@@ -1223,9 +1222,67 @@ describe("argMatrix — field-eval T1: mode=slice + paths[] guides instead of a 
   }, 30000);
 });
 
-describe("argMatrix — field-eval T2: tl_search_files queries[] > 5 names the remaining tokens structurally", () => {
-  it("queries=6: next carries the first 5, remaining_queries carries the 6th verbatim", async () => {
-    const { srv } = await newServer("t2-queries-six");
+describe("argMatrix — field-eval T2: tl_search_files queries[] over the cap names the remaining tokens structurally", () => {
+  // TL_EFF_WIDE_FIND is default ON since 2026-10-18 (USER ruling): a find
+  // takes ten queries. The five-query cases keep their original shapes under
+  // the explicit TL_EFF_WIDE_FIND=0 rollback.
+  it("queries=10 (the default cap) is served, not refused", async () => {
+    const { ws, srv } = await newServer("t2-queries-ten");
+    writeFile(ws, "src/greek.ts", "export const alpha = 1;\nexport const kappa = 10;\n");
+    const res = await srv.call("tl_search_files", {
+      action: "find",
+      queries: ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa"],
+    });
+    expect(res["kind"], JSON.stringify(res).slice(0, 400)).toBe("search.matches");
+    expect(res["remaining_queries"]).toBeUndefined();
+  }, 30000);
+
+  it("queries=11: next carries the first 10, remaining_queries carries the 11th verbatim", async () => {
+    const { srv } = await newServer("t2-queries-eleven");
+    const res = await srv.call("tl_search_files", {
+      action: "find",
+      queries: ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa", "lambda"],
+    });
+    expect(res["kind"]).toBe("refusal");
+    expect(res["code"]).toBe("invalid-input");
+    expect(String(res["detail"])).toContain("at most 10 entries, got 11");
+    const next = res["next"] as { tool?: string; arguments?: Record<string, unknown> } | undefined;
+    expect(next?.tool).toBe("tl_search_files");
+    expect(next?.arguments?.["queries"]).toEqual(["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa"]);
+    expect(res["remaining_queries"]).toEqual(["lambda"]);
+  }, 30000);
+
+  it("queries=12: remaining_queries carries both tail tokens, in order, without hand-slicing", async () => {
+    const { srv } = await newServer("t2-queries-twelve");
+    const res = await srv.call("tl_search_files", {
+      action: "find",
+      queries: ["a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10", "a11", "a12"],
+    });
+    expect(res["kind"]).toBe("refusal");
+    expect(res["remaining_queries"]).toEqual(["a11", "a12"]);
+  }, 30000);
+
+  it("queries=11 with scope and budget: next keeps the caller's scope and budget (2026-10-18; it used to search the whole workspace)", async () => {
+    const { ws, srv } = await newServer("t2-queries-scope");
+    writeFile(ws, "src/greek.ts", "export const alpha = 1;\n");
+    writeFile(ws, "other/greek.ts", "export const alpha = 2;\n");
+    const res = await srv.call("tl_search_files", {
+      action: "find",
+      queries: ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa", "lambda"],
+      scope: { path: "src", regex: true },
+      budget: { bytes: 4000 },
+    });
+    expect(res["kind"]).toBe("refusal");
+    const next = res["next"] as { tool?: string; arguments?: Record<string, unknown> } | undefined;
+    expect(next?.arguments?.["scope"], JSON.stringify(next)).toEqual({ path: "src", regex: true });
+    expect(next?.arguments?.["budget"], JSON.stringify(next)).toEqual({ bytes: 4000 });
+    const served = await srv.call(next!.tool!, next!.arguments!);
+    expect(served["kind"], JSON.stringify(served).slice(0, 400)).toBe("search.matches");
+    expect(JSON.stringify(served)).not.toContain("other/greek.ts");
+  }, 30000);
+
+  it("TL_EFF_WIDE_FIND=0, queries=6: next carries the first 5, remaining_queries carries the 6th verbatim", async () => {
+    const { srv } = await newServer("t2-queries-six", { TL_EFF_WIDE_FIND: "0" });
     const res = await srv.call("tl_search_files", {
       action: "find",
       queries: ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"],
@@ -1238,8 +1295,8 @@ describe("argMatrix — field-eval T2: tl_search_files queries[] > 5 names the r
     expect(res["remaining_queries"]).toEqual(["zeta"]);
   }, 30000);
 
-  it("queries=7: remaining_queries carries both tail tokens, in order, without hand-slicing", async () => {
-    const { srv } = await newServer("t2-queries-seven");
+  it("TL_EFF_WIDE_FIND=0, queries=7: remaining_queries carries both tail tokens, in order, without hand-slicing", async () => {
+    const { srv } = await newServer("t2-queries-seven", { TL_EFF_WIDE_FIND: "0" });
     const res = await srv.call("tl_search_files", {
       action: "find",
       queries: ["a1", "a2", "a3", "a4", "a5", "a6", "a7"],
@@ -1257,7 +1314,10 @@ describe("argMatrix — field-eval T3: mode=handles labels a bare file-handle's 
     const bareHandle = String(full["handle"]);
     expect(bareHandle).toMatch(/^h/);
 
-    const res = await srv.call("tl_read_file", { mode: "handles", handles: [bareHandle] });
+    // force_serve: the mode=full read already served the file, and a handle
+    // batch answers a held window already-served (2026-10-20); this pins the
+    // served entry's own shape.
+    const res = await srv.call("tl_read_file", { mode: "handles", handles: [bareHandle], force_serve: true });
     expect(res["kind"]).toBe("read.batch");
     // readFamily.ts's projectBatch renames the internal `items[]` to the v1
     // wire field `entries[]` (Rule K) — assert the WIRE shape, not the
@@ -1278,7 +1338,9 @@ describe("argMatrix — field-eval T3: mode=handles labels a bare file-handle's 
     const sliced = await srv.call("tl_read_file", { mode: "slice", path: "src/ranged.ts", range: "1-2" });
     const rangedHandle = String(sliced["handle"]);
 
-    const res = await srv.call("tl_read_file", { mode: "handles", handles: [rangedHandle] });
+    // force_serve: the slice already served 1-2, and a handle batch answers a
+    // held window already-served (2026-10-20).
+    const res = await srv.call("tl_read_file", { mode: "handles", handles: [rangedHandle], force_serve: true });
     const entries = res["entries"] as Array<Record<string, unknown>>;
     expect(entries).toHaveLength(1);
     expect(entries[0]!["range"]).toBe("1-2");
@@ -1361,7 +1423,9 @@ describe("argMatrix — field-eval integration T2: a truncated handles-batch ent
     const { ws, srv } = await newServer("t2-handles-small");
     writeFile(ws, "src/small.ts", "export const SMALL = 1;\n");
     const full = await srv.call("tl_read_file", { mode: "full", path: "src/small.ts" });
-    const res = await srv.call("tl_read_file", { mode: "handles", handles: [String(full["handle"])] });
+    // force_serve: the mode=full read already served the file, and a handle
+    // batch answers a held window already-served (2026-10-20).
+    const res = await srv.call("tl_read_file", { mode: "handles", handles: [String(full["handle"])], force_serve: true });
     const entry = (res["entries"] as Array<Record<string, unknown>>)[0]!;
     expect(entry["truncated"]).toBe(false);
     expect(entry["remaining_ranges"]).toBeUndefined();

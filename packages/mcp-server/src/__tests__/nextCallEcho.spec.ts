@@ -111,24 +111,44 @@ describe("D3 — executed-locate ledger", () => {
 });
 
 describe("D4 — over-cap queries remedy stays on find", () => {
-  it("6 queries → error whose next splits into a <=5 find, not a task_pack redirect", async () => {
-    const root = homeWorkspace("queries-cap");
+  // TL_EFF_WIDE_FIND (default ON since 2026-10-18: ten queries per find, five
+  // under an explicit "0") is read per call, from this process's env.
+  async function overCapFind(tag: string, queries: string[], wideFind: string | undefined): Promise<Record<string, unknown>> {
+    const root = homeWorkspace(tag);
     write(root, "src/a.ts", "export const a = 1;\n");
+    const saved = process.env["TL_EFF_WIDE_FIND"];
+    if (wideFind === undefined) delete process.env["TL_EFF_WIDE_FIND"];
+    else process.env["TL_EFF_WIDE_FIND"] = wideFind;
+    try {
+      const res = await callTool("tl_search_files", { cwd: root, action: "find", queries });
+      return JSON.parse((res as { content: Array<{ text: string }> }).content[0]!.text) as Record<string, unknown>;
+    } finally {
+      if (saved === undefined) delete process.env["TL_EFF_WIDE_FIND"];
+      else process.env["TL_EFF_WIDE_FIND"] = saved;
+    }
+  }
 
-    const res = await callTool("tl_search_files", {
-      cwd: root,
-      action: "find",
-      queries: ["zq1a", "zq2a", "zq3a", "zq4a", "zq5a", "zq6a"],
-    });
-    const body = JSON.parse((res as { content: Array<{ text: string }> }).content[0]!.text) as Record<string, unknown>;
-
-    expect(String(body["detail"])).toContain("at most 5 entries");
-    // W2-4: was string-prose `nextText(body)` checks. Same facts on the wire
-    // directly: `next` stays on tl_search_files find (never redirects to a
-    // tl_read_file task_pack) and carries the first over-cap query verbatim.
+  // W2-4: was string-prose `nextText(body)` checks. Same facts on the wire
+  // directly: `next` stays on tl_search_files find (never redirects to a
+  // tl_read_file task_pack) and carries the queries that fit the cap verbatim.
+  function expectFindNext(body: Record<string, unknown>, head: string[]): void {
     const next = body["next"] as { tool?: unknown; arguments?: Record<string, unknown> } | undefined;
     expect(next?.tool, JSON.stringify(body)).toBe("tl_search_files");
     expect(next?.arguments?.["action"], JSON.stringify(body)).toBe("find");
-    expect(next?.arguments?.["queries"], JSON.stringify(body)).toContain("zq1a");
+    expect(next?.arguments?.["queries"], JSON.stringify(body)).toEqual(head);
+  }
+
+  it("11 queries → error whose next splits into a <=10 find, not a task_pack redirect", async () => {
+    const queries = Array.from({ length: 11 }, (_, i) => `zq${i + 1}a`);
+    const body = await overCapFind("queries-cap", queries, undefined);
+    expect(String(body["detail"])).toContain("at most 10 entries");
+    expectFindNext(body, queries.slice(0, 10));
+  });
+
+  it("TL_EFF_WIDE_FIND=0: 6 queries → error whose next splits into a <=5 find, not a task_pack redirect", async () => {
+    const queries = ["zq1a", "zq2a", "zq3a", "zq4a", "zq5a", "zq6a"];
+    const body = await overCapFind("queries-cap-off", queries, "0");
+    expect(String(body["detail"])).toContain("at most 5 entries");
+    expectFindNext(body, queries.slice(0, 5));
   });
 });

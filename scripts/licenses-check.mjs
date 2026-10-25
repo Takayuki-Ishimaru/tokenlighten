@@ -6,13 +6,17 @@ import {
   readdirSync,
   realpathSync,
   statSync,
+  existsSync,
 } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, relative, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import crossSpawn from "cross-spawn";
+import parseSpdxExpression from "spdx-expression-parse";
 import { markdownCell } from "./licenses-format.mjs";
+import { onnxRuntimeLegalFiles } from "./onnxruntime-licenses.mjs";
+import { MULTILINGUAL_E5_MODEL, E5_MIT_NOTICE } from "../packages/types/dist/modelCatalog.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
@@ -55,6 +59,13 @@ function runtimePackageIds() {
   for (const [packagePath, info] of Object.entries(lock.packages)) {
     if (!packagePath.includes("node_modules/") || info?.dev === true || info?.link === true) continue;
     if (typeof info?.version !== "string") continue;
+    // npm lockfiles include optional binaries for every platform. Only the
+    // compatible installed binaries are part of this host's runtime bundle.
+    if (info.optional === true && !existsSync(resolve(repoRoot, packagePath))) {
+      const matches = (values, actual) => !Array.isArray(values) || values.every(value => value.startsWith("!") ? value.slice(1) !== actual : true)
+        && (values.every(value => value.startsWith("!")) || values.includes(actual));
+      if (!matches(info.os, process.platform) || !matches(info.cpu, process.arch)) continue;
+    }
     const name = packagePath.split("node_modules/").at(-1);
     if (name) ids.add(`${name}@${info.version}`);
   }
@@ -68,7 +79,7 @@ function isFirstParty(name) {
 }
 
 function normalizedLegalText(value, label) {
-  const normalized = String(value).replace(/\r\n?/g, "\n").trim();
+  const normalized = String(value).replace(/\r\n?/g, "\n").replace(/[ \t]+$/gm, "").trim();
   if (!normalized) throw new Error(`${label} is empty`);
   return `${normalized}\n`;
 }
@@ -107,7 +118,11 @@ function packageNoticeTexts(packageRoot, packageName) {
 function fencedText(value) {
   const longest = Math.max(2, ...[...value.matchAll(/`+/g)].map((match) => match[0].length));
   const fence = "`".repeat(longest + 1);
-  return `${fence}text\n${value}${fence}`;
+  const block = `${fence}text\n${value}${fence}`;
+  // README-style license fallbacks can contain underline rulers that Git
+  // interprets as conflict markers. Quote the Markdown block while preserving
+  // its rendered legal text and the digest of the original normalized bytes.
+  return /^(?:<{7}|={7}|>{7})/m.test(value) ? block.split("\n").map(line => line ? `> ${line}` : ">").join("\n") : block;
 }
 
 function groupLegalTexts(entries, select) {
@@ -140,7 +155,8 @@ function writeThirdPartyNotices(data, outputPath, runtimeIds) {
   const entries = expectedNames.map((name) => {
     const info = data[name];
     const license = asLicenseString(info?.licenses) || "UNKNOWN";
-    const licenseText = readPackageLegalFile(
+    const supplemental = onnxRuntimeLegalFiles(name);
+    const licenseText = supplemental ? normalizedLegalText(supplemental[0].bytes.toString("utf8"), `${name} upstream license`) : readPackageLegalFile(
       info?.licenseFile,
       info?.path,
       `${name} license`,
@@ -156,7 +172,9 @@ function writeThirdPartyNotices(data, outputPath, runtimeIds) {
           ? info.url
           : "",
       licenseText,
-      notices: packageNoticeTexts(info?.path, name),
+      notices: [...packageNoticeTexts(info?.path, name), ...(supplemental?.slice(1).map(file => ({
+        name: file.name, text: normalizedLegalText(file.bytes.toString("utf8"), `${name} upstream notice`),
+      })) ?? [])],
     };
   });
 
@@ -213,17 +231,29 @@ function writeThirdPartyNotices(data, outputPath, runtimeIds) {
         "",
       ]),
     ] : []),
+    "## Optional local semantic model",
+    "",
+    `${MULTILINGUAL_E5_MODEL.id} at revision ${MULTILINGUAL_E5_MODEL.revision} (${MULTILINGUAL_E5_MODEL.license}).`,
+    "Model weights are downloaded separately through an explicit model-install action; they are not included in the install archive or VSIX.",
+    `Model source: ${MULTILINGUAL_E5_MODEL.source}`,
+    `Upstream license provenance: ${MULTILINGUAL_E5_MODEL.licenseSource}`,
+    MULTILINGUAL_E5_MODEL.note,
+    "",
+    fencedText(E5_MIT_NOTICE),
+    "",
   ];
   writeFileSync(outputPath, lines.join("\n"), "utf8");
+  writeFileSync(resolve(dirname(outputPath), "MODEL_LICENSES.json"), `${JSON.stringify([{ ...MULTILINGUAL_E5_MODEL, licenseText: E5_MIT_NOTICE }], null, 2)}\n`, "utf8");
   console.log(
     `Third-party notices written: ${outputPath} (${entries.length} packages, ${licenseGroups.length} license texts, ${noticeGroups.length} NOTICE texts)`,
   );
 }
 
 const denyPatterns = [
-  /gpl-1/i,
-  /gpl-2/i,
-  /gpl-3/i,
+  /(?:^|[^a-z])gpl(?:\b|v[123])/i,
+  /(?:^|[^a-z])gpl-1/i,
+  /(?:^|[^a-z])gpl-2/i,
+  /(?:^|[^a-z])gpl-3/i,
   /agpl/i,
   /sspl/i,
   /rsalv2/i,
@@ -254,6 +284,21 @@ function asLicenseString(value) {
 
 export function classifyLicense(value, allowPythonFoundation = false) {
   const raw = asLicenseString(value).trim();
+  try {
+    const evaluate = (node) => {
+      if (node.conjunction) {
+        const choices = [evaluate(node.left), evaluate(node.right)];
+        // OR permits one option; AND requires every license's obligations.
+        return node.conjunction === "or" ? Math.min(...choices) : Math.max(...choices);
+      }
+      if (denyPatterns.some(pattern => pattern.test(node.license))) return 2;
+      return /lgpl/i.test(node.license) ? 1 : 0;
+    };
+    return ["ok", "lgpl", "denied"][evaluate(parseSpdxExpression(raw))];
+  } catch {
+    // An unparseable compound may never erase a mandatory denied license.
+    if (/\bAND\b|[;,]/i.test(raw) && denyPatterns.some(pattern => pattern.test(raw))) return "denied";
+  }
   const tokens = raw.split(/\s+OR\s+|\s+AND\s+|[;,]/i);
   const pythonSafe = allowPythonFoundation ? [/python software foundation/i] : [];
   const hasDenied = tokens.some((token) => denyPatterns.some((pattern) => pattern.test(token)));

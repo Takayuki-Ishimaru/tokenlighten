@@ -3,14 +3,10 @@
 <!-- tl-instructions-sha256: {{SHA256}} -->
 ## TokenLighten MCP (compact)
 
-`AGENTS.md`がdesigns/planの正典。templateからAI rules再生成、生成blockは直接編集禁止。
-
-3ツール: `tl_read_file`, `tl_edit_file`, `tl_search_files`. FIRST file lookup/read、native/Explore系subagentより先に`tl_read_file {query:"<依頼全文を逐語で>",task:{epoch:"new"}}`; 所在不明なら`targets`省略. queryのキーワード化・引用/制約文の省略禁止. nativeはuserのnative明示指定/TL非提供/hostのnative-bypass/非complete scope/確実な不在時のみ; task途中でTLを有効化しない. 同taskの絞ったre-packはincomplete足り得る. Search: `action:"find",queries:["<識別子1語>"]`; `queries=[…]`一括; `scope.path`=既知subtree、不明時のみrepo全体.
-<!-- tl-legacy-compat:start -->
-旧入力のみ: `mode`/`paths`/`handles`/`maxBytes`/`maxTokens`/`taskProfile`/`taskEpoch`はTL_LEGACY_INPUT=accept時だけ受理; RCはrefuse. 発行禁止; 返却`next`は正準形。
-<!-- tl-legacy-compat:end -->
-全callに自分の`cwd`(なければ`cwd-required-for-edit`); 共有workspaceは固定`lane`. 新taskは`task.epoch:"new"`; 継続は返却`task.id`を`task.handle`に渡す; `expected_state_version`はそのhandle併記時のみ. user明示のread-only=`task.profile:"answer"`、変更=`"generic"`; 不明時は省略、hintから推測禁止. 既知単一editはprepared `handle/search/replace`、`precondition:"unique-match"`、`allowPathFallback:false`; 他は`tl_edit_file` `edits[]`一括、item毎に対象指定.
-未知の`kind`=SAFE-STOP: 報告のみ、edit発行・fieldからの推測禁止.
-`read.task_pack`の`decision.kind`に従う: `act.answer`/`act.edit`でdiscovery閉鎖、`evidence[].body`は読込済みの正確なsource: そのpath/行範囲で再読せず行動し、独立readを一回の`targets:[...]`、ready editも一括. `refusal`は`retry`だけが遷移. `next`は実行可能なcall全体=逐語実行; hintはcallでない. context消失時は同callに`task.force_serve:true`. `read.receipt`はre-pack合図でない: `next`があれば従い、無ければ再掲証拠/certificateで行動または停止. check合格で停止. 読みの上限は`budget.bytes`/`budget.tokens`.
-新file/testは`edits:[{path,create:true,content}]`+明示`cwd`; 空frontier+`create_target`なら作成. 当epochでserved済みのbytesだけ編集. `edit.applied`=適用、`edit.rolled_back`=未適用、`edit.state_unknown`=>先に`recovery`. failed editの逐語再試行禁止（記録済み`operation_id` replayは安全）. verification kitの`omitted`=>compile/test前に一括`next`; `recipe.gaps`を解消. Shellはbuild/tests/gitのみ; TLで読めるread/searchをshell/nativeで代替禁止. 詳細規則はon-demand配信.
+`tl_read_file`/`tl_edit_file`/`tl_search_files`を全workspace read/search/editに使う. まずnative/Exploreより先に`tl_read_file {query:"<依頼全文を逐語で>",task:{epoch:"new"}}`; 不明pathは`targets`省略. 引用/制約込みでquery逐語. nativeはuser明示/TL不在・bypass/scope不完全/不在時のみ; native後TLへ; 他task途中切替禁止. Search=`action:"find",queries:["<literal識別子1語>"]`(phrase禁止); queries一括; `action:"tree"`で一覧; `scope.path`は既知subtree、他はrepo全体. CSS/literal: `action:"find"`(参照:言語symbolのみ).
+各callはtop-level `cwd`必須(pwd不要; なければ`cwd-required-for-edit`); `next`にcwd追加禁止; 単独`lane`省略、並列は初回固定; laneの途中追加・変更禁止. 同一依頼は最新`task.id`を`task.handle`へ; `epoch:"new"`禁止; `expected_state_version`はhandle併記時のみ. user明示のread-only=`task.profile:"answer"`、変更=`"generic"`; 不明は省略、hintから推測しない. 既知単一editはprepared `handle/search/replace`+`precondition:"unique-match"`+`allowPathFallback:false`; 他は一回の`tl_edit_file` `edits[]`. handleはsearchを含む; 複数窓なら`path/search/replace`+`precondition:"unique-match"`.
+未知`kind`=SAFE-STOP: 報告のみ、edit/field推測禁止. `decision.kind`に従い、同batch全reply後に`act.answer`/`act.edit`でdiscovery終了. `decision.next[]`全call同一tool-call turnで逐語実行. 同task/batch actが兄弟`discover.next`を上書き可能なのはrefusal/未知kind不在時のみ; refusal→`retry`のみ. 分岐/loop条件追跡; 定義/コメント/計算/ログ≠実行. `evidence[].body`正確なsource: path/rangeで行動、再読禁止. 独立read一括. 後続read=`targets:[{path|handle,range}]`、`query`なし; 文書=`select.sections`. `next`全体を逐語実行; hint参考. context消失時は同callに`task.force_serve:true`. `read.receipt`は`next`あれば従い、無ければ再掲証拠/certificateで行動または停止.
+新file/test=`edits:[{path,create:true,content}]`+明示`cwd`; 空frontier+`create_target`=create. served bytesのみ編集. `edit.applied`=適用、`edit.rolled_back`=未適用、`edit.state_unknown`=>先に`recovery`. failed edit逐語再試行禁止(`operation_id` replay可). 返却verification kitを使う; kit取得だけのclosure pull禁止. 返却closure `next`/`verification.next_call`と非空`recipe.gaps`に従う; `toolchain.test_entry`を`toolchain.test_entry_dir`から実行.
+ready修正・必須test・全stageのready style editを一回の`tl_edit_file` `edits[]`に一括. 関連failureで依頼未完了なら修正・再test. 関連check合格で停止; 追加harness・前後build・warning/style edit禁止; 無関係/既存failureは報告.
+Shellはbuild/tests/gitのみ; workspace fileへの`cat`/`sed`/`grep`/`rg`/`find`/`ls`・native Read/Edit禁止.
 <!-- tokenlighten:mcp-instructions:end -->

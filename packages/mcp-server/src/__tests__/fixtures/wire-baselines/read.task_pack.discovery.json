@@ -18,20 +18,11 @@
         "1-20",
         "27-201"
       ],
-      "role": "unknown",
       "symbol": "QKF::estimatorHealthStatus",
       "why": "anchor-focus: query-matched symbol QKF::estimatorHealthStatus; caller-supplied",
       "likely_edits": [
-        {
-          "kind": "inspect-slice",
-          "handle": "$H1",
-          "confidence": 0.5
-        },
-        {
-          "kind": "handle-scoped-edit",
-          "handle": "$H1",
-          "confidence": 0.4
-        }
+        "inspect-slice",
+        "handle-scoped-edit"
       ]
     }
   ],
@@ -40,7 +31,6 @@
     "next": {
       "tool": "tl_search_files",
       "arguments": {
-        "cwd": "$WS",
         "action": "tree",
         "scope": {
           "path": "fw/src/estimator"
@@ -69,8 +59,7 @@
     "requested": "auto",
     "selected": "generic",
     "source": "inferred",
-    "confidence": 0.4,
-    "reason": "no high-confidence task-shape marker"
+    "confidence": 0.4
   },
   "frontier_index": [
     {

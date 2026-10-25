@@ -177,7 +177,10 @@ describe("buildTaskPack — multi_concern serve honesty (2026-08-01)", () => {
     expect(result.concerns?.every((concern) => concern.status === "covered")).toBe(true);
     expect(["edit_from_handles", "inspect_handles"]).toContain(result.route?.action);
     if (result.route?.action === "edit_from_handles") {
-      expect(result.route?.reason).toContain("remaining_ranges");
+      // The reason names what the wire carries (the pack's `remaining`
+      // lines), not the internal `remaining_ranges` field (DESIGN §20.26).
+      expect(result.route?.reason).toContain("have remaining lines");
+      expect(result.route?.reason).not.toContain("remaining_ranges");
     }
   });
 

@@ -9,7 +9,7 @@
 
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
-import type { SourceIndexManifestV1 } from "./indexStore.js";
+import type { IndexedSymbolV1, SourceIndexManifestV1 } from "./indexStore.js";
 import { assertSafeWriteTarget } from "./safeWritePath.js";
 import { readRegularFileUtf8 } from "./readGuard.js";
 import { writeJsonAtomic, type AtomicJsonWriteHooks } from "./atomicJson.js";
@@ -77,95 +77,152 @@ const GRAPH_STALENESS_FULL_PARSE_MAX_BYTES = 8 * 1024 * 1024;
 // Build
 // ---------------------------------------------------------------------------
 
-export function buildTlGraphFromManifest(manifest: SourceIndexManifestV1): TlGraph {
-  const files = manifest.files;
-
-  // 1) Build symbol definition index: symbolName → [{path, line}]
-  //    Multiple files can define the same name; keep all.
-  const defsByName = new Map<string, { path: string; line: number }[]>();
+interface GraphNameSummary {
+  definitionCount: number;
+  definitionPathChars: number;
+  referenceCount: number;
+  referencePathChars: number;
+}
+interface GraphBuildIndex {
+  defsByName: Map<string, { path: string; symbol: IndexedSymbolV1 }[]>;
+  allDefinedNames: Set<string>;
+  refsByName: Map<string, TlGraphLocation[]>;
+  nameSummaries: Map<string, GraphNameSummary>;
+  symbolCount: number;
+  fileCount: number;
+  exportNameChars: number;
+  graphFilePathChars: number;
+  metricOverflow: boolean;
+}
+function addMetric(index: GraphBuildIndex, current: number, amount: number): number {
+  if (!Number.isSafeInteger(amount) || amount < 0 || current > Number.MAX_SAFE_INTEGER - amount) {
+    index.metricOverflow = true;
+    return Number.MAX_SAFE_INTEGER;
+  }
+  return current + amount;
+}
+/** Build shared linear indexes without D×R references or imported-path sets. */
+function indexGraphManifest(manifest: SourceIndexManifestV1): GraphBuildIndex {
+  const defsByName = new Map<string, { path: string; symbol: IndexedSymbolV1 }[]>();
   const allDefinedNames = new Set<string>();
-
-  for (const [filePath, file] of Object.entries(files)) {
+  const refsByName = new Map<string, TlGraphLocation[]>();
+  const nameSummaries = new Map<string, GraphNameSummary>();
+  const index: GraphBuildIndex = {
+    defsByName, allDefinedNames, refsByName, nameSummaries,
+    symbolCount: 0, fileCount: 0, exportNameChars: 0, graphFilePathChars: 0, metricOverflow: false,
+  };
+  for (const [filePath, file] of Object.entries(manifest.files)) {
     for (const sym of file.symbols) {
       allDefinedNames.add(sym.name);
       let defs = defsByName.get(sym.name);
-      if (!defs) {
-        defs = [];
-        defsByName.set(sym.name, defs);
+      if (!defs) { defs = []; defsByName.set(sym.name, defs); }
+      defs.push({ path: filePath, symbol: sym });
+      let summary = nameSummaries.get(sym.name);
+      if (!summary) {
+        summary = { definitionCount: 0, definitionPathChars: 0, referenceCount: 0, referencePathChars: 0 };
+        nameSummaries.set(sym.name, summary);
       }
-      defs.push({ path: filePath, line: sym.lineStart });
+      summary.definitionCount += 1;
+      summary.definitionPathChars = addMetric(index, summary.definitionPathChars, filePath.length);
+      index.exportNameChars = addMetric(index, index.exportNameChars, sym.name.length);
     }
   }
-
-  // 2) Build references: for each defined symbol, find files that reference it.
-  //    A file "references" symbol X if X appears in outgoingSymbolRefs AND
-  //    X is not defined in that same file.
-  const refsByName = new Map<string, TlGraphLocation[]>();
-
-  for (const [filePath, file] of Object.entries(files)) {
-    const localSymbolNames = new Set(file.symbols.map((s) => s.name));
+  for (const [filePath, file] of Object.entries(manifest.files)) {
+    const localSymbolNames = new Set(file.symbols.map((sym) => sym.name));
+    let hasExternalImport = false;
     for (const refName of Object.keys(file.outgoingSymbolRefs)) {
-      if (!allDefinedNames.has(refName)) continue;
-      if (localSymbolNames.has(refName)) continue;
+      const summary = nameSummaries.get(refName);
+      if (!summary || localSymbolNames.has(refName)) continue;
       let refs = refsByName.get(refName);
-      if (!refs) {
-        refs = [];
-        refsByName.set(refName, refs);
-      }
+      if (!refs) { refs = []; refsByName.set(refName, refs); }
       refs.push({ path: filePath, line: 1, column: 0 });
+      summary.referenceCount += 1;
+      summary.referencePathChars = addMetric(index, summary.referencePathChars, filePath.length);
+      hasExternalImport = true;
+    }
+    if (file.symbols.length > 0 || hasExternalImport) {
+      index.fileCount += 1;
+      index.graphFilePathChars = addMetric(index, index.graphFilePathChars, filePath.length);
     }
   }
-
-  // 3) Assemble symbols array (only symbols that have at least one reference).
+  for (const summary of nameSummaries.values()) {
+    if (summary.referenceCount > 0) index.symbolCount += summary.definitionCount;
+  }
+  return index;
+}
+interface LowerBound { value: number; overflow: boolean; }
+function addLowerBound(bound: LowerBound, amount: number): void {
+  if (bound.overflow) return;
+  if (!Number.isSafeInteger(amount) || amount < 0 || bound.value > Number.MAX_SAFE_INTEGER - amount) {
+    bound.value = Number.MAX_SAFE_INTEGER; bound.overflow = true; return;
+  }
+  bound.value += amount;
+}
+function addLowerBoundProduct(bound: LowerBound, left: number, right: number): void {
+  if (bound.overflow) return;
+  if (!Number.isSafeInteger(left) || !Number.isSafeInteger(right) || left < 0 || right < 0 ||
+      (left !== 0 && right > Math.floor(Number.MAX_SAFE_INTEGER / left))) {
+    bound.value = Number.MAX_SAFE_INTEGER; bound.overflow = true; return;
+  }
+  addLowerBound(bound, left * right);
+}
+/**
+ * Guaranteed byte lower bound: UTF-16 string lengths do not exceed the
+ * serialized UTF-8 form, and omitted syntax, escapes, numbers and imports
+ * only add bytes. The bound uses source-order indexes, never D×R objects.
+ */
+function estimateIndexedGraphMinBytes(manifest: SourceIndexManifestV1, index: GraphBuildIndex): LowerBound {
+  const bound: LowerBound = { value: 0, overflow: index.metricOverflow };
+  addLowerBound(bound, manifest.rootHash.length);
+  addLowerBound(bound, index.exportNameChars);
+  addLowerBound(bound, index.graphFilePathChars);
+  for (const [name, summary] of index.nameSummaries) {
+    if (summary.referenceCount === 0) continue;
+    addLowerBoundProduct(bound, summary.definitionCount, name.length);
+    addLowerBound(bound, summary.definitionPathChars);
+    addLowerBoundProduct(bound, summary.definitionCount, summary.referencePathChars);
+  }
+  return bound;
+}
+function exceedsCap(bound: LowerBound, maxBytes: number): boolean {
+  if (Number.isNaN(maxBytes)) return false;
+  if (bound.overflow) return maxBytes <= Number.MAX_SAFE_INTEGER;
+  return bound.value > maxBytes;
+}
+function assembleTlGraph(manifest: SourceIndexManifestV1, index: GraphBuildIndex): TlGraph {
   const symbols: TlGraphSymbol[] = [];
-  for (const [name, defs] of defsByName) {
-    const refs = refsByName.get(name);
+  for (const [name, defs] of index.defsByName) {
+    const refs = index.refsByName.get(name);
     if (!refs || refs.length === 0) continue;
     for (const def of defs) {
       symbols.push({
         name,
-        definition: { path: def.path, line: def.line, column: 0 },
-        references: refs.filter((r) => r.path !== def.path),
+        definition: { path: def.path, line: def.symbol.lineStart, column: 0 },
+        references: refs.filter((ref) => ref.path !== def.path),
       });
     }
   }
   symbols.sort((a, b) => a.name.localeCompare(b.name) || a.definition.path.localeCompare(b.definition.path));
-
-  // 4) Build file-level imports/exports.
   const graphFiles: TlGraphFile[] = [];
-  for (const [filePath, file] of Object.entries(files)) {
-    const localSymbolNames = new Set(file.symbols.map((s) => s.name));
-    const exportNames = file.symbols.map((s) => s.name);
-
-    // imports: set of files that define any symbol referenced by this file.
+  for (const [filePath, file] of Object.entries(manifest.files)) {
+    const localSymbolNames = new Set(file.symbols.map((sym) => sym.name));
+    const exportNames = file.symbols.map((sym) => sym.name);
     const importedPaths = new Set<string>();
     for (const refName of Object.keys(file.outgoingSymbolRefs)) {
-      if (!allDefinedNames.has(refName)) continue;
-      if (localSymbolNames.has(refName)) continue;
-      const defs = defsByName.get(refName);
+      if (!index.allDefinedNames.has(refName) || localSymbolNames.has(refName)) continue;
+      const defs = index.defsByName.get(refName);
       if (!defs) continue;
-      for (const def of defs) {
-        if (def.path !== filePath) importedPaths.add(def.path);
-      }
+      for (const def of defs) if (def.path !== filePath) importedPaths.add(def.path);
     }
-
     if (exportNames.length === 0 && importedPaths.size === 0) continue;
-
-    graphFiles.push({
-      path: filePath,
-      imports: [...importedPaths].sort(),
-      exports: exportNames.sort(),
-    });
+    graphFiles.push({ path: filePath, imports: [...importedPaths].sort(), exports: exportNames.sort() });
   }
   graphFiles.sort((a, b) => a.path.localeCompare(b.path));
-
-  return {
-    version: 1,
-    generation: manifest.generation ?? 0,
-    rootHash: manifest.rootHash,
-    symbols,
-    files: graphFiles,
-  };
+  return { version: 1, generation: manifest.generation ?? 0, rootHash: manifest.rootHash, symbols, files: graphFiles };
+}
+/** Deterministic complete graph builder retained for direct callers. */
+export function buildTlGraphFromManifest(manifest: SourceIndexManifestV1): TlGraph {
+  return assembleTlGraph(manifest, indexGraphManifest(manifest));
 }
 
 // ---------------------------------------------------------------------------
@@ -211,15 +268,7 @@ export interface WriteGraphIfStaleOptions {
 /** Default for `WriteGraphIfStaleOptions.graphIndexMaxBytes` — mirrors mcp-server/src/graph/index.ts's GRAPH_INDEX_MAX_BYTES at the time of this writing; a caller SHOULD pass the real value explicitly. */
 export const DEFAULT_GRAPH_INDEX_MAX_BYTES = 64 * 1024 * 1024;
 
-/**
- * Cheap, GUARANTEED lower bound on `JSON.stringify(graph)`'s eventual byte
- * length — same technique and same safety property as
- * `estimateManifestMinBytes` in indexStore.ts (sum of raw string-field
- * lengths, no JSON syntax/escaping counted, so the real size is always >=
- * this sum). Computed from the ALREADY-BUILT graph object (buildTlGraphFromManifest
- * has no I/O and does not itself stringify anything, so building it is not
- * the expensive part this item targets — see writeGraphIfStale below).
- */
+/** Post-build lower bound retained for remaining import-heavy cases. */
 function estimateGraphMinBytes(graph: TlGraph): number {
   let total = graph.rootHash.length;
   for (const symbol of graph.symbols) {
@@ -283,16 +332,16 @@ export async function writeGraphIfStale(
     }
   }
 
-  const graph = buildTlGraphFromManifest(manifest);
-
-  // Perf (item D): skip the expensive stringify+write for a graph the
-  // READER would never read back anyway in this mode — see
-  // WriteGraphIfStaleOptions.graphIndexMode's doc comment. A plain early
-  // return before writeJsonAtomic ever runs: any EXISTING on-disk graph
-  // file (from an earlier, smaller build, or one published under mode
-  // "on") is left exactly as it is, the same as every "missing or
-  // corrupt — rebuild" path above already leaves whatever was there
-  // untouched on any OTHER failure to publish a new one.
+  // Build linear indexes once. Admission uses their counts and string
+  // lengths, then returns before D×R reference arrays or import sets exist.
+  const graphIndex = indexGraphManifest(manifest);
+  if ((opts?.graphIndexMode ?? "auto") !== "on") {
+    const maxBytes = opts?.graphIndexMaxBytes ?? DEFAULT_GRAPH_INDEX_MAX_BYTES;
+    if (exceedsCap(estimateIndexedGraphMinBytes(manifest, graphIndex), maxBytes)) {
+      return { written: false, symbolCount: graphIndex.symbolCount, fileCount: graphIndex.fileCount };
+    }
+  }
+  const graph = assembleTlGraph(manifest, graphIndex);
   if ((opts?.graphIndexMode ?? "auto") !== "on") {
     const maxBytes = opts?.graphIndexMaxBytes ?? DEFAULT_GRAPH_INDEX_MAX_BYTES;
     if (estimateGraphMinBytes(graph) > maxBytes) {

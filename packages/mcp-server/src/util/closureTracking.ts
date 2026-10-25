@@ -1007,7 +1007,10 @@ export function computeClosureState(
     const isWiring = Array.isArray(check.tokens) && check.tokens.length === 2;
     const satisfied = isStructural
       ? contents.some((file) => {
-          if (!globMatches(file.rel, check.glob)) return false;
+          if (
+            !globMatches(file.rel, check.glob)
+            && !(check.altGlobs ?? []).some((glob) => glob !== "" && globMatches(file.rel, glob))
+          ) return false;
           const normalized = normalizeForCooccur(strippedOf(file));
           return check.allTokens!.every((token) =>
             normalized.includes(normalizeForCooccur(token))
@@ -1111,12 +1114,21 @@ function closureCapabilityGaps(open: PackCheckRecord[]): ClosureCapabilityGap[] 
     const reason = check.desc.length > MAX_DESC_CHARS ? check.desc.slice(0, MAX_DESC_CHARS) : check.desc;
     const probe = [check.token, check.tokens?.[0], check.allTokens?.[0]]
       .find((token): token is string => typeof token === "string" && token !== "");
+    // A missing literal in one exact file cannot be diagnosed by finding its
+    // occurrences in other files. Apart from irrelevant matches, a second
+    // such server-issued probe could hit the all-served-find loop guard.
+    // Wiring, alternate-site and glob checks retain their wider search.
+    const exactPath = typeof check.token === "string" && !check.tokens && !check.allTokens
+      && !check.altGlobs?.length && typeof check.glob === "string"
+      && check.glob !== "" && !/[*?{}\[\]\\\0:]/u.test(check.glob)
+      && !path.posix.isAbsolute(check.glob) && !check.glob.split("/").includes("..")
+      ? check.glob : undefined;
     return {
       kind: "missing-evidence",
       recoverable: true,
       reason,
       next_call: probe !== undefined
-        ? { tool: "tl_search_files", arguments: { action: "find", query: probe } }
+        ? { tool: "tl_search_files", arguments: { action: "find", query: probe, ...(exactPath ? {path: exactPath} : {}) } }
         : { tool: "tl_read_file", arguments: { mode: "task_pack", query: reason } },
     };
   });

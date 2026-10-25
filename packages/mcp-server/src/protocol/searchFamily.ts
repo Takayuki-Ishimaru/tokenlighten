@@ -45,7 +45,7 @@ import { emittableToolCall } from "./refusal.js";
 // arbitration — see that module's header for the normative precedence
 // table findScopedNext/symbolsNext now defer to (thin adapters over
 // absentTermsOf/sanctionSearchContinuation).
-import { absentTermsOf, NO_ABSENT_TERMS, sanctionSearchContinuation } from "../features/search/nextActionPolicy.js";
+import { absentTermsOf, sanctionSearchContinuation } from "../features/search/nextActionPolicy.js";
 // W-T-D (DESIGN-v0.15-sf-turn-economy.md §4, default OFF): the search-dedup
 // wave's session-state and flag hooks. `state/session.ts` imports only
 // `util/laneKey.js`/`util/flags.js` (see its own header), so importing it
@@ -205,7 +205,15 @@ function foldLimit(input: {
  * residency honesty the 2026-08-09 range-honesty fix added.
  */
 const FIND_FIELDS = [
-  "query", "files", "total_files", "total_matches", "literal",
+  "query",
+  // TL_EFF_FIND_SNIPPET_CAP (2026-10-19): additive optional, read BEFORE the
+  // `files[]` it describes — which files carry `snippets` (the `top` with the
+  // most hits), how many carry `lines` only (`more`), and the `scope` that
+  // narrows the same find to show them all. See findText.ts `capFindSnippets`.
+  // Not a `Limit`: the cap withholds no matched file or line, so Rule T's
+  // `limit` still says exactly what `truncated` says.
+  "snippet_cap",
+  "files", "total_files", "total_matches", "literal",
   "inventory_complete", "matched_terms", "matched_variant", "did_you_mean",
   // S5 (C2-9, 2026-08-14) — raised with the `repeated-all-served-find` entry in
   // `refusal.ts` and revertible with it. `did_you_mean_basis` is the EVIDENCE
@@ -425,50 +433,18 @@ function projectFind(body: Body, args: Body): Body {
 // ---------------------------------------------------------------------------
 
 /**
- * The continuation a truncated `symbols` can name (A.9.2 row 19's sibling gap).
- *
- * `SearchSymbolsResult` has NO paging mechanism: `truncated` is a bare boolean
- * and there is no cursor, no `next_call`, and no `after`. But `total` is the
- * true pre-cap count and `limit` IS an advertised argument, so a re-issue with
- * an explicit `limit` equal to the true total is both executable and
- * progressive — the server SYNTHESISES the call the emitter never built.
- * Disclosed: this is a v1 addition, not a transcription.
- *
- * It is emitted ONLY when records actually remain (`total > locations.length`).
- * When every record was served and `truncated` is still set, the cut was the
- * byte fit shedding ROLE ANNOTATIONS (`searchSymbols.ts:220-229` sheds roles
- * before it would drop a location), and a larger `limit` returns exactly the
- * same page — so that case takes the `source` arm instead of promising a
- * recovery that does not exist (fold-rule clause 4).
- */
-/**
- * EXPORTED FOR THE BOUNDARY SHEDDER (P3a S3), and for nothing else. The
- * `symbols` rung-6 step drops trailing `locations[]` entries and needs the SAME
- * continuation this function builds for the emitter's own cut — one
- * implementation of "re-issue with an explicit `limit` equal to the true
- * total", not two. Zero wire effect: the export changes no call site here.
+ * Legacy compatibility hook for boundary projection. Symbols pagination now
+ * requires the authenticated cursor staged by the server and settled by the
+ * emit tail; a larger-limit restart repeats the first page and cannot safely
+ * recover rows shed from a producer-complete page. The shedder receives the
+ * staged cursor separately through `ShedContext.symbolCursorCall`.
  */
 export function symbolsNext(body: Body, args: Body): ToolCall | undefined {
-  const total = num(body["total"]) ?? 0;
-  const served = Array.isArray(body["locations"]) ? body["locations"].length : 0;
-  if (total <= served) return undefined;
-  const call: Body = { action: "symbols", limit: total };
-  const query = str(args["query"]);
-  if (query !== undefined) call["query"] = query;
-  const path = str(args["path"]);
-  if (path !== undefined) call["path"] = path;
-  if (query === undefined && path === undefined) return undefined;
-  const cwd = str(args["cwd"]);
-  if (cwd !== undefined) call["cwd"] = cwd;
-  const lang = str(args["lang"]);
-  if (lang !== undefined) call["lang"] = lang;
-  if (args["includeScores"] !== undefined) call["includeScores"] = args["includeScores"];
-  // `symbols` has no absence concept and never carries `queries[]`, so this
-  // is a genuine pass-through — see sanctionSearchContinuation's doc for why
-  // that still makes this a thin adapter rather than a special case.
-  const sanctioned = sanctionSearchContinuation(call, { absentTerms: NO_ABSENT_TERMS });
-  if (sanctioned === undefined) return undefined;
-  return emittableToolCall({ tool: "tl_search_files", arguments: sanctioned });
+  // There is deliberately no unauthenticated fallback. In particular, a
+  // persistence failure must not turn into a larger-limit loop.
+  void body;
+  void args;
+  return undefined;
 }
 
 function projectSymbols(body: Body, args: Body): Body {
@@ -491,17 +467,12 @@ function projectSymbols(body: Body, args: Body): Body {
     // that ran after it. Clause 3 sends the roles-only cut to `capped`, where
     // `omitted:["metadata"]` says what was shed without promising it back.
     //
-    // [R5-9]: the roles-only cut is the one place a "narrower symbols request"
-    // sounds constructible, and is not. It is reached precisely when
-    // `total <= locations.length` — every RECORD was served and the byte fit
-    // shed the role ANNOTATIONS off them (`searchSymbols.ts:220-229`). The only
-    // narrowing argument `symbols` has is `limit`, and `symbolsNext` already
-    // declined to build one for exactly this reason: re-issuing with any
-    // `limit` re-runs the same cut and returns the same roles-less rows. So
-    // `capped` — the metadata exists, this response could not carry it, and
-    // there is no call that gets it back.
-    records: next !== undefined,
-    omitted: next !== undefined ? ["results"] : ["metadata"],
+    // If every producer record is present but `truncated` remains set, the
+    // producer only shed role metadata (`searchSymbols.ts:220-229`). There are
+    // no missing result records to page; the metadata is disclosed as capped.
+    records: (num(body["total"]) ?? 0) > (Array.isArray(body["locations"]) ? body["locations"].length : 0),
+    omitted: (num(body["total"]) ?? 0) > (Array.isArray(body["locations"]) ? body["locations"].length : 0)
+      ? ["results"] : ["metadata"],
     next,
   });
   if (limit !== undefined) projected["limit"] = limit;

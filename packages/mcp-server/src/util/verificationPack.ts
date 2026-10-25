@@ -21,7 +21,9 @@ import { laneScopedKey } from "./laneKey.js";
 import { countLines } from "./countLines.js";
 import { projectRootOf } from "../features/locator/locateTaskContext.js";
 import { classifyNodeTestRunnability, type NodePackageManifestLike } from "./nodeTestRunnability.js";
-import type { TaskVerificationRecipe } from "@tokenlighten/types";
+import { choosePythonInterpreter, pythonInterpreterSeamInstalled } from "./pythonInterpreter.js";
+import type { SyntaxCheck, TaskVerificationRecipe } from "@tokenlighten/types";
+import {goVerificationEntry, goPackageName, samePackageGoTest} from "./goVerification.js";
 
 /**
  * Body state for a kit entry that carries no `code` in THIS response.
@@ -98,6 +100,23 @@ export interface MockHeaderEntry {
 }
 
 export interface HarnessInfo {
+  /**
+   * 2026-10-19 (decision window 6t-6): a ready-to-run `-fsyntax-only` check of
+   * the edited translation units, present exactly when no build system sits
+   * above the edits and the host has a compiler for their language. The kit
+   * used to say "verify by syntax-only compile" and stop there; every arm-A
+   * solver on that window's two C/C++ tasks then composed its own line, and
+   * 25 turns ($1.21) went to reading the toolchain's output wrong (see
+   * nativeSyntaxCheck). It checks that the edits compile, never what they do,
+   * so it rides beside `build_command`, not instead of it.
+   *
+   * 2026-10-20 (window 6t-7): for Python edits it is `<interpreter> -m
+   * py_compile`, present exactly when the PATH's python3 falls short of the
+   * project (requires-python, declared modules) and another interpreter
+   * meets it (pythonSyntaxCheck); its note says why and to run smoke checks
+   * with that interpreter.
+   */
+  syntax_check?: SyntaxCheck;
   /**
    * First "// Build:"/"# Compile:"/"* Run:"-style marker mined from a
    * referencing test's own header — or, when NO existing test documents one, a
@@ -186,7 +205,7 @@ export interface ToolchainInfo {
    */
   build_entry_absent?: boolean;
   test_entry?: string;
-  /** node only: directory whose package.json declared `scripts.test` ("" = workspace root). */
+  /** Directory of the detected Node test script or Go module ("." = workspace root). */
   test_entry_dir?: string;
   /**
    * node: install evidence is reachable from `test_entry_dir` (`node_modules`, Yarn PnP) or the script
@@ -344,10 +363,6 @@ const CONTRACT_RE = /\b(?:must|shall|required|guarantee|contract)\b|(?:するこ
 const MOCK_CONTROL_RE = /^\s*#\s*(?:define|ifn?def)\s+([A-Z][A-Z0-9_]{2,})\b/;
 const BUILD_DEFINE_RE = /(?:^|\s)-D([A-Z][A-Z0-9_]{2,})(?:=\S+)?/g;
 
-function goPackageName(content: string): string | undefined {
-  return /^\s*package\s+([A-Za-z_][A-Za-z0-9_]*)/m.exec(content)?.[1];
-}
-
 function isGoTestPath(relPath: string): boolean {
   return GO_SURFACE_EXTS.has(path.posix.extname(relPath).toLowerCase())
     && path.posix.basename(relPath).endsWith("_test.go");
@@ -357,6 +372,29 @@ function stemOf(relPath: string): string {
   const base = path.posix.basename(relPath);
   const dot = base.lastIndexOf(".");
   return (dot > 0 ? base.slice(0, dot) : base).toLowerCase();
+}
+
+// A repeated Node basename (run.mjs, index.ts, ...) is not a module identity.
+// Resolve relative module specifiers before accepting such a filename mention.
+// Keep the existing heuristic for unique names and non-Node languages.
+function nodeReferenceMatches(candidate: string, content: string, edited: string): boolean {
+  const extension = path.posix.extname(edited).toLowerCase();
+  const bare = edited.slice(0, -extension.length);
+  const aliases = new Set([edited, bare]);
+  if (extension === ".ts" || extension === ".tsx") aliases.add(bare + ".js");
+  if (extension === ".tsx") aliases.add(bare + ".jsx");
+  if (extension === ".mts") aliases.add(bare + ".mjs");
+  if (extension === ".cts") aliases.add(bare + ".cjs");
+  if (path.posix.basename(bare) === "index") aliases.add(path.posix.dirname(bare));
+  const specifiers = /\b(?:from\s*|import\s*\(\s*|require\s*\(\s*|import\s*)["']([^"'\r\n]+)["']/g;
+  for (const match of content.matchAll(specifiers)) {
+    const specifier = match[1]!;
+    if (!specifier.startsWith(".")) continue;
+    const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(candidate), specifier));
+    if (aliases.has(resolved)) return true;
+  }
+  // Test drivers also address scripts by an explicit workspace-relative path.
+  return edited.includes("/") && [JSON.stringify(edited), "'" + edited + "'"].some(literal => content.includes(literal));
 }
 
 function isMockish(relPath: string): boolean {
@@ -853,6 +891,334 @@ function synthesizeEntrypointCommandsForMinedHarness(
   return commands.length > 0 ? commands : undefined;
 }
 
+// ---------------------------------------------------------------------------
+// harness.syntax_check (2026-10-19, decision window 6t-6 forensics,
+// bench/workflows/runs/2026-10-19-v016-decision-6t-6, T05c and T13, arm A).
+// The kit said "verify by syntax-only compile" and named the compiler but gave
+// no command, so each of the six cells composed its own `clang++ -I…` line
+// (five of them `-fsyntax-only`). 25 turns ($1.21) then went to reading the
+// toolchain's output wrong: the macOS xcrun shim's "couldn't create cache
+// file" warning taken for a compile error, a `| grep -v` or `| head` status
+// taken for the compiler's. 18 of those turns came after such a kit. The
+// command below is composed from the edits' own #include directives,
+// resolved the way the preprocessor resolves them, and prints the compiler's
+// own exit status.
+// ---------------------------------------------------------------------------
+
+/** Translation units one command names before the rest are listed `unchecked`. */
+const SYNTAX_CHECK_MAX_UNITS = 8;
+/** Files one include closure reads; the closure decides `-I` roots and header coverage only. */
+const INCLUDE_SCAN_MAX_FILES = 200;
+/**
+ * POSIX shells: print the COMPILER's status. A pipe the caller adds reports
+ * its own (`| grep -v` exits 1 when it filters every line), which is one of
+ * the two misreadings this field exists to end.
+ */
+const SYNTAX_CHECK_EXIT_ECHO = '; echo "exit=$?"';
+const SYNTAX_CHECK_NOTE = "run from the workspace root: a clean pass prints only exit=0";
+const SYNTAX_CHECK_NOTE_WIN32 = "run from the workspace root: exit code 0 is a pass";
+/**
+ * The other misreading. On darwin, /usr/bin's clang++, clang, cc, git and
+ * python3 are xcrun shims, and a shell that cannot write the per-user temp dir
+ * xcrun caches in (a sandboxed one) prints this line on every call while the
+ * tool itself runs normally. Four of the window's six arm-A cells then spent
+ * 4-7 turns each on TMPDIR, SDK paths and deliberately broken files, proving
+ * that the compiler worked.
+ */
+const SYNTAX_CHECK_XCRUN_CLAUSE = "; a \"couldn't create cache file\" line is the macOS xcrun shim's, not a compile error";
+const INCLUDE_DIRECTIVE_RE = /^[ \t]*#[ \t]*include[ \t]*([<"])([^">\r\n]+)[">]/gm;
+
+/** `base/rel` normalized ("" = the workspace root), or undefined when it would leave the workspace. */
+function joinWorkspaceRel(base: string, rel: string): string | undefined {
+  const joined = path.posix.normalize(base === "" ? rel : `${base}/${rel}`);
+  if (joined === ".") return "";
+  if (joined === ".." || joined.startsWith("../") || path.posix.isAbsolute(joined)) return undefined;
+  return joined;
+}
+
+/** The workspace-relative directory holding `rel` ("" at the root). */
+function dirOfRel(rel: string): string {
+  const dir = path.posix.dirname(rel);
+  return dir === "." ? "" : dir;
+}
+
+/** Leading directory segments two workspace paths share. */
+function sharedDirSegments(a: string, b: string): number {
+  const left = dirOfRel(a).split("/");
+  const right = dirOfRel(b).split("/");
+  let shared = 0;
+  while (shared < left.length && shared < right.length && left[shared] !== "" && left[shared] === right[shared]) shared += 1;
+  return shared;
+}
+
+interface IncludeScan {
+  /** `-I` roots in first-need order ("" = the workspace root). */
+  roots: string[];
+  /** Every workspace file the scanned units reach, the units included. */
+  reached: Set<string>;
+  add(units: readonly string[]): void;
+}
+
+/**
+ * The preprocessor's own search, over the workspace's files: a quoted include
+ * first beside its includer, then every root found so far, then each ancestor
+ * D of the includer's directory as `D/<target>` and `D/include/<target>`, then
+ * the workspace header whose path ends in `/<target>` nearest the includer.
+ * A target the last two find contributes its root; a system header resolves
+ * to nothing and contributes nothing. Nothing here knows a project's names.
+ */
+function createIncludeScan(
+  byRel: ReadonlyMap<string, number>,
+  readContent: (rel: string) => string | undefined,
+): IncludeScan {
+  const roots: string[] = [];
+  const reached = new Set<string>();
+  const queue: string[] = [];
+  let scanned = 0;
+  let byBasename: Map<string, string[]> | undefined;
+  const endingIn = (target: string): string[] => {
+    if (byBasename === undefined) {
+      byBasename = new Map();
+      for (const rel of byRel.keys()) {
+        const name = path.posix.basename(rel);
+        const list = byBasename.get(name);
+        if (list === undefined) byBasename.set(name, [rel]);
+        else list.push(rel);
+      }
+    }
+    return (byBasename.get(path.posix.basename(target)) ?? []).filter((rel) => rel.endsWith(`/${target}`));
+  };
+  const resolve = (from: string, target: string, quoted: boolean): { rel: string; root?: string } | undefined => {
+    const fromDir = dirOfRel(from);
+    if (quoted) {
+      const local = joinWorkspaceRel(fromDir, target);
+      if (local !== undefined && byRel.has(local)) return { rel: local };
+    }
+    for (const root of roots) {
+      const viaRoot = joinWorkspaceRel(root, target);
+      if (viaRoot !== undefined && byRel.has(viaRoot)) return { rel: viaRoot };
+    }
+    for (let dir = fromDir; ; dir = dirOfRel(dir)) {
+      for (const base of [dir, joinWorkspaceRel(dir, HEADER_DIR_NAME)]) {
+        if (base === undefined) continue;
+        const candidate = joinWorkspaceRel(base, target);
+        if (candidate !== undefined && byRel.has(candidate)) return { rel: candidate, root: base };
+      }
+      if (dir === "") break;
+    }
+    if (target.startsWith("../")) return undefined;
+    const nearest = endingIn(target).sort((a, b) =>
+      sharedDirSegments(b, from) - sharedDirSegments(a, from) || a.length - b.length || a.localeCompare(b))[0];
+    return nearest === undefined ? undefined : { rel: nearest, root: nearest.slice(0, nearest.length - target.length - 1) };
+  };
+  return {
+    roots,
+    reached,
+    add(units) {
+      for (const unit of units) {
+        if (reached.has(unit)) continue;
+        reached.add(unit);
+        queue.push(unit);
+      }
+      while (queue.length > 0 && scanned < INCLUDE_SCAN_MAX_FILES) {
+        const rel = queue.shift()!;
+        scanned += 1;
+        const content = readContent(rel);
+        if (content === undefined) continue;
+        for (const match of content.matchAll(INCLUDE_DIRECTIVE_RE)) {
+          const target = path.posix.normalize(match[2]!.trim().replace(/\\/g, "/"));
+          if (target === "." || target === "" || path.posix.isAbsolute(target)) continue;
+          const hit = resolve(rel, target, match[1] === '"');
+          if (hit === undefined) continue;
+          if (hit.root !== undefined && !roots.includes(hit.root)) roots.push(hit.root);
+          if (reached.has(hit.rel)) continue;
+          reached.add(hit.rel);
+          queue.push(hit.rel);
+        }
+      }
+    },
+  };
+}
+
+/** The source a header declares: same stem beside it, or in the `src/`-style mirror of its `include/` directory. */
+function pairedSourceOfHeader(headerRel: string, byRel: ReadonlyMap<string, number>): string | undefined {
+  const ext = path.posix.extname(headerRel);
+  if (!NATIVE_HEADER_EXTS.includes(ext.toLowerCase())) return undefined;
+  const stem = path.posix.basename(headerRel, ext);
+  const dir = dirOfRel(headerRel);
+  for (const candidateDir of new Set([dir, ...SOURCE_DIR_NAMES.map((name) => mirrorDir(dir, HEADER_DIR_NAME, name))])) {
+    for (const sourceExt of NATIVE_SOURCE_EXTS) {
+      const rel = candidateDir === "" ? `${stem}${sourceExt}` : `${candidateDir}/${stem}${sourceExt}`;
+      if (byRel.has(rel)) return rel;
+    }
+  }
+  return undefined;
+}
+
+/** One shell word: as written when it needs no quoting, else quoted for the platform's shell. */
+function shellWord(word: string, platform: NodeJS.Platform): string {
+  if (/^[A-Za-z0-9_./+=:@%,-]+$/.test(word)) return word;
+  return platform === "win32" ? `"${word.replace(/"/g, '\\"')}"` : `'${word.replace(/'/g, "'\\''")}'`;
+}
+
+/** The `-std=` flag a documented build line states for each language family. */
+function documentedStd(text: string | undefined): { cxx?: string; c?: string } {
+  const out: { cxx?: string; c?: string } = {};
+  for (const match of (text ?? "").matchAll(/(?:^|\s)(-std=(\S+))/g)) {
+    const value = match[2]!.toLowerCase();
+    if (/^(?:c|gnu)\+\+/.test(value)) out.cxx ??= match[1]!;
+    else if (/^(?:c|gnu)\d|^iso9899:/.test(value)) out.c ??= match[1]!;
+  }
+  return out;
+}
+
+/**
+ * The ready-to-run syntax check of the native files among `paths`, or
+ * undefined when none exists on disk or the host has no compiler for any of
+ * them. Translation units are checked directly; a header through a checked
+ * unit that reaches it, else through the source it pairs with. `-I` roots
+ * come from createIncludeScan, `-std` from `options.std` (a documented build
+ * line) or the same defaults the synthesized harness command uses.
+ * Exported for the task pack's verify hint (readCodeTaskPack.ts
+ * discoverVerificationHints), which states the same command before any edit.
+ */
+export function nativeSyntaxCheck(
+  workspace: string,
+  paths: readonly string[],
+  options: {
+    toolchain?: Pick<ToolchainInfo, "cxx" | "cc">;
+    /** Workspace files to resolve includes against; walked when absent. */
+    byRel?: ReadonlyMap<string, number>;
+    std?: { cxx?: string; c?: string };
+    maxUnits?: number;
+    platform?: NodeJS.Platform;
+  } = {},
+): SyntaxCheck | undefined {
+  const extOf = (rel: string): string => path.posix.extname(rel).toLowerCase();
+  const native = [...new Set(paths.map((rel) => rel.replace(/\\/g, "/")))].filter((rel) => NATIVE_EXTS.has(extOf(rel)));
+  if (native.length === 0) return undefined;
+  const isFile = (rel: string): boolean => {
+    try {
+      return fs.statSync(path.join(workspace, rel)).isFile();
+    } catch {
+      return false;
+    }
+  };
+  const byRel = options.byRel
+    ?? new Map(walkCodeFiles(workspace, {}).map((file) => [file.relPath.replace(/\\/g, "/"), 0] as const));
+  const readContent = (rel: string): string | undefined => readSmall(workspace, rel);
+  const toolchain = options.toolchain ?? probeToolchain();
+  const platform = options.platform ?? process.platform;
+  const maxUnits = options.maxUnits ?? SYNTAX_CHECK_MAX_UNITS;
+  const families = [
+    { compiler: toolchain.cxx, std: options.std?.cxx ?? SYNTH_CXX_STD, units: [] as string[], scan: createIncludeScan(byRel, readContent) },
+    { compiler: toolchain.cc, std: options.std?.c ?? SYNTH_C_STD, units: [] as string[], scan: createIncludeScan(byRel, readContent) },
+  ];
+  const familyOf = (rel: string) => families[extOf(rel) === ".c" ? 1 : 0]!;
+  /** Make `unit` a checked translation unit; false when its family has no compiler or no room. */
+  const enroll = (unit: string): boolean => {
+    const family = familyOf(unit);
+    if (family.units.includes(unit)) return true;
+    if (family.compiler === undefined || family.units.length >= maxUnits) return false;
+    family.units.push(unit);
+    family.scan.add([unit]);
+    return true;
+  };
+  const unchecked: string[] = [];
+  for (const rel of native) {
+    if (NATIVE_SOURCE_EXTS.has(extOf(rel)) && isFile(rel) && !enroll(rel)) unchecked.push(rel);
+  }
+  for (const header of native) {
+    if (NATIVE_SOURCE_EXTS.has(extOf(header)) || !isFile(header)) continue;
+    if (families.some((family) => family.scan.reached.has(header))) continue;
+    const paired = pairedSourceOfHeader(header, byRel);
+    if (paired !== undefined && enroll(paired) && familyOf(paired).scan.reached.has(header)) continue;
+    unchecked.push(header);
+  }
+  const commands = families
+    .filter((family) => family.units.length > 0)
+    .map((family) => [
+      family.compiler!,
+      family.std,
+      "-fsyntax-only",
+      ...family.scan.roots.map((root) => `-I ${shellWord(root === "" ? "." : root, platform)}`),
+      ...family.units.map((unit) => shellWord(unit, platform)),
+    ].join(" ") + (platform === "win32" ? "" : SYNTAX_CHECK_EXIT_ECHO));
+  if (commands.length === 0) return undefined;
+  return {
+    commands,
+    ...(unchecked.length > 0 ? { unchecked } : {}),
+    note: platform === "win32"
+      ? SYNTAX_CHECK_NOTE_WIN32
+      : `${SYNTAX_CHECK_NOTE}${platform === "darwin" ? SYNTAX_CHECK_XCRUN_CLAUSE : ""}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The Python counterpart (2026-10-20, decision window 6t-7 forensics,
+// bench/workflows/runs/2026-10-20-v016-decision-6t-7, T10 arm A). The edit kit
+// said verification was not applicable to the edited module (no referencing
+// test, mock or compile fact) and the first pack asked for "ONE smoke run"
+// without naming an interpreter. The host's python3 was the Xcode shim's 3.9.6
+// against requires-python >=3.10, and every cell spent 4-7 Bash turns finding
+// /opt/homebrew/bin/python3.12. pythonInterpreter.ts picks the interpreter;
+// this states the check and why.
+// ---------------------------------------------------------------------------
+
+/**
+ * `<interpreter> -m py_compile <files>` for the .py files among `paths`, with
+ * pythonInterpreter.ts's one-line why, or undefined when the PATH's python3
+ * already satisfies their project (the common case adds nothing), when no
+ * candidate does, or when a test pinned the toolchain lookup
+ * (setToolchainPathLookupForTest) without pinning the Python probe. Exported
+ * for the task pack's verify (readCodeTaskPack.ts discoverVerificationHints
+ * and attachPythonInterpreterHint), which states the same check before any
+ * edit.
+ */
+export function pythonSyntaxCheck(
+  workspace: string,
+  paths: readonly string[],
+  options: {
+    /** Modules the caller knows the target needs (openpyxl for an .xlsx source). */
+    extraModules?: readonly string[];
+    maxUnits?: number;
+    platform?: NodeJS.Platform;
+    /** Accept files not on disk yet: a pack's create target. */
+    includeMissing?: boolean;
+  } = {},
+): SyntaxCheck | undefined {
+  if (pathLookupOverride !== undefined && !pythonInterpreterSeamInstalled()) return undefined;
+  const platform = options.platform ?? process.platform;
+  const files = [...new Set(paths.map((rel) => path.posix.normalize(rel.replace(/\\/g, "/"))))]
+    .filter((rel) => path.posix.extname(rel).toLowerCase() === ".py")
+    .filter((rel) => {
+      if (options.includeMissing === true) return true;
+      try {
+        return fs.statSync(path.join(workspace, rel)).isFile();
+      } catch {
+        return false;
+      }
+    });
+  if (files.length === 0) return undefined;
+  const clause = platform === "darwin" ? SYNTAX_CHECK_XCRUN_CLAUSE : "";
+  const choice = choosePythonInterpreter(workspace, files, {
+    locate: locateOnPath,
+    ...(options.extraModules !== undefined ? { extraModules: options.extraModules } : {}),
+    noteMaxBytes: KIT_NOTE_MAX_BYTES - Buffer.byteLength(clause, "utf8"),
+  });
+  if (choice === undefined) return undefined;
+  const checked = choice.files.slice(0, options.maxUnits ?? SYNTAX_CHECK_MAX_UNITS);
+  const unchecked = files.filter((rel) => !checked.includes(rel));
+  return {
+    commands: [
+      [choice.interpreter, "-m", "py_compile", ...checked].map((word) => shellWord(word, platform)).join(" ")
+        + (platform === "win32" ? "" : SYNTAX_CHECK_EXIT_ECHO),
+    ],
+    ...(unchecked.length > 0 ? { unchecked } : {}),
+    note: `${choice.note}${clause}`,
+  };
+}
+
 /**
  * `rel:line` of every assertion line whose ±24-line window contains EVERY
  * behavior anchor. Exported for the P1 evidence resolver (D7 behavioral
@@ -969,7 +1335,8 @@ function executableSuffixes(): readonly string[] {
   return ["", ...exts];
 }
 
-function findOnPath(candidates: readonly string[]): string | undefined {
+/** The first PATH hit among `candidates`: PATH order first, then candidate priority, then suffix. */
+function firstOnPath(candidates: readonly string[]): { dir: string; name: string; suffix: string } | undefined {
   // path.delimiter is ";" on win32 and ":" elsewhere — a hardcoded ":" both
   // fails to split a win32 PATH and mis-splits inside each entry's drive
   // letter ("C:\\..."); see core2/config.ts's TOKENLIGHTEN_ALLOWED_PARENTS
@@ -981,11 +1348,7 @@ function findOnPath(candidates: readonly string[]): string | undefined {
     for (const name of candidates) {
       for (const suffix of suffixes) {
         try {
-          // The BARE name is returned, never `name + suffix`: the value is
-          // spelled into a verification command, and every Windows shell
-          // resolves `clang++` through PATHEXT itself — so the emitted
-          // manifest stays identical across platforms.
-          if (fs.existsSync(path.join(dir, name + suffix))) return name;
+          if (fs.existsSync(path.join(dir, name + suffix))) return { dir, name, suffix };
         } catch {
           // unreadable PATH entry — keep scanning
         }
@@ -993,6 +1356,24 @@ function findOnPath(candidates: readonly string[]): string | undefined {
     }
   }
   return undefined;
+}
+
+function findOnPath(candidates: readonly string[]): string | undefined {
+  // The BARE name is returned, never `name + suffix`: the value is spelled
+  // into a verification command, and every Windows shell resolves `clang++`
+  // through PATHEXT itself — so the emitted manifest stays identical across
+  // platforms.
+  return firstOnPath(candidates)?.name;
+}
+
+/**
+ * Where `name` resolves on PATH: the absolute path of the file found, suffix
+ * included. pythonSyntaxCheck probes and names one specific interpreter, so
+ * unlike findOnPath it needs the file, not the name a shell would resolve.
+ */
+function locateOnPath(name: string): string | undefined {
+  const hit = firstOnPath([name]);
+  return hit === undefined ? undefined : path.resolve(hit.dir, hit.name + hit.suffix);
 }
 
 /** PATH lookup seam: `(candidates) => first name present`, injectable for tests. */
@@ -1253,7 +1634,8 @@ function detectTestEntry(
             && goPackageName(readSmall(workspace, editedRel) ?? "") === testPackage);
         });
       if (hasSamePackageTest && roots.some((root) => GO_TEST_MARKER_NAMES.some((name) => existsAtRoot(workspace, root, name)))) {
-        return { command: "go test ./pkg/...", deps_installed: (pathLookupOverride ?? findOnPath)(GO_CANDIDATES) !== undefined };
+        const entry = goVerificationEntry(workspace, editedGoFiles);
+        if (entry) return {...entry, deps_installed: (pathLookupOverride ?? findOnPath)(GO_CANDIDATES) !== undefined};
       }
     }
     return undefined;
@@ -1346,7 +1728,7 @@ export const KIT_NOTE_MAX_BYTES = 240;
 
 /** verify_strategy === "harness". */
 const KIT_NOTE_HARNESS =
-  "referencing tests exist — verify through the handles above; compile_facts/link_set close standalone-compile failures";
+  "referencing tests exist — follow harness/recipe; read only bodies named by next; compile_facts/link_set close standalone-compile failures";
 
 /** verify_strategy === "syntax_only+diff". */
 const KIT_NOTE_SYNTAX_ONLY =
@@ -1571,6 +1953,15 @@ export function buildVerificationManifest(
      * (module-level cache leaking across pack builds in one workspace).
      */
     dedupeConsecutive?: boolean;
+    /**
+     * 2026-10-20 (window 6t-7): add the Python interpreter check
+     * (pythonSyntaxCheck) as harness.syntax_check when no native check holds
+     * it. Opt-in for the edit-response kit (server.ts), like
+     * `dedupeConsecutive`: it can start interpreter probes, and the
+     * structural callers (the completion recipe, verify obligations) never
+     * asked which interpreter runs the edit.
+     */
+    pythonSyntaxCheck?: boolean;
   } = {},
 ): VerificationManifest | undefined {
   const edited = [...new Set(editedRelPaths.map((p) => p.replace(/\\/g, "/")).filter((p) => p.length > 0))];
@@ -1623,18 +2014,23 @@ export function buildVerificationManifest(
   // resolves to a real project root, the rooted members define the project
   // set and rootless strays ride along with them.
   const editedRoots = new Set(rootedEditedRoots.length > 0 ? rootedEditedRoots : editedRootsAll);
-  const matched: Array<{ rel: string; role: "test" | "mock"; bytes: number; refs: string[]; content: string; overlap: number }> = [];
+  const nodeNameCounts = new Map<string, number>();
+  for (const file of walked) {
+    if (!NODE_SURFACE_EXTS.has(path.posix.extname(file.rel).toLowerCase())) continue;
+    const name = path.posix.basename(file.rel).toLowerCase();
+    nodeNameCounts.set(name, (nodeNameCounts.get(name) ?? 0) + 1);
+  }
+  const ambiguousNodeEdits = new Set(edited.filter(rel =>
+    NODE_SURFACE_EXTS.has(path.posix.extname(rel).toLowerCase())
+    && (nodeNameCounts.get(path.posix.basename(rel).toLowerCase()) ?? 0) > 1));
+  const matched: Array<{ rel: string; role: "test" | "mock"; bytes: number; refs: string[]; content: string; overlap: number; direct: number }> = [];
   for (const file of walked) {
     if (editedSet.has(file.rel)) continue;
     if (!editedRoots.has(projectRootOf(file.rel, workspace))) continue;
     const mock = isMockish(file.rel);
     const goPairEdited = isGoTestPath(file.rel)
       ? edited.filter((editedRel) => {
-        if (!GO_SURFACE_EXTS.has(path.posix.extname(editedRel).toLowerCase())) return false;
-        if (path.posix.dirname(editedRel) !== path.posix.dirname(file.rel)) return false;
-        const editedPackage = goPackageName(readSmall(workspace, editedRel) ?? "");
-        const testPackage = goPackageName(readSmall(workspace, file.rel) ?? "");
-        return editedPackage !== undefined && editedPackage === testPackage;
+        return samePackageGoTest(editedRel, readSmall(workspace, editedRel) ?? "", file.rel, readSmall(workspace, file.rel) ?? "");
       })
       : [];
     const goPair = goPairEdited.length > 0;
@@ -1644,7 +2040,14 @@ export function buildVerificationManifest(
     if (content === undefined) continue;
     const lower = content.toLowerCase();
     const refs = new Set<string>();
-    for (const [needle, rel] of needles) if (lower.includes(needle)) refs.add(rel);
+    const directRefs = edited.filter(rel =>
+      NODE_SURFACE_EXTS.has(path.posix.extname(rel).toLowerCase()) && nodeReferenceMatches(file.rel, content, rel));
+    for (const [needle, rel] of needles) {
+      if (lower.includes(needle) && (!ambiguousNodeEdits.has(rel) || directRefs.includes(rel))) refs.add(rel);
+    }
+    // Short stems (run) were not needles at all. A resolved import is stronger
+    // evidence than the four-character fallback threshold.
+    for (const rel of directRefs) refs.add(rel);
     if (goPair) {
       for (const editedRel of goPairEdited) refs.add(editedRel);
     }
@@ -1655,10 +2058,11 @@ export function buildVerificationManifest(
     if (relevanceGateActive) {
       for (const tok of identifierTokens(content)) if (changedIdentifiers.has(tok)) overlap += 1;
     }
-    matched.push({ rel: file.rel, role: mock ? "mock" : "test", bytes: file.bytes, refs: [...refs].sort(), content, overlap });
+    matched.push({ rel: file.rel, role: mock ? "mock" : "test", bytes: file.bytes, refs: [...refs].sort(), content, overlap, direct: directRefs.length });
   }
   matched.sort((a, b) =>
-    b.refs.length - a.refs.length
+    b.direct - a.direct
+    || b.refs.length - a.refs.length
     || b.overlap - a.overlap
     || (a.role === b.role ? 0 : a.role === "test" ? -1 : 1)
     || a.bytes - b.bytes
@@ -1687,6 +2091,7 @@ export function buildVerificationManifest(
     : matched.filter((entry) =>
       entry.role === "mock"
       || entry.rel === harnessEntryRel
+      || entry.direct > 0
       || entry.overlap > 0);
   const selected = relevant.slice(0, MAX_SURFACES);
   const surfacesOmitted = relevant.length - selected.length;
@@ -1789,11 +2194,9 @@ export function buildVerificationManifest(
     }
   }
 
-  if (selected.length === 0 && compileFacts.length === 0 && linkCandidates.length === 0) return undefined;
-
-  // ---- harness: build-command mining + mock-header inventory. Computed only
-  // now that we know a manifest will be returned — enrichment alone must
-  // never turn an otherwise-undefined manifest into a defined one. ----
+  // ---- build-command mining. It reads only `selected`, so it can never turn
+  // an otherwise-undefined manifest into a defined one; it runs before the
+  // gate below because harness.syntax_check reuses the `-std` it documents. ----
   let buildCommand: { text: string; source: string } | undefined;
   for (const entry of selected) {
     if (entry.role !== "test") continue;
@@ -1803,6 +2206,37 @@ export function buildVerificationManifest(
       break;
     }
   }
+  // harness.syntax_check: a native edit with no build system above it, on a
+  // host with a compiler for its language, has one thing worth saying even
+  // when nothing references it, which is how to compile it. That is why it is
+  // decided before the gate; the toolchain block below reuses the probe and
+  // the build-entry walk.
+  let probed: ToolchainProbe | undefined;
+  const probeOnce = (): ToolchainProbe => (probed ??= probeToolchain());
+  const firstNativeDir = nativeEdited.length > 0 ? path.posix.dirname(nativeEdited[0]!) : undefined;
+  const nativeBuildEntry = firstNativeDir === undefined
+    ? undefined
+    : findBuildEntry(workspace, firstNativeDir === "." ? "" : firstNativeDir);
+  const nativeCheck = firstNativeDir !== undefined && nativeBuildEntry === undefined
+    ? nativeSyntaxCheck(workspace, nativeEdited, { toolchain: probeOnce(), byRel, std: documentedStd(buildCommand?.text) })
+    : undefined;
+  // The Python counterpart decides before the gate for the same reason: an
+  // edited module nothing references still has an interpreter worth naming
+  // when the PATH's python3 cannot run it.
+  const syntaxCheck = nativeCheck
+    ?? (options.pythonSyntaxCheck === true ? pythonSyntaxCheck(workspace, edited) : undefined);
+
+  const testEntryRoots = [...new Set(editedRootsAll)];
+  if (!testEntryRoots.includes("")) testEntryRoots.push("");
+  // Editing a same-package Go test removes it from referencing surfaces, but
+  // does not erase its proven module suite or require a new exploratory read.
+  const goTestEntry = edited.some(rel => GO_SURFACE_EXTS.has(path.posix.extname(rel).toLowerCase()))
+    ? detectTestEntry(workspace, testEntryRoots, edited) : undefined;
+  if (selected.length === 0 && compileFacts.length === 0 && linkCandidates.length === 0 && syntaxCheck === undefined && goTestEntry === undefined) return undefined;
+
+  // ---- harness: mock-header inventory. Computed only now that we know a
+  // manifest will be returned — enrichment alone must never turn an
+  // otherwise-undefined manifest into a defined one. ----
   // Cross-family guard (2026-08-27 field-eval defect): mock_headers is a
   // NATIVE-only kit family by contract — MockHeaderEntry's own doc says so
   // ("Native mock headers (.h/.hpp/.hh/.hxx)") — but this filter chain only
@@ -1901,20 +2335,17 @@ export function buildVerificationManifest(
     };
   });
   // ---- toolchain: local compiler/build-entry/test-entry facts.
-  const testEntryRoots = [...new Set(editedRootsAll)];
-  if (!testEntryRoots.includes("")) testEntryRoots.push("");
-  const testEntry = detectTestEntry(workspace, testEntryRoots, edited);
+  const testEntry = goTestEntry ?? detectTestEntry(workspace, testEntryRoots, edited);
   const nativeRelevant = compileFacts.length > 0 || linkSet.length > 0 || nativeEdited.length > 0;
   const pythonRelevant = edited.some((rel) => PYTHON_SURFACE_EXTS.has(path.posix.extname(rel).toLowerCase()));
   const goRelevant = edited.some((rel) => GO_SURFACE_EXTS.has(path.posix.extname(rel).toLowerCase()));
   let toolchain: ToolchainInfo | undefined;
   let buildEntryAbsent = false;
   if (nativeRelevant || testEntry !== undefined) {
-    const probe = nativeRelevant || pythonRelevant || goRelevant ? probeToolchain() : undefined;
+    const probe = nativeRelevant || pythonRelevant || goRelevant ? probeOnce() : undefined;
     let buildEntry: string | undefined;
     if (nativeEdited.length > 0) {
-      const firstNativeDir = path.posix.dirname(nativeEdited[0]!);
-      buildEntry = findBuildEntry(workspace, firstNativeDir === "." ? "" : firstNativeDir);
+      buildEntry = nativeBuildEntry;
       buildEntryAbsent = buildEntry === undefined;
     }
     const toolchainCandidate: ToolchainInfo = {
@@ -1925,7 +2356,7 @@ export function buildVerificationManifest(
       ...(buildEntry !== undefined ? { build_entry: buildEntry } : {}),
       ...(buildEntryAbsent ? { build_entry_absent: true } : {}),
       ...(testEntry !== undefined ? { test_entry: testEntry.command } : {}),
-      ...(testEntry?.dir !== undefined ? { test_entry_dir: testEntry.dir } : {}),
+      ...(testEntry?.dir !== undefined ? { test_entry_dir: testEntry.dir === "" ? "." : testEntry.dir } : {}),
       ...(testEntry?.deps_installed !== undefined ? { deps_installed: testEntry.deps_installed } : {}),
       ...(testEntry?.deps_installed === false ? { verify_note: VERIFY_NO_DEPS_NOTE } : {}),
       ...(testEntry !== undefined && testEntry.deps_installed === undefined ? { verify_note: VERIFY_NOT_DETERMINABLE_NOTE } : {}),
@@ -1990,9 +2421,10 @@ export function buildVerificationManifest(
   const harnessLinkCandidates = synthesized?.link_candidates;
   const entrypointCommands = synthesized?.entrypoint_commands ?? entrypointCommandsAlongsideMining;
   const harness: HarnessInfo | undefined =
-    harnessCommand !== undefined || harnessLinkCandidates !== undefined || mockHeaders.length > 0
+    syntaxCheck !== undefined || harnessCommand !== undefined || harnessLinkCandidates !== undefined || mockHeaders.length > 0
       || (authoringLikely && nativeRelevant)
       ? {
+          ...(syntaxCheck !== undefined ? { syntax_check: syntaxCheck } : {}),
           ...(harnessCommand !== undefined ? { build_command: harnessCommand } : {}),
           ...(synthesizedCommand !== undefined ? { build_command_synthesized: true as const } : {}),
           ...(entrypointCommands !== undefined ? { entrypoint_commands: entrypointCommands } : {}),
@@ -2078,7 +2510,7 @@ export function buildVerificationManifest(
   }
 
   const strategy: VerificationManifest["verify_strategy"] =
-    surfaces.some((s) => s.role === "test") ? "harness" : "syntax_only+diff";
+    surfaces.some((s) => s.role === "test") || goTestEntry !== undefined ? "harness" : "syntax_only+diff";
   // D3 (W3, 2026-08-07 L3 recalibration): this clause used to be conditioned
   // on `buildEntryAbsent` ALONE and always named `harness.build_command` —
   // but build-entry absence says nothing about which harness field the
@@ -2106,7 +2538,11 @@ export function buildVerificationManifest(
     // S2: canonical sentence only. The delivery policy that used to ride here
     // every time (body states, inline budget, build_command provenance) is
     // invariant, so it lives in the agent guide and is paid once per session.
-    note: (strategy === "harness" ? KIT_NOTE_HARNESS : KIT_NOTE_SYNTAX_ONLY) + buildEntryAbsentNote,
+    note: (goTestEntry !== undefined && surfaces.length === 0
+      ? "module test entry found — run it from toolchain.test_entry_dir; edited tests are already in the edit context"
+      : toolchain?.test_entry !== undefined && toolchain.deps_installed === true
+        ? "run toolchain.test_entry from toolchain.test_entry_dir; use served test context; read only omitted bodies via next"
+        : strategy === "harness" ? KIT_NOTE_HARNESS : KIT_NOTE_SYNTAX_ONLY) + buildEntryAbsentNote,
   };
   // K3 (2026-08-01 verify-kit-diet): a workspace whose kit content is
   // byte-identical to what THIS function returned last call gets a compact

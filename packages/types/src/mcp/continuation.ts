@@ -261,7 +261,7 @@ export interface SearchRequestState {
    * (every record written before this field existed IS a find request; the
    * only other member, `"references"`, is always written explicitly).
    */
-  action?: "find" | "references";
+  action?: "find" | "references" | "symbols";
   id: string;
   workspace_ref: string;
   lane?: string;
@@ -335,7 +335,58 @@ export interface SearchRequestState {
    * snapshot instead and leaves this undefined.
    */
   resume_position?: { path: string; line: number; sha: string };
+  /** `action:"symbols"` only: binds the complete ranked source/index inputs. */
+  source_fingerprint?: string;
+}
+
+/** Admission hint only: restart or intervening calls use fixed-range recovery. */
+export interface ReadCallDispatchBinding {
+  nonce: string;
+  generation: number;
+}
+
+/** One immutable semantic read next, addressed by the existing read cursor. */
+export interface ReadCallContinuationState {
+  v: 1;
+  family: "read-call";
+  id: string;
+  workspace_ref: string;
+  lane: string;
+  task_handle: string;
+  task_fingerprint: string;
+  /** Exact canonical call, excluding cwd/lane/cursor. No source bodies. */
+  original_input: Record<string, unknown>;
+  input_fingerprint: string;
+  /** Authenticated response profile; redundant client echoes cannot alter the call. */
+  response_profile?: "answer" | "generic";
+  /** Ephemeral read-only batch membership. Losing the group permits fixed-range recovery only. */
+  batch_group?: string;
+  /** All revisions of a read-only batch, including files served by its siblings. */
+  batch_source_bindings?: Array<{path: string; sha: string}>;
+  dispatch_binding: ReadCallDispatchBinding;
+  source_bindings: Array<{path: string; sha: string}>;
+  created_at_ms: number;
+  expires_at_ms: number;
+}
+
+/** Durable indirection for a shorter, caller-transcribed read-call cursor. */
+export interface ReadCallCursorAliasRecord {
+  v: 1;
+  family: "read-call-cursor-alias";
+  alias: string;
+  canonical_cursor: string;
+  payload_ref: string;
+  lane: string;
+  expires_at_ms: number;
+}
+
+/** Independent once-only semantic dispatch claim; never a mutable next pointer. */
+export interface ReadCallExecutionClaim {
+  v: 1;
+  family: "read-call-execution";
+  digest: string;
+  status: "pending" | "claimed";
 }
 
 /** The discriminated union every request-purpose state handle addresses. */
-export type FetchRequestState = ReadRequestState | SearchRequestState;
+export type FetchRequestState = ReadRequestState | SearchRequestState | ReadCallContinuationState;

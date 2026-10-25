@@ -270,7 +270,8 @@ function shedSymbolLocation(payload: ShedPayload, context: ShedContext): ShedOut
 
   const withoutDropped = withKey(matches, "locations", trimmed.next);
   const nextMatches = withDecrementedSymbolCoverage(withoutDropped, trimmed.dropped);
-  const continuation = symbolsNext(nextMatches, { ...(context.args ?? {}) });
+  const continuation = context.symbolCursorCall
+    ?? symbolsNext(nextMatches, { ...(context.args ?? {}) });
   if (continuation === undefined) return undefined;
 
   return {

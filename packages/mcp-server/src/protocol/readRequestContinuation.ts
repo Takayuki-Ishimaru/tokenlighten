@@ -233,6 +233,22 @@ function shippedWindowsByPath(payload: ShedPayload): Map<string, LineWindow[]> |
     }
     const body = Array.isArray(evidence) ? raw["body"] : raw["content"];
     const range = raw["range"];
+    // v0.16.0 release verification (T08/T09): a row that RESTATES a window as
+    // held — `prior`, no body: the ledger-difference projection of a partly
+    // overlapping read — is delivered by reference. The caller was told, on
+    // this very response, that it already holds those lines and where they were
+    // served, so they leave D exactly like a body would take them out of it.
+    // Without this a request opened with C = ∅ (a `force_serve` origin, which
+    // WP-S10's small-window reserve stamps on a small explicit window while the
+    // slice door still answers it with a difference) kept every restated window
+    // in D: the fresh row carried `remaining` for lines the same response
+    // restated as `prior`, and `limit.next` minted a cursor whose only page was
+    // a bare `code-unchanged` receipt — a whole round trip for no new line.
+    if (typeof body !== "string" && Array.isArray(evidence) && typeof raw["prior"] === "string" && typeof range === "string") {
+      const restated = parseWindow(range);
+      if (restated !== undefined) map.get(path)!.push(restated);
+      continue;
+    }
     if (typeof body !== "string" || typeof range !== "string") continue;
     const window = parseWindow(range);
     if (window === undefined) continue;
@@ -421,6 +437,44 @@ function unitedElided(existing: unknown, restated: readonly string[]): string[] 
   return [...seen.values()]
     .sort((a, b) => a.start - b.start || a.end - b.end)
     .map((window) => `${window.start}-${window.end}`);
+}
+
+/**
+ * 2026-10-24 (read-page ceiling): `elidedByPath` restated as `elided` on the
+ * FIRST evidence row of each path (and, for a `read.batch`, on the first entry
+ * that carries a body for it) -- `rewriteContinuation`'s own restatement, for a
+ * page that has no continuation to rewrite. United with what the row already
+ * names (`unitedElided`), so a page whose producer disclosed the same windows
+ * comes back by IDENTITY.
+ */
+function restateElidedWindows(payload: ShedPayload, elidedByPath: ReadonlyMap<string, string[]>): ShedPayload {
+  if (elidedByPath.size === 0) return payload;
+  let changed = false;
+  const claimed = new Set<string>();
+  const restate = (rows: unknown, hasBody: (row: Record<string, unknown>) => boolean): unknown => {
+    if (!Array.isArray(rows)) return rows;
+    return rows.map((row) => {
+      if (!isRecord(row)) return row;
+      const path = row["path"];
+      if (typeof path !== "string" || claimed.has(path) || !hasBody(row)) return row;
+      claimed.add(path);
+      const restated = elidedByPath.get(path);
+      if (restated === undefined) return row;
+      const united = unitedElided(row["elided"], restated);
+      const existing = Array.isArray(row["elided"]) ? (row["elided"] as unknown[]) : [];
+      if (united.length === existing.length && united.every((window, index) => window === existing[index])) return row;
+      changed = true;
+      return { ...row, elided: united };
+    });
+  };
+  const evidence = restate(payload["evidence"], (row) => typeof row["body"] === "string");
+  const entries = restate(payload["entries"], (row) => typeof row["content"] === "string");
+  if (!changed) return payload;
+  return {
+    ...payload,
+    ...(evidence !== payload["evidence"] ? { evidence } : {}),
+    ...(entries !== payload["entries"] ? { entries } : {}),
+  };
 }
 
 /**
@@ -669,9 +723,40 @@ export function applyReadRequestContinuation(
      * plain cursor.
      */
     refusalOfBatch?: boolean;
+    /** The client ceiling made a requested line impossible; close without minting a retry cursor. */
+    terminalReadCeilingRefusal?: boolean;
+    /**
+     * 2026-10-24 (read-page ceiling): the page was bound to the client's response
+     * ceiling, and when the request cannot be PERSISTED (the state store is off or
+     * unwritable, so there is no cursor to mint) its continuation is the
+     * remainder as a plain windowed read instead of the producer's own `next`.
+     * That `next` names what the last shed rung cut and nothing the earlier rungs
+     * did -- a page of several comment-separated segments cut twice owed the
+     * first cut to no call at all -- whereas D, computed from what the finalized
+     * payload ships, is exact. Absent = a request that cannot be persisted keeps
+     * the producer's `next`, as before.
+     */
+    stateless?: boolean;
+    /**
+     * 2026-10-24 (read-page ceiling): the page was bound to the client's
+     * response ceiling, so a request that this page COMPLETES restates its
+     * policy-elided comment windows as `elided` on the first row of each path,
+     * as every page that carries a continuation does. A multi-file
+     * `content:"full"` read pages file by file, and the file that first appears on
+     * the chain's last page is on no page that restates them: its comment blocks
+     * were left out, as the default policy says, and named nowhere. Absent = a
+     * completing page carries what its producer wrote, as before.
+     */
+    restateElided?: boolean;
   },
 ): ShedPayload {
   if (staged === undefined) return payload;
+  if (claim.terminalReadCeilingRefusal === true) {
+    // This request cannot progress under the same client profile. Remove it from
+    // open-request lookup so a later unrelated read cannot inherit a dead end.
+    markReadRequestOpenness(staged, true);
+    return payload;
+  }
   // WHICH RESPONSES THIS OWNS, AND WHY IT IS NOT ALL OF THEM.
   //
   // A `resume` is always ours: a cursor call exists only to continue this
@@ -710,7 +795,9 @@ export function applyReadRequestContinuation(
     return rewriteContinuation(payload, restartCall(staged, refusalFloor), new Map<string, string[]>(), []);
   }
   const settled = settleReadRequest(staged, shippedWindowsByPath(payload));
-  if (settled === undefined) return payload;
+  if (settled === undefined) {
+    return claim.stateless === true ? statelessContinuation(payload, staged) : payload;
+  }
 
   const paths = new Set(settled.targets.map((target) => target.path));
   const complete = readRequestComplete(settled);
@@ -720,7 +807,10 @@ export function applyReadRequestContinuation(
   // instead of ending as an unrelated next-less receipt. Dropped again the
   // moment a settle (this one, or one run from that later lookup) empties D.
   markReadRequestOpenness(staged, complete);
-  if (complete) return clearContinuation(payload, paths);
+  if (complete) {
+    const cleared = clearContinuation(payload, paths);
+    return claim.restateElided === true ? restateElidedWindows(cleared, elidedByPathOf(settled.targets)) : cleared;
+  }
 
   const cursor = mintReadCursor(staged);
   if (cursor === undefined) return payload;
@@ -767,6 +857,63 @@ function budgetedCursorCall(staged: StagedReadRequest, cursor: string, budgetByt
     budget: { bytes: budgetBytes },
     ...echoedIdentity(staged),
   }) as ToolCall;
+}
+
+/**
+ * 2026-10-24 (read-page ceiling): the continuation of a request that cannot be
+ * persisted -- D as the plain windowed read a caller could type: one target per
+ * path that still owes lines, `range` for one window and `ranges` for several,
+ * the request's own comment policy (`select.comments:"keep"` when it kept them),
+ * and the call-scoping members every continuation here echoes. `undefined`
+ * when nothing is owed. Executing it opens a new request over just those
+ * windows, so a chain of them converges exactly as a chain of cursors does.
+ */
+function remainderCall(
+  staged: StagedReadRequest,
+  remaining: ReadonlyMap<string, readonly LineWindow[]>,
+): ToolCall | undefined {
+  const targets: Array<Record<string, unknown>> = [];
+  let keepComments = false;
+  for (const target of staged.state.targets) {
+    const windows = windowStrings([...(remaining.get(target.path) ?? [])]);
+    if (windows.length === 0) continue;
+    if (target.representation.comments === "keep") keepComments = true;
+    targets.push(windows.length === 1
+      ? { path: target.path, range: windows[0]! }
+      : { path: target.path, ranges: windows });
+  }
+  if (targets.length === 0) return undefined;
+  return canonicalToolCall("tl_read_file", {
+    targets,
+    content: "auto",
+    ...(keepComments ? { select: { comments: "keep" } } : {}),
+    ...echoedIdentity(staged),
+  }) as ToolCall;
+}
+
+/**
+ * `applyReadRequestContinuation` for a request that could not be persisted
+ * (`claim.stateless`): D is previewed from what the finalized payload ships
+ * (`previewSettledRemaining`, the request's own baseline coverage -- so it can
+ * only be wider than a live settle's), and the payload carries it as
+ * `remainderCall`'s plain windowed read in every position a cursor would take.
+ * Nothing is booked, persisted or indexed. A payload that ships all of Q loses
+ * the continuation it no longer owes, exactly as a settled request does.
+ */
+function statelessContinuation(payload: ShedPayload, staged: StagedReadRequest): ShedPayload {
+  const remaining = previewSettledRemaining(staged, shippedWindowsByPath(payload));
+  const paths = new Set(staged.state.targets.map((target) => target.path));
+  if (staged.state.targets.every((target) => (remaining.get(target.path) ?? []).length === 0)) {
+    return restateElidedWindows(clearContinuation(payload, paths), elidedByPathOf(staged.state.targets));
+  }
+  const call = remainderCall(staged, remaining);
+  if (call === undefined) return payload;
+  const remainingByPath = new Map<string, string[]>();
+  for (const target of staged.state.targets) remainingByPath.set(target.path, windowStrings(remaining.get(target.path) ?? []));
+  const sole = staged.state.targets.length === 1
+    ? windowStrings(remaining.get(staged.state.targets[0]!.path) ?? [])
+    : [];
+  return rewriteContinuation(payload, call, remainingByPath, sole, elidedByPathOf(staged.state.targets));
 }
 
 /**
@@ -819,18 +966,26 @@ function budgetFloorOf(payload: ShedPayload, claimFloor: number | undefined): nu
 function previewContinuation(
   payload: ShedPayload,
   staged: StagedReadRequest,
-  call: ToolCall,
+  /** The cursor call the tail would install -- or, for a request that cannot be persisted, the builder of its plain remainder (`remainderCall`). */
+  call: ToolCall | ((remaining: ReadonlyMap<string, readonly LineWindow[]>) => ToolCall | undefined),
+  /** The page is bound to a client's ceiling: a completing page restates the elided windows (`claim.restateElided`), and is sized with them. */
+  restateElided = false,
 ): { payload: ShedPayload; continued: boolean } {
   const remaining = previewSettledRemaining(staged, shippedWindowsByPath(payload));
   const targets = staged.state.targets;
   const paths = new Set(targets.map((target) => target.path));
   const complete = targets.every((target) => (remaining.get(target.path) ?? []).length === 0);
-  if (complete) return { payload: clearContinuation(payload, paths), continued: false };
+  if (complete) {
+    const cleared = clearContinuation(payload, paths);
+    return { payload: restateElided ? restateElidedWindows(cleared, elidedByPathOf(targets)) : cleared, continued: false };
+  }
+  const installed = typeof call === "function" ? call(remaining) : call;
+  if (installed === undefined) return { payload, continued: false };
   const remainingByPath = new Map<string, string[]>();
   for (const target of targets) remainingByPath.set(target.path, windowStrings(remaining.get(target.path) ?? []));
   const sole = targets.length === 1 ? windowStrings(remaining.get(targets[0]!.path) ?? []) : [];
   return {
-    payload: rewriteContinuation(payload, call, remainingByPath, sole, elidedByPathOf(targets)),
+    payload: rewriteContinuation(payload, installed, remainingByPath, sole, elidedByPathOf(targets)),
     continued: true,
   };
 }
@@ -863,13 +1018,19 @@ function peelReadProse(payload: ShedPayload): ShedPayload | undefined {
  * `remaining` is not touched here: the continuation preview and the real tail
  * both derive D from what the evidence carries.
  */
-function shrinkEvidenceBySavedBytes(payload: ShedPayload, excessBytes: number): ShedPayload | undefined {
+function shrinkEvidenceBySavedBytes(
+  payload: ShedPayload,
+  excessBytes: number,
+  /** Cut THIS row's tail instead of the widest row's (`shrinkTrailingRows`). */
+  pinnedIndex?: number,
+): ShedPayload | undefined {
   const evidence = payload["evidence"];
   if (!Array.isArray(evidence)) return undefined;
   let index = -1;
   let widest = -1;
   evidence.forEach((raw, i) => {
     if (!isRecord(raw)) return;
+    if (pinnedIndex !== undefined && i !== pinnedIndex) return;
     const body = raw["body"];
     const range = raw["range"];
     if (typeof body !== "string" || typeof range !== "string" || parseWindow(range) === undefined) return;
@@ -899,6 +1060,52 @@ function shrinkEvidenceBySavedBytes(payload: ShedPayload, excessBytes: number): 
     range: `${window.start}-${window.start + kept - 1}`,
   };
   return { ...payload, evidence: evidence.map((raw, i) => (i === index ? shrunkEntry : raw)) };
+}
+
+/**
+ * 2026-10-24 (read-page ceiling): cut a MULTI-ROW page from its END.
+ *
+ * A comment-dense file's page is dozens of small rows (one per run of code
+ * between the comment blocks the default policy elides). `shrinkEvidenceBySavedBytes`
+ * cuts the WIDEST row, so over such a page it took a line off every row in turn
+ * until each was one line wide -- and the page then carried the first line of
+ * every function, each behind its own ~100 B row, with the rest of every
+ * function owed to a later page that did the same: 19 pages and 264 KB for a
+ * 100 KB file (measured), every one of them inside the ceiling and none of them
+ * worth the round trip.
+ *
+ * A page is cut like a page: the LAST row first. If that row can pay the excess
+ * out of its own tail lines it keeps its first line and sheds the rest of the
+ * excess from the end; otherwise it goes whole (never the first row of its
+ * handle, which carries the handle's `remaining`/`elided`: the same exemption
+ * `dropLastEvidenceSegment` makes). `undefined` for a page of fewer than two
+ * body rows, which `shrinkEvidenceBySavedBytes` already cuts correctly.
+ */
+function shrinkTrailingRows(payload: ShedPayload, excessBytes: number): ShedPayload | undefined {
+  const evidence = payload["evidence"];
+  if (!Array.isArray(evidence)) return undefined;
+  const bodyRows: number[] = [];
+  evidence.forEach((raw, i) => {
+    if (isRecord(raw) && typeof raw["body"] === "string" && raw["body"] !== "") bodyRows.push(i);
+  });
+  if (bodyRows.length < 2) return undefined;
+  const lastIndex = bodyRows[bodyRows.length - 1]!;
+  const last = evidence[lastIndex] as Record<string, unknown>;
+  const body = last["body"] as string;
+  const lines = (body.endsWith("\n") ? body.slice(0, -1) : body).split("\n");
+  // Lines below the first, as the wire spells them.
+  let tailBytes = 0;
+  for (let i = 1; i < lines.length; i += 1) tailBytes += wireLineCostBytes(lines[i]!);
+  if (lines.length >= 2 && tailBytes >= excessBytes) {
+    const trimmed = shrinkEvidenceBySavedBytes(payload, excessBytes, lastIndex);
+    if (trimmed !== undefined) return trimmed;
+  }
+  const handle = typeof last["handle"] === "string" ? last["handle"] : "";
+  const firstOfHandle = !evidence.slice(0, lastIndex).some(
+    (raw) => isRecord(raw) && (typeof raw["handle"] === "string" ? raw["handle"] : "") === handle,
+  );
+  if (firstOfHandle) return undefined;
+  return { ...payload, evidence: evidence.filter((_, i) => i !== lastIndex) };
 }
 
 /**
@@ -988,6 +1195,36 @@ export function fitStagedReadToBudget(input: {
   staged: StagedReadRequest;
   claim: { budgetDeclared: boolean; shed: boolean };
   limit: number;
+  /**
+   * 2026-10-24 (read-page ceiling): a LOOSER limit the smallest form may still
+   * ship under when `limit` is out of reach. `limit` is then a target -- the
+   * client's response ceiling -- and not a budget its caller declared: a page
+   * that is down to its last line (or to prose it cannot peel) and still wider
+   * than the ceiling is served in that smallest form, and is `{ok:false}` only
+   * when even that exceeds `hardLimit`. Absent = `limit` is the only bound, as
+   * for every budget a caller declared.
+   */
+  hardLimit?: number;
+  /**
+   * 2026-10-24 (read-page ceiling): size the page against the PLAIN remainder
+   * call (`remainderCall`) when no cursor can be minted, instead of leaving it
+   * unfitted -- the counterpart of `applyReadRequestContinuation`'s
+   * `claim.stateless`, which installs exactly the call measured here.
+   */
+  stateless?: boolean;
+  /**
+   * 2026-10-24 (read-page ceiling): shed a multi-row page from its end
+   * (`shrinkTrailingRows`) before cutting the widest row's lines. For a page
+   * bound to a client's ceiling; absent = the order every declared budget has
+   * always had.
+   */
+  trailingRows?: boolean;
+  /**
+   * 2026-10-24 (read-page ceiling): size a page that COMPLETES its request with
+   * the `elided` windows `applyReadRequestContinuation` will restate on it
+   * (`claim.restateElided`) -- the fit measures the bytes that ship.
+   */
+  restateElided?: boolean;
   /** The ONE sanctioned wire-byte counter, passed in so this module never imports the budget layer. */
   measure: (payload: ShedPayload) => number;
 }): StagedReadFit {
@@ -996,13 +1233,15 @@ export function fitStagedReadToBudget(input: {
   if (candidate["kind"] === "refusal") return { ok: true, payload: candidate, shrunk: false };
   if (staged.mode === "open" && !claim.budgetDeclared && !claim.shed) return { ok: true, payload: candidate, shrunk: false };
   const cursor = mintReadCursor(staged);
-  if (cursor === undefined) return { ok: true, payload: candidate, shrunk: false };
-  const call = cursorCall(staged, cursor);
+  if (cursor === undefined && input.stateless !== true) return { ok: true, payload: candidate, shrunk: false };
+  const call = cursor !== undefined
+    ? cursorCall(staged, cursor)
+    : (remaining: ReadonlyMap<string, readonly LineWindow[]>) => remainderCall(staged, remaining);
   // The reserve exists only for a response that WILL carry a continuation (a
   // complete one, D empty, is exactly what the real tail ships) and whose
   // lines were cut somewhere (see `PRESETTLE_SAFETY_BYTES`).
   const sized = (payload: ShedPayload, linesCut: boolean): number => {
-    const preview = previewContinuation(payload, staged, call);
+    const preview = previewContinuation(payload, staged, call, input.restateElided === true);
     return measure(preview.payload) + (preview.continued && linesCut ? PRESETTLE_SAFETY_BYTES : 0);
   };
   let shrunk = false;
@@ -1011,15 +1250,22 @@ export function fitStagedReadToBudget(input: {
     if (bytes <= limit) return { ok: true, payload: candidate, shrunk };
     const peeled = peelReadProse(candidate);
     const smaller = peeled
+      ?? (input.trailingRows === true ? shrinkTrailingRows(candidate, bytes - limit) : undefined)
       ?? shrinkEvidenceBySavedBytes(candidate, bytes - limit)
       ?? shrinkLargestBatchEntryByOneLine(candidate)
       ?? dropLastEvidenceSegment(candidate);
-    if (smaller === undefined) return { ok: false, requiredMinBytes: bytes };
+    if (smaller === undefined) {
+      return input.hardLimit !== undefined && bytes <= input.hardLimit
+        ? { ok: true, payload: candidate, shrunk }
+        : { ok: false, requiredMinBytes: bytes };
+    }
     if (peeled === undefined) shrunk = true;
     candidate = smaller;
     bytes = sized(candidate, claim.shed || shrunk);
   }
-  return bytes <= limit ? { ok: true, payload: candidate, shrunk } : { ok: false, requiredMinBytes: bytes };
+  return bytes <= limit || (input.hardLimit !== undefined && bytes <= input.hardLimit)
+    ? { ok: true, payload: candidate, shrunk }
+    : { ok: false, requiredMinBytes: bytes };
 }
 
 /**

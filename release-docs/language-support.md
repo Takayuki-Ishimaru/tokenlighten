@@ -26,6 +26,17 @@ Common text and configuration files can be discovered and read as text. CSS rece
 
 Password-protected supported documents and archives use an environment-backed credential reference. Do not put raw passwords in tool arguments.
 
+## Optional typed symbol resolution
+
+v0.16.0 adds optional definition, type-definition and reference resolution.
+TypeScript and JavaScript use the built-in compiler integration; other target
+languages use separately installed language servers. The engine and PATH
+discovery are off by default. See [Local analysis engines](local-analysis.md)
+for configuration and prerequisites.
+
 ## Non-goals
 
-TokenLighten does not include a language server. It does not guarantee cross-file semantic resolution, type-aware overload handling, import-aware rename, or runtime routing. When a result is uncertain, the tools should return a compact candidate list or refuse an unsafe operation.
+TokenLighten does not bundle external language servers. Resolution depends
+on the backend and project configuration and can remain unresolved or
+ambiguous. Rename and edit operations remain lexical; the optional engine
+does not guarantee type-aware refactoring or runtime routing.

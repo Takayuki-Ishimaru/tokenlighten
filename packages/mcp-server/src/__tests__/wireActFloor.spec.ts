@@ -503,6 +503,24 @@ describe("[R5-30] branch 3 (`act-on-served-evidence`) is re-sited, gated on the 
     expect((decision as { certificate: { id: string } }).certificate.id).toBe("cert-branch3");
   });
 
+  it("checks and emits the same replay-bound restoring call", () => {
+    const input = {
+      result: {qref: "q-original"}, contract: branchThreeContract(),
+      canonicalKind: "await-input" as const,
+      evidence: [{handle: "h-enum", path: "src/enums.ts", range: "1-4",
+        body: "export const Severity = {};", remaining: ["5-8"]}],
+    };
+    const seen: unknown[] = [];
+    const first = projectTaskDecision({...input, consumed: call => {seen.push(call); return false;}});
+    expect(first?.kind).toBe("discover");
+    if (first?.kind !== "discover") throw new Error("missing discover");
+    expect(first.next).toEqual({tool: "tl_read_file", arguments: {handle: "h-enum", range: "5-8", qref: "q-original"}});
+    expect(seen).toContainEqual(first.next);
+    const second = projectTaskDecision({...input,
+      consumed: call => JSON.stringify(call) === JSON.stringify(first.next)});
+    expect(second?.kind).not.toBe("discover");
+  });
+
   it("WITHOUT a certificate but WITH a concrete zoom: `discover` carrying that call — never `act.*`, never a minted id", () => {
     // D-2 is not negotiable: `act.*` is a certified claim, and this branch's
     // contract registers no execution fence, so there is no id to name.

@@ -583,6 +583,7 @@ export async function setupWorkspace(bar: StatusBarManager, context?: vscode.Ext
     explicitGuideProfileRaw === "full"
     || explicitGuideProfileRaw === "medium"
     || explicitGuideProfileRaw === "compact"
+    || explicitGuideProfileRaw === "portable"
       ? explicitGuideProfileRaw
       : undefined;
   const profile: GuideProfile = explicitGuideProfile ?? defaultGuideProfileForSurface(toolSurface);

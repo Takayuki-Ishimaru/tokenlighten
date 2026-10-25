@@ -149,9 +149,14 @@ function workspace(files: Record<string, string>): string {
   return ws;
 }
 
-async function chain(files: Record<string, string>, query: string, extra: Record<string, unknown> = {}): Promise<ChainResult> {
+async function chain(
+  files: Record<string, string>,
+  query: string,
+  extra: Record<string, unknown> = {},
+  extraEnv: Readonly<Record<string, string>> = {},
+): Promise<ChainResult> {
   const ws = workspace(files);
-  const srv = startDevServer(ws, "default");
+  const srv = startDevServer(ws, "default", { extraEnv });
   servers.push(srv);
   await srv.initialize();
   return followNextToEnd(
@@ -354,11 +359,19 @@ describe("WP-O: a condition facet asked of a same-name subject settles on the de
 describe("WP-O: call sites handed in as targets are never X's proof", () => {
   it("targets = call sites of a same-name X: the chain reads the bound declaration before certifying", async () => {
     const fx = tsFixture({ decoys: [{ path: "src/legacy/billing.ts" }] });
-    const result = await chain(fx.files, `Explain ${X}'s overdue check.`, {
-      targets: [{ path: "src/routes/r1.ts" }, { path: "src/routes/r2.ts" }, { path: "src/routes/r3.ts" }],
-    });
+    const callSites = { targets: [{ path: "src/routes/r1.ts" }, { path: "src/routes/r2.ts" }, { path: "src/routes/r3.ts" }] };
+    // Under the rollback (TL_EFF_AUTOFOLLOW=0) the call-site pack is on the
+    // wire, and it does not certify.
+    const rollback = await chain(fx.files, `Explain ${X}'s overdue check.`, callSites, { TL_EFF_AUTOFOLLOW: "0" });
+    assertBoundToReal(rollback);
+    expect(rollback.hops[0]!.response?.decision?.kind).not.toBe("act.answer");
+    // Default (TL_EFF_AUTOFOLLOW, ON since 2026-10-19): that pack's one
+    // `next`, the request re-issued against the bound declaration, runs in
+    // the same call, so hop 0 certifies only as that merge, and
+    // assertBoundToReal checks the declaration is in it.
+    const result = await chain(fx.files, `Explain ${X}'s overdue check.`, callSites);
     assertBoundToReal(result);
-    expect(result.hops[0]!.response?.decision?.kind).not.toBe("act.answer");
+    expect(result.hops[0]!.response?.auto_followed, JSON.stringify(result.hops[0]!.response?.decision)).toBeDefined();
   }, 60_000);
 
   it("targets = one caller of each declaration: both declarations are read and the ambiguity disclosed", async () => {

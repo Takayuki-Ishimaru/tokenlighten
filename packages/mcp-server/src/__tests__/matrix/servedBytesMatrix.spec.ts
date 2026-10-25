@@ -38,9 +38,8 @@
  * tracked tree).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -68,9 +67,9 @@ import {
   type VerdictFamily,
 } from "./servedBytesMatrixFixtures.js";
 import { readServedText } from "../../util/textDecode.js";
+import { TSX_NODE_ARGS } from "../helpers/tsxNode.js";
+import { pooledSpawn } from "../helpers/serverPool.js";
 
-const nodeRequire = createRequire(import.meta.url);
-const TSX_CLI = nodeRequire.resolve("tsx/cli");
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BIN_TS = path.resolve(HERE, "..", "..", "bin.ts");
 const NUL = String.fromCharCode(0);
@@ -137,7 +136,7 @@ function startServer(cwd: string, extraArgs: string[] = []): ServerHandle {
   const env: Record<string, string | undefined> = { ...process.env };
   delete env["TL_LEGACY_INPUT"];
 
-  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, "--liftoff-only", BIN_TS, cwd, ...extraArgs], {
+  const child: ChildProcess = pooledSpawn(process.execPath, [...TSX_NODE_ARGS, BIN_TS, cwd, ...extraArgs], {
     cwd,
     stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32",
     env,

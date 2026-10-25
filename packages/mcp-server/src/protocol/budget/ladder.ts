@@ -189,8 +189,34 @@ export function runLadder(input: {
   validate: (candidate: ShedPayload) => boolean;
   /** Canonicalize tool calls minted by a post-projection demotion. */
   canonicalize?: (candidate: ShedPayload) => ShedPayload;
+  /**
+   * The serialization the ladder measures and returns as `text`; plain
+   * `JSON.stringify` by default. A caller whose wire form is a function of the
+   * payload (emit.ts's TL_EFF_EVIDENCE_PATH_GROUPS) passes it here so the
+   * budget binds the bytes that ship; the payload the rungs cut stays whole.
+   */
+  serialize?: (candidate: ShedPayload) => string;
+  /**
+   * Run ONLY the kind's rungs numbered here, in their registered order.
+   *
+   * 2026-10-24 (read-page ceiling): a `read.batch` bound to the client's
+   * response ceiling is first run with `[1, 6]` — prose, then WHOLE trailing
+   * entries into the `next` — and only then, if one entry is all that is left
+   * and it is still too big, with the full ladder, whose rung 4 halves every
+   * ranged entry at once. The registered order (1, 4, 6) is right for a budget
+   * the CALLER declared (it asked for less of everything); for a transport
+   * ceiling it would turn a page of twelve windows into twelve half windows,
+   * each with its own `next`, where the same bytes hold nine whole ones and one
+   * `next` for the other three. Not a reordering of the registry (whose
+   * non-decreasing-rung invariant `shedders/index.ts` asserts): the ladder is
+   * unchanged and `rungs` only selects which of its steps this run may take.
+   * Absent = every rung, which is every call that is not that one.
+   */
+  rungs?: readonly number[];
 }): LadderOutcome {
   const { payload, kind, budget, context, validate, canonicalize } = input;
+  const serialize = input.serialize ?? JSON.stringify;
+  const onlyRungs = input.rungs === undefined ? undefined : new Set(input.rungs);
 
   const records: ShedRecord[] = [];
   let continuation: ToolCall | undefined;
@@ -208,13 +234,14 @@ export function runLadder(input: {
   // accounting: the caller is charged for the recovery call it is being given.
   let shed = payload;
   let published = publish(shed, records, continuation, kind);
-  let text = JSON.stringify(published);
+  let text = serialize(published);
   let used = measureResponseBytes(text);
   let steps = 0;
   // Plan §6 constraint 3, counted rather than assumed. See the throw below.
   let demotions = 0;
 
   ladder: for (const rung of shedderFor(kind).rungs) {
+    if (onlyRungs !== undefined && !onlyRungs.has(rung.rung)) continue;
     for (;;) {
       // STOP AT THE FIRST FIT — checked before each step, so a payload that
       // already fits runs no step at all and a payload that has just come under
@@ -325,7 +352,7 @@ export function runLadder(input: {
       // current cut already broke.
       if (!validate(candidate)) break ladder;
 
-      const candidateText = JSON.stringify(candidate);
+      const candidateText = serialize(candidate);
       const candidateUsed = measureResponseBytes(candidateText);
       // A step that recovered nothing is not progress, whatever it claims —
       // and on the FIRST limit-bearing rung "nothing" includes the case where
@@ -340,7 +367,16 @@ export function runLadder(input: {
       // F4 ranks a true large response above a false small one. The ladder then
       // re-measures (below) and continues from the current rung — it does not
       // re-demote, and constraint 3 above is what makes that a fact.
-      if (!demotedThisStep && candidateUsed >= used) break;
+      const symbolCursorBootstrap = kind === "search.matches"
+        && context.symbolCursorCall !== undefined
+        && stepped.note.rung === 6
+        && !records.some((record) => record.rung === 6);
+      // A staged symbols response needs the authenticated cursor in the first
+      // wire limit. Its disclosure can cost more than one small symbol row, so
+      // allow that first rung-6 cut to bootstrap the cursor once; repeated cuts
+      // must then make measured progress, and the settled cursor is rewritten
+      // from the exact rows that survive.
+      if (!demotedThisStep && candidateUsed >= used && !symbolCursorBootstrap) break;
 
       records.push({
         rung: stepped.note.rung,

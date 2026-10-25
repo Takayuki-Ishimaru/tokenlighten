@@ -61,8 +61,7 @@
  * — no construction-time emitter `next` at all).
  */
 import { afterAll, afterEach, describe, expect, it } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
-import { createRequire } from "node:module";
+import { type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -70,6 +69,9 @@ import * as path from "node:path";
 
 import { shortTmpDir } from "./helpers/shortTmpDir.js";
 import { rmDirWithRetry, waitForExit } from "./helpers/rmDirWithRetry.js";
+import { TSX_NODE_ARGS } from "./helpers/tsxNode.js";
+import { pooledSpawn } from "./helpers/serverPool.js";
+import { killServerGroup } from "./helpers/killServerGroup.js";
 
 // ---------------------------------------------------------------------------
 // Fixed-seed PRNG (Mulberry32) — deterministic across runs and platforms.
@@ -119,8 +121,6 @@ function generateCases(count: number): Case[] {
 // matrix stays independently runnable and does not couple to that file's own
 // internals).
 // ---------------------------------------------------------------------------
-const nodeRequire = createRequire(import.meta.url);
-const TSX_CLI = nodeRequire.resolve("tsx/cli");
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BIN_TS = path.resolve(HERE, "..", "bin.ts");
 const HOME = process.env["HOME"] ?? process.env["USERPROFILE"] ?? os.homedir();
@@ -169,7 +169,7 @@ function writeFile(dir: string, rel: string, content: string): void {
 function startServer(cwd: string, env: NodeJS.ProcessEnv): ServerHandle {
   // Detached on POSIX so kill() can take down the whole process group: the tsx
   // wrapper re-spawns the real server, which would otherwise outlive it.
-  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, "--liftoff-only", BIN_TS, cwd], {
+  const child: ChildProcess = pooledSpawn(process.execPath, [...TSX_NODE_ARGS, BIN_TS, cwd], {
     cwd,
     stdio: ["pipe", "pipe", "pipe"],
     env,
@@ -230,12 +230,7 @@ function startServer(cwd: string, env: NodeJS.ProcessEnv): ServerHandle {
       return JSON.parse(text) as Record<string, unknown>;
     },
     kill: async () => {
-      try {
-        if (process.platform !== "win32" && child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
-        else child.kill("SIGKILL");
-      } catch {
-        /* ok */
-      }
+      killServerGroup(child);
       await waitForExit(child);
     },
   };

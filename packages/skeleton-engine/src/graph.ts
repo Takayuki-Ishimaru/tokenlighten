@@ -519,7 +519,7 @@ let lineOfMemoNewlines: number[] = [];
 function lineOf(text: string, index: number): number {
   if (text !== lineOfMemoText) {
     const positions: number[] = [];
-    for (let i = text.indexOf("\n"); i !== -1; i = text.indexOf("\n", i + 1)) positions.push(i);
+    for (const match of text.matchAll(/\r\n|\r|\n/g)) positions.push(match.index + match[0].length - 1);
     lineOfMemoText = text;
     lineOfMemoNewlines = positions;
   }

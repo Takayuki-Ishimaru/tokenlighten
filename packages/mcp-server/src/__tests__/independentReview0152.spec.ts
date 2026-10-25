@@ -93,7 +93,7 @@ describe("independent v0.15.2 review — exact public call shapes", () => {
     const { server } = await fixture(files);
     const initial = { action: "find", queries: ["RETRY_LIMIT_"], scope: { path: "searchset", kind: "text" }, budget: { bytes: 2000 } };
     const first = await server.callTool("tl_search_files", initial);
-    expect(first.body.matches.hint).toMatch(/remaining lines.*budget.bytes:/);
+    expect(first.body.matches.pagination_advice.remaining_lines).toBeGreaterThan(0);
     expect(first.body.limit.next.arguments.budget.bytes).toBe(2000);
     let current = first;
     const paths: string[] = [];
@@ -110,7 +110,7 @@ describe("independent v0.15.2 review — exact public call shapes", () => {
     }
     expect(paths.length).toBe(120);
     expect(new Set(paths).size).toBe(120);
-    const recommended = Number(first.body.matches.hint.match(/budget.bytes:(\d+)/)[1]);
+    const recommended = first.body.matches.pagination_advice.recommended_budget.bytes;
     const wider = await server.callTool("tl_search_files", { ...initial, budget: { bytes: recommended }, lane: "wider" });
     expect(wider.body.matches.files.length).toBeGreaterThan(first.body.matches.files.length);
     expect(wider.textBytes).toBeLessThanOrEqual(recommended);

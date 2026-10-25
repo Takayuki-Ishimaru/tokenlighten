@@ -82,6 +82,11 @@ type BoundPayload = object & { [BINDING_SYMBOL]?: IndexedBinding };
 // index only when they carry a complete, non-ambiguous identity. Scoped ledger
 // bindings still fail closed because workspace/lane are not wire metadata.
 const indexedBindings = new Map<string, IndexedBinding>();
+
+/** Test-only session reset (testing/sessionReset.ts). */
+export function resetLedgerBindingIndexForTests(): void {
+  indexedBindings.clear();
+}
 type PayloadIdentity = {
   readonly certificateId?: string;
   readonly taskHandle?: string;

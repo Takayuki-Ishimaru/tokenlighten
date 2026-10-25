@@ -16,7 +16,7 @@ import type { GuideProfile, Locale } from "./render.js";
 
 export const VALID_TARGETS: StubTargetId[] = ["claude", "copilot", "cursor", "cline", "continue", "copilot-agent"];
 export const VALID_LOCALES: Locale[] = ["en", "jp"];
-export const VALID_PROFILES: GuideProfile[] = ["full", "medium", "compact"];
+export const VALID_PROFILES: GuideProfile[] = ["full", "medium", "compact", "portable"];
 
 /** Thrown by parseArgs on an invalid flag value; message matches the historic CLI wording. */
 export class CliArgError extends Error {}

@@ -6,7 +6,7 @@ TokenLightenのVS Code拡張機能は、CLI、MCPサーバー、パーサー、�
 
 ## ビルドせずにインストールする
 
-v0.15.3のGitHub Releaseから**[tokenlighten-vscode-extension-0.15.3.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.3/tokenlighten-vscode-extension-0.15.3.vsix)**をダウンロードしてください。同じVSIXをWindows、macOS、Linuxで使用できます。
+v0.16.0のGitHub Releaseから**[tokenlighten-vscode-extension-0.16.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.16.0/tokenlighten-vscode-extension-0.16.0.vsix)**をダウンロードしてください。同じVSIXをWindows、macOS、Linuxで使用できます。
 
 1. **拡張機能**を開きます。
 2. **VSIXからのインストール…**を選びます。
@@ -14,7 +14,7 @@ v0.15.3のGitHub Releaseから**[tokenlighten-vscode-extension-0.15.3.vsix](http
 4. 求められた場合はVS Codeを再読み込みします。
 
 ~~~bash
-code --install-extension tokenlighten-vscode-extension-0.15.3.vsix
+code --install-extension tokenlighten-vscode-extension-0.16.0.vsix
 ~~~
 
 ソースからVSIXを作成する場合はNode.js 22以降を使用してください:
@@ -54,7 +54,7 @@ VS Codeのセットアップは、新しいローカルAgentチャット向け�
 既存のフック構成を維持できます。無効化またはnative切替時には、TokenLightenが
 管理するCopilotガイドも無効になります。
 
-v0.15.3へアップグレードした後は、**このワークスペースをセットアップ**を
+v0.16.0へアップグレードした後は、**このワークスペースをセットアップ**を
 再実行し、新しいエージェントセッションを開始するかMCPクライアントを再接続
 してください。管理ガイド、Copilot設定、接頭辞付きツール名を更新できます。
 応答をインラインに保持する設定とCLIの変更回避オプションは、
@@ -88,17 +88,23 @@ TokenLightenのステータスバーをクリックすると、診断、有効�
 
 ## プライバシーと適用範囲
 
-リポジトリのインデックス作成とコンテキスト選択はローカルで実行されます。拡張機能自体がモデルを追加したり、内容をアップロードしたりすることはありません。モデルプロバイダーへのリクエストはコーディングエージェント側の責任です。ワークスペースを変更する操作には信頼済みワークスペースが必要です。
+リポジトリのインデックス作成とコンテキスト選択はローカルで実行されます。任意の意味検索では、利用者の操作で取得するローカルの埋め込みモデルを使用します。既定では無効で、リポジトリ内容をモデルサービスへ送信しません。モデルプロバイダーへのリクエストはコーディングエージェント側の責任です。ワークスペースを変更する操作には信頼済みワークスペースが必要です。
+
+## ローカル解析エンジン
+
+コマンドパレットの**TokenLighten: ローカル解析エンジンを管理**から、型付きシンボル解決、複合依頼の分解・統合、意味検索を設定できます。型付きシンボル解決と意味検索は既定で無効です。モデル取得、Language Serverの設定、ライセンス表示に対応します。詳しくは[ローカル解析エンジン](local-analysis.md)を参照してください。
 
 ## 設定
 
 | 設定 | デフォルト | 説明 |
 |---|---:|---|
 | `tokenlighten.enabled` | `true` | 現在のワークスペースでTokenLightenを有効／無効にします。 |
-| `tokenlighten.updateCheck.enabled` | `true` | 起動時に新しいVSIXの公開を確認します。インストールには常にユーザー操作が必要です。 |
+| `tokenlighten.autoUpdate.enabled` | `true` | 新しいVSIXを自動でダウンロード・インストールします。サイドバーの「拡張機能を自動更新する」で切り替えられ、変更は全ワークスペースに即時反映されます。無効時は更新通知のみです。再読み込みは通知から任意のタイミングで実行できます。 |
+| `tokenlighten.updateCheck.enabled` | `true` | 起動時と6時間ごとにGitHub Releasesを確認します。無効にすると自動更新も停止します。サイドバーで自動更新を有効にすると、この設定も有効になります。 |
+| `tokenlighten.confirmResetOnUpdate` | `true` | 新しいバージョンへの更新後（自動・手動とも）、新しいデフォルト値と異なるユーザー設定を示して、TokenLightenのユーザー設定をデフォルト値に戻すかを確認します。答えずに通知を閉じた場合は、次回起動時にもう一度確認します。ワークスペースとフォルダーの設定は変更しません。通知の「今後は確認しない」で無効にできます。 |
 | `tokenlighten.language` | `auto` | VS Codeの表示言語を自動使用するか、英語／日本語を選択します。 |
 | `tokenlighten.toolSurface` | `full` | advertiseされるMCP tool surface: `full`（全能力）または`code`（コード・プレーンテキスト・設定のみ、より小さいtool schema）。変更には再接続が必要です。 |
 | `tokenlighten.copilotGuide` | `standalone` | Copilotガイドの形式：短い自己完結型、共通AGENTS.md、または既存構成の維持。 |
 | `tokenlighten.guideProfile` | `compact` | セットアップ時に書き込む共通ガイド: `compact`／`medium`／`full`。どちらのツールサーフェスでも明示設定を優先します。 |
 
-デスクトップアプリケーションは公開v0.15.3リリースに含まれません。
+デスクトップアプリケーションは公開v0.16.0リリースに含まれません。

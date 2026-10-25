@@ -35,23 +35,28 @@ describe("r12: shared routing reaches Codex and Claude without a second guide co
           expect(agents).toContain("evidence[].body");
           expect(agents).toContain("targets:[");
           expect(agents).toContain("task.force_serve:true");
-          expect(agents).toContain("native-bypass");
+          // v119-v128: compact says "TL unavailable/bypassed" (JP "TL不在・bypass"); full/medium keep "native-bypass".
+          expect(agents).toMatch(/native-bypass|unavailable\/bypassed|TL不在・bypass/);
           expect(agents).toContain("SAFE-STOP");
           if (locale === "en") {
             expect(agents).toContain("<entire user request, verbatim>");
-            expect(agents).toContain("keywords");
-            expect(agents).toContain("citation/constraint sentences");
+            // Compact first lookup uses the entire request verbatim, retaining its keywords, citations, and constraints.
             expect(agents).toContain("omit `targets`");
-            expect(agents).toContain("paths/line ranges");
-            expect(agents).toMatch(/without re-reading served bytes|no re-read/);
-            expect(agents).toContain("the user requests native");
+            // compact: "`evidence[].body` exact source: act on path/range, no reread."
+            expect(agents).toMatch(/paths\/line ranges|act on path\/range/);
+            expect(agents).toMatch(/without re-reading served bytes|no re-?read/);
+            // v115: compact says "Native only if the user asks"; full/medium keep the older wording.
+            // v119-v128: compact drops the article ("Native only if user asks").
+            expect(agents).toMatch(/the user requests native|Native only if (?:the )?user asks/);
           } else {
             expect(agents).toContain("<依頼全文を逐語で>");
-            expect(agents).toContain("キーワード化・引用/制約文の省略禁止");
+            // v119-v128: compact "引用/制約込みでquery逐語" replaces "キーワード化・引用/制約文の省略禁止".
+            expect(agents).toMatch(/キーワード化・引用\/制約文の省略禁止|引用\/制約込みでquery逐語/);
             expect(agents).toMatch(/`targets`(?:を省略|省略)/);
-            expect(agents).toContain("path/行範囲");
-            expect(agents).toContain("再読せず");
-            expect(agents).toMatch(/user(?:がnativeを明示指定|のnative明示指定)/);
+            // compact: "`evidence[].body`正確なsource: path/rangeで行動、再読禁止"
+            expect(agents).toMatch(/path\/行範囲|path\/rangeで行動/);
+            expect(agents).toMatch(/再読せず|再読禁止/);
+            expect(agents).toMatch(/user(?:がnativeを明示指定|のnative明示指定)|nativeはuser(?:の明示指定|明示)/);
           }
           expect((await injectAll(options)).wrote).toEqual([]);
         });

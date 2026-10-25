@@ -120,6 +120,7 @@ interface FileLineIndex {
   importLines?: number[];
   /** Parallel to `importLines`: each statement's text, the raw line itself unless a brace/paren-wrapped import spans several lines (`joinedImportStatement`). */
   importTexts?: string[];
+  importEnds?: number[];
   /** Go grouped `const (`/`var (` openers per hashComment flag (index 1 = true). */
   groupOpeners: [number[] | undefined, number[] | undefined];
   /** Parallel to `groupOpeners`: the 0-based line index where each grouped block ends (exclusive), see `goGroupedBlockWindow`. */
@@ -930,7 +931,9 @@ const RESERVED_WORD_RE = new RegExp(
  */
 function looksLikeConstantReference(value: string): boolean {
   if (RESERVED_WORD_RE.test(value)) return false;
-  return value.length >= 2;
+  // A single-letter import (RATE as R) is still a value dependency.
+  // Parameters and local bindings are excluded by the caller, not by length.
+  return value.length >= 1;
 }
 
 /**
@@ -1629,11 +1632,57 @@ export function calleeNamesIn(
   return out;
 }
 
+/** Original UTF-16 call-token coordinates for semantic receiver resolution.
+ * Like calleeNamesIn, this is pure and preserves the caller's focal window.
+ * Bare names retain the existing lexical import path; member calls need the
+ * receiver's actual type to distinguish same-named declarations.
+ */
+export const MAX_QUALIFIED_CALLEE_POSITIONS = 4;
+
+export function qualifiedCalleePositionsIn(
+  fileLines: readonly string[],
+  startLine: number,
+  endLine: number,
+  calleeName: string,
+  hashComment: boolean,
+): Array<{ line: number; character: number }> {
+  return calleePositionsIn(fileLines, startLine, endLine, calleeName, hashComment, true);
+}
+
+/** All same-name calls must agree before one implementation can close a member's evidence. */
+export function calleePositionsIn(
+  fileLines: readonly string[],
+  startLine: number,
+  endLine: number,
+  calleeName: string,
+  hashComment: boolean,
+  qualifiedOnly = false,
+): Array<{ line: number; character: number }> {
+  const positions: Array<{ line: number; character: number }> = [];
+  if (!Number.isSafeInteger(startLine) || !Number.isSafeInteger(endLine) || startLine < 1 || endLine < startLine || endLine > fileLines.length) return positions;
+  for (let line = startLine - 1; line < endLine; line++) {
+    const masked = maskNonCode(fileLines[line]!, hashComment);
+    for (const match of masked.matchAll(IDENTIFIER_RE)) {
+      if (match[0] !== calleeName) continue;
+      const at = match.index!;
+      if (!/^\s*(?:<[^>\n]*>)?\s*\(/.test(masked.slice(at + calleeName.length))) continue;
+      if (qualifiedOnly && !/(?:\?\.|\.|::)\s*$/.test(masked.slice(0, at))) continue;
+      if (declarationHeadShape(masked.slice(0, at)) && opensBlockOnSameLine(masked, at + calleeName.length)) continue;
+      positions.push({ line, character: at });
+      // One extra coordinate allows the consumer to disclose a bounded scan.
+      if (positions.length > MAX_QUALIFIED_CALLEE_POSITIONS) return positions;
+    }
+  }
+  return positions;
+}
+
 // ---------------------------------------------------------------------------
 // Import-line resolution — the specifier a name plausibly arrives through
 // ---------------------------------------------------------------------------
 
 export interface ImportSpecifier {
+  /** Source lines carrying this binding, including a wrapped import list. */
+  readonly binding?: { readonly start: number; readonly end: number };
   /** Verbatim specifier as written: a relative path ("./config", ".config"), a header ("x.h"), or a dotted package/class path (Python absolute import, Java `import static`, C# `using static`). */
   readonly specifier: string;
   /** True when `specifier` is written as a relative FILE reference (TS/JS "./x"/"../x", Python ".x", C/C++ "x.h" — a `#include "..."` is always treated as workspace-relative). False for a bare package/module/class path the hook must still try to resolve inside the workspace (Python absolute "pkg.x", Java "pkg.Class", C# "Namespace.Class"). */
@@ -1749,8 +1798,9 @@ function withoutJsComments(text: string): string {
  * single-line spelling. Anything else -- including a statement that already
  * fits on its line -- is returned unchanged.
  */
-function joinedImportStatement(lines: readonly string[], at: number): string {
+function joinedImportStatement(lines: readonly string[], at: number, onEnd?: (end: number) => void): string {
   const first = lines[at]!;
+  onEnd?.(at);
   const brace = JS_WRAPPED_LIST_HEAD_RE.test(first);
   const paren = !brace && PY_WRAPPED_LIST_HEAD_RE.test(first);
   if (!brace && !paren) return first;
@@ -1770,6 +1820,7 @@ function joinedImportStatement(lines: readonly string[], at: number): string {
     // Never closed within the bound: leave the opener line alone.
     if (depth > 0) return first;
     statement = parts.join(" ");
+    onEnd?.(at + parts.length - 1);
   } else if (paren) {
     statement = strip(first);
   }
@@ -1845,9 +1896,11 @@ export function importSpecifiersNaming(
   name: string,
   hashComment: boolean,
   filePath?: string,
+  includeBinding = false,
 ): ImportSpecifier[] {
   const out: ImportSpecifier[] = [];
   const seen = new Set<string>();
+  let binding: { start: number; end: number } | undefined;
   // B1 (round-8 fable finding): every push site states its own `wildcard`/
   // `packageEligible` facts explicitly (no implicit default) -- see
   // `ImportSpecifier`'s own doc for what each means and why a wildcard
@@ -1862,6 +1915,7 @@ export function importSpecifiersNaming(
       relative: opts.forceRelative ?? (specifier.startsWith(".") || specifier.startsWith("/")),
       wildcard: opts.wildcard,
       packageEligible: opts.packageEligible,
+      ...(includeBinding && binding !== undefined ? { binding } : {}),
       ...(opts.exportedName !== undefined ? { exportedName: opts.exportedName } : {}),
     });
   };
@@ -1878,13 +1932,16 @@ export function importSpecifiersNaming(
     return asMatch ? asMatch[1] : undefined;
   };
   const index = fileLineIndex(fileLines);
-  if (index.importLines === undefined || index.importTexts === undefined) {
+  if (index.importLines === undefined || index.importTexts === undefined || index.importEnds === undefined) {
     index.importLines = [];
     index.importTexts = [];
+    index.importEnds = [];
     for (let at = 0; at < fileLines.length; at++) {
       if (!IMPORT_SHAPED_LINE_RE.test(fileLines[at]!)) continue;
       index.importLines.push(at);
-      index.importTexts.push(joinedImportStatement(fileLines, at));
+      let endLine = at;
+      index.importTexts.push(joinedImportStatement(fileLines, at, (end) => { endLine = end; }));
+      index.importEnds.push(endLine);
     }
   }
   for (const [statementIndex, at] of index.importLines.entries()) {
@@ -1901,6 +1958,7 @@ export function importSpecifiersNaming(
     // `{ ... }` / `( ... )` import list spans several lines
     // (`joinedImportStatement`).
     const line = index.importTexts[statementIndex]!;
+    binding = { start: at + 1, end: index.importEnds[statementIndex]! + 1 };
 
     const namedOpts = { wildcard: false, packageEligible: true };
     // R2-T3: `import D, { A as B } from "./m"` (a default binding beside the

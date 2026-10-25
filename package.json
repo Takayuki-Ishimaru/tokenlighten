@@ -2,7 +2,7 @@
   "name": "tokenlighten-monorepo",
   "private": true,
   "license": "SEE LICENSE IN LICENSE",
-  "version": "0.15.3",
+  "version": "0.16.0",
   "type": "module",
   "repository": {
     "type": "git",
@@ -19,7 +19,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspace @tokenlighten/types && npm run build --workspace @tokenlighten/usage && npm run build --workspace @tokenlighten/skeleton-engine && npm run build --workspace @tokenlighten/agents-md && npm run build --workspace @tokenlighten/cli && npm run build --workspace @tokenlighten/mcp-server && npm run build --workspace tokenlighten-vscode-extension",
+    "build": "npm run build --workspace @tokenlighten/types && npm run build --workspace @tokenlighten/usage && npm run build --workspace @tokenlighten/skeleton-engine && npm run build --workspace @tokenlighten/agents-md && npm run build --workspace @tokenlighten/mcp-server && npm run build --workspace @tokenlighten/cli && npm run build --workspace tokenlighten-vscode-extension",
     "test": "npm run test:packages && npm run test:bundle-cli",
     "test:packages": "npm run lint && vitest run --maxWorkers=2 --testTimeout=120000",
     "test:bundle-cli": "npm run test:bundle-cli --workspace tokenlighten-vscode-extension",
@@ -35,15 +35,17 @@
     "uuid": "11.1.1",
     "mammoth": {
       "argparse": "2.0.1"
-    }
+    },
+    "@azure/identity": "4.13.0"
   },
   "devDependencies": {
     "@types/node": "^20",
     "cross-spawn": "^7.0.6",
-    "esbuild": "^0.25.0",
+    "esbuild": "^0.28.0",
     "license-checker-rseidelsohn": "^4",
+    "spdx-expression-parse": "3.0.1",
     "tsx": "^4",
     "typescript": "^5.6.3",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.12"
   }
 }

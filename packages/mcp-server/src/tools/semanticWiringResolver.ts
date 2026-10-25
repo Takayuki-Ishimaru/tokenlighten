@@ -12,11 +12,16 @@ const CONTROL_NAMES = new Set(["if", "for", "while", "switch", "catch", "return"
 const MAX_SEMANTIC_FILES = 240;
 const MAX_RECEIVER_CONSTRUCTION_HUB_BYTES = 32 * 1024;
 const MAX_RECEIVER_CONSTRUCTION_HUB_LINES = 600;
+const MAX_HOST_ACCESSOR_EXAMPLES = 4;
+/** Lifecycle verbs whose callables take a newly arrived input sample as an argument. */
+const INPUT_UPDATE_VERB = /^(?:update|correct|observe|ingest|feed)(?![a-z])/;
 
 interface CallableDefinition {
   qualified: string;
   owner?: string;
   name: string;
+  /** Parameter-list text, whitespace-collapsed ("" when empty). */
+  params: string;
   line: number;
 }
 
@@ -50,6 +55,10 @@ export interface SemanticWiringResolution {
     producerEntry: string;
     producerEntryLine: number;
     producerPublishLine?: number;
+    /** construct-receiver: the host's implementation, which may own the constructed receiver. */
+    implementationPath?: string;
+    /** construct-receiver: the host callable whose window anchors that implementation's review evidence. */
+    implementationAnchor?: string;
   };
   carrier: { path: string; type: string };
   consumer: {
@@ -67,6 +76,8 @@ export interface SemanticWiringResolution {
     id: string;
     description: string;
     path: string;
+    /** Other files that discharge the same same-file obligation (any one suffices). */
+    alternatePaths?: string[];
     tokens: string[];
   }>;
   certificate: string[];
@@ -74,6 +85,24 @@ export interface SemanticWiringResolution {
 
 function isImplementationPath(relPath: string): boolean {
   return IMPLEMENTATION_EXTENSIONS.has(path.extname(relPath).toLowerCase());
+}
+
+function takesArguments(definition: CallableDefinition): boolean {
+  return definition.params !== "" && definition.params !== "void";
+}
+
+function isInputUpdate(definition: CallableDefinition): boolean {
+  const name = definition.name.charAt(0).toLowerCase() + definition.name.slice(1);
+  return INPUT_UPDATE_VERB.test(name) && takesArguments(definition);
+}
+
+/** Lower-cased words of a camelCase/snake_case identifier, without the scorer's stemming. */
+function rawWords(value: string): string[] {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[^A-Za-z0-9]+/)
+    .map((word) => word.toLowerCase())
+    .filter((word) => word !== "");
 }
 
 function normalizeWord(word: string): string {
@@ -152,7 +181,7 @@ function lineOf(content: string, index: number): number {
 function callableDefinitions(content: string): CallableDefinition[] {
   const code = stripComments(content);
   const definitions: CallableDefinition[] = [];
-  const pattern = /\b((?:[A-Za-z_][A-Za-z0-9_]*::)*[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]{0,768}\)\s*(?:const\s*)?(?:noexcept\s*)?\{/g;
+  const pattern = /\b((?:[A-Za-z_][A-Za-z0-9_]*::)*[A-Za-z_][A-Za-z0-9_]*)\s*\(([^;{}]{0,768})\)\s*(?:const\s*)?(?:noexcept\s*)?\{/g;
   for (const match of code.matchAll(pattern)) {
     const qualified = match[1]!;
     const parts = qualified.split("::");
@@ -162,6 +191,7 @@ function callableDefinitions(content: string): CallableDefinition[] {
       qualified,
       ...(parts.length > 1 ? { owner: parts.at(-2)! } : {}),
       name,
+      params: match[2]!.replace(/\s+/g, " ").trim(),
       line: lineOf(code, match.index ?? 0),
     });
   }
@@ -714,12 +744,39 @@ function resolveSemanticWiringInScope(
     "configure", "correct", "feed", "ingest", "init", "initialize", "observe",
     "predict", "process", "reset", "start", "step", "tick", "update",
   ]);
-  const lifecycleSymbols = producer.record.definitions
-    .filter((definition) => definition.owner === producer.owner && definition.qualified !== producer.qualified)
-    .filter((definition) => identifierWords(definition.name).some((word) => lifecycleVerbs.has(word)))
+  const isLifecycleNamed = (definition: CallableDefinition): boolean =>
+    identifierWords(definition.name).some((word) => lifecycleVerbs.has(word));
+  const uniqueQualified = (definitions: readonly CallableDefinition[]): string[] => definitions
     .map((definition) => definition.qualified)
     .filter((value, index, all) => all.indexOf(value) === index);
+  const lifecycleDefinitions = producer.record.definitions
+    .filter((definition) => definition.owner === producer.owner && definition.qualified !== producer.qualified)
+    .filter(isLifecycleNamed);
+  const lifecycleSymbols = uniqueQualified(lifecycleDefinitions);
   if (connectionMode === "construct-receiver" && lifecycleSymbols.length === 0) return undefined;
+  // An input-taking update consumes one measurement per call. A host accessor
+  // only re-reads the sample the host last cached, so a loop that gates an
+  // update on it keeps correcting with stale input once the input silently
+  // stops (T13 2026-10-19 forensics: hasFix() stays true through a silent GPS
+  // dropout). The receiver may therefore live at the hub or inside the host,
+  // whose input handlers see each sample exactly once.
+  const inputUpdates = lifecycleDefinitions.filter(isInputUpdate);
+  const inputUpdateSymbols = uniqueQualified(inputUpdates);
+  const hostCallables = host.record.definitions.filter((definition) =>
+    definition.owner === host.type && definition.name !== host.type
+  );
+  const hostAccessors = uniqueQualified(hostCallables.filter((definition) =>
+    !takesArguments(definition) && !isLifecycleNamed(definition)
+  )).slice(0, MAX_HOST_ACCESSOR_EXAMPLES);
+  const hostHandlers = hostCallables.filter(takesArguments);
+  const inputSubjects = new Set(inputUpdates.flatMap((definition) => rawWords(definition.name).slice(1)));
+  const inputHandlers = hostHandlers.filter((definition) =>
+    rawWords(definition.name).some((word) => inputSubjects.has(word))
+  );
+  const hostImplementationPath = connectionMode === "construct-receiver" && host.record.path !== hub.path
+    ? host.record.path
+    : undefined;
+  const hostImplementationAnchor = (inputHandlers[0] ?? hostHandlers[0])?.name ?? host.useSite.callSymbol;
   const lifecycleDriver = lifecycleSymbols.find((symbol) => {
     const name = symbol.split("::").at(-1) ?? symbol;
     return !identifierWords(name).some((word) =>
@@ -728,6 +785,26 @@ function resolveSemanticWiringInScope(
   }) ?? lifecycleSymbols[0];
   const lifecycleDriverName = lifecycleDriver?.split("::").at(-1);
   const outboundConsumerSymbol = constructionSymbol ?? consumerDefinition.name;
+  // The outbound path reads the producer's own accessor, at the hub or in the
+  // consumer, never only inside the producer's module. That module is the
+  // producer's directory, so a host implementation beside it (T13:
+  // position_estimator.cpp next to ekf.cpp) is inside it: T13 window 6t-6
+  // rep 2 built the receiver there, read it through a forwarder of another
+  // name (PositionEstimator::ekfHealthy), and EKF::isHealthy was never read
+  // outside the estimator module.
+  const producerModule = path.posix.dirname(producer.record.path);
+  const outboundReaders = [hub.path, consumerRecord.path];
+  const readersOutsideProducerModule = producerModule !== "."
+    && outboundReaders.every((relPath) => !relPath.startsWith(`${producerModule}/`));
+  // A same-named forwarder is proposed only while the host has no callable of
+  // that name: repurposing an existing accessor would change its contract.
+  const producerNameDeclaration = new RegExp(`(?<![.>\\w])${producer.name}\\s*\\(`);
+  const hostHasProducerName = hostCallables.some((definition) => definition.name === producer.name)
+    || companionPaths(relFiles, host.record.path).some((relPath) =>
+      !isImplementationPath(relPath)
+      && producerNameDeclaration.test(records.find((record) => record.path === relPath)?.code ?? "")
+    );
+  const outboundReadAction = `Read ${producer.qualified} on the outbound path to ${consumerOwner}::${outboundConsumerSymbol}, in ${outboundReaders.map(qualify).join(" or ")}${readersOutsideProducerModule ? `, not inside the producer's module (${qualify(producerModule)}/)` : ""}${hostImplementationPath !== undefined && !hostHasProducerName ? `: a receiver inside ${host.type} is read through ${host.type}::${producer.name}() returning that receiver's ${producer.name}(), not through a forwarder of another name` : ""}.`;
   const producerStateMember = `${snakeCase(producer.owner ?? "producer")}_${snakeCase(
     producer.name.replace(/^is(?=[A-Z])/, ""),
   )}`;
@@ -743,7 +820,11 @@ function resolveSemanticWiringInScope(
   const requiredActions = [
     ...(connectionMode === "construct-receiver"
       ? [
-        `Complete ${records.length}-file scope has no ${producer.owner ?? producer.qualified} receiver; do not re-search for one. At ${qualify(hub.path)}, establish its runtime-input update lifecycle using only values/accessors visible there${lifecycleSymbols.length > 0 ? ` (${lifecycleSymbols.join(", ")})` : ""} before calling ${producer.qualified}${adapterCallMode === "existing" ? ` and carry that result to ${consumerDefinition.qualified}` : ""}; do not replace the selected producer or use an un-driven instance.`,
+        `Complete ${records.length}-file scope has no ${producer.owner ?? producer.qualified} receiver; do not re-search for one. Construct one at ${qualify(hub.path)}${hostImplementationPath !== undefined ? ` or inside ${host.type} (${qualify(hostImplementationPath)})` : ""} and drive it with its lifecycle (${lifecycleSymbols.join(", ")}) before calling ${producer.qualified}${adapterCallMode === "existing" ? ` and carry that result to ${consumerDefinition.qualified}` : ""}; do not replace the selected producer or use an un-driven instance.`,
+        ...(inputUpdateSymbols.length > 0
+          ? [`Call each input-taking update (${inputUpdateSymbols.join(", ")}) only once per newly arrived input sample, inside that input's handler/callback${inputHandlers.length > 0 ? ` (e.g. ${uniqueQualified(inputHandlers).join(", ")})` : ""} or after a per-sample freshness check such as a changed timestamp, and only for a valid sample; a cached accessor of another object${hostAccessors.length > 0 ? ` (e.g. ${hostAccessors.join(", ")})` : ""} is not a new sample.`]
+          : []),
+        outboundReadAction,
       ]
       : []),
     ...(adapterCallMode === "construct"
@@ -763,12 +844,14 @@ function resolveSemanticWiringInScope(
         id: "receiver-callable",
         description: `receiver calls ${producer.name}`,
         path: qualify(hub.path),
+        ...(hostImplementationPath !== undefined ? { alternatePaths: [qualify(hostImplementationPath)] } : {}),
         tokens: [producer.owner ?? producer.qualified, producer.name],
       },
       ...(lifecycleDriverName === undefined ? [] : [{
         id: "receiver-driven",
         description: `lifecycle drives ${producer.name}`,
         path: qualify(hub.path),
+        ...(hostImplementationPath !== undefined ? { alternatePaths: [qualify(hostImplementationPath)] } : {}),
         tokens: [producer.name, lifecycleDriverName],
       }]),
       ...(negativeBitClearProof ? [{
@@ -811,6 +894,9 @@ function resolveSemanticWiringInScope(
       producerEntry,
       producerEntryLine: host.useSite.line,
       ...(producerPublishLine !== undefined ? { producerPublishLine } : {}),
+      ...(hostImplementationPath !== undefined && hostImplementationAnchor !== undefined
+        ? { implementationPath: qualify(hostImplementationPath), implementationAnchor: hostImplementationAnchor }
+        : {}),
     },
     carrier: { path: qualify(carrier.path), type: carrierType },
     consumer: {

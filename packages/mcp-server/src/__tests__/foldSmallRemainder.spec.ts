@@ -36,8 +36,7 @@
 // why (the pack's cross-call body dedupe is keyed by workspace).
 
 import { afterAll, afterEach, describe, expect, it } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
-import { createRequire } from "node:module";
+import { type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -55,6 +54,8 @@ import {
   markCallerRangeSurface,
   markSemanticFrontierWithheldBody,
 } from "../features/task-pack/sfWithholdingMarks.js";
+import { TSX_NODE_ARGS } from "./helpers/tsxNode.js";
+import { pooledSpawn } from "./helpers/serverPool.js";
 
 const FLAG = "TL_FOLD_SMALL_REMAINDER";
 const UMBRELLA = "TL_TURN_ECONOMY";
@@ -251,6 +252,17 @@ describe("applyFoldSmallRemainder — direct unit coverage", () => {
     expect(surface.code).toContain("export class Foo");
   });
 
+  it("completes a partial body even when its declared range already spans the whole file", () => {
+    process.env[FLAG] = "1";
+    const root = unitWorkspace();
+    writeTinyFile(root, "src/Foo.ts");
+    const surface = mkSurface("hOLD", "src/Foo.ts", "1-4", 'import { A } from "./a.js";', ["2-4"]);
+    applyFoldSmallRemainder(root, mkResult([surface]));
+    expect(surface.range).toBe("1-4");
+    expect(surface.remaining_ranges).toBeUndefined();
+    expect(surface.code).toContain("run() { return 1; }");
+  });
+
   it("is a no-op with the flag off", () => {
     delete process.env[FLAG];
     delete process.env[UMBRELLA];
@@ -374,8 +386,6 @@ describe("applyFoldSmallRemainder — direct unit coverage", () => {
 //     already-served receipt (spawned server — a real tl_read_file round trip).
 // ---------------------------------------------------------------------------
 
-const nodeRequire = createRequire(import.meta.url);
-const TSX_CLI = nodeRequire.resolve("tsx/cli");
 const BIN_TS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "bin.ts");
 
 interface ServerHandle {
@@ -388,7 +398,7 @@ const spawnedServers: ServerHandle[] = [];
 
 /** Spawned-stdio harness, trimmed from seededGenerousPack.spec.ts / rangedBatchNextPreservation.spec.ts. */
 function startServer(cwd: string, env: Record<string, string>): ServerHandle {
-  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, "--liftoff-only", BIN_TS, cwd], {
+  const child: ChildProcess = pooledSpawn(process.execPath, [...TSX_NODE_ARGS, BIN_TS, cwd], {
     cwd,
     stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32",
     env: { ...process.env, ...env },

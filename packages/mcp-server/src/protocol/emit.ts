@@ -59,7 +59,7 @@ import { createHash } from "node:crypto";
 
 import { runLadder } from "./budget/ladder.js";
 import { measureResponseBytes } from "./budget/measure.js";
-import { budgetFor, estimateBytesFromTokens, floorBytes, type WireBudget } from "./budget/wireBudget.js";
+import { bindToResponseCeiling, budgetFor, estimateBytesFromTokens, floorBytes, type WireBudget } from "./budget/wireBudget.js";
 import { shedderFor } from "./budget/shedders/index.js";
 import type { ShedPayload } from "./budget/shedders/registry.js";
 import { describeVerdict, validateProtocolBody, type ProtocolViolation } from "./budget/validate.js";
@@ -83,13 +83,18 @@ import {
 } from "./readRequestContinuation.js";
 import {
   applySearchRequestContinuation,
+  currentSymbolCursorCall,
   rewindSearchRequestDelivered,
   shrinkSearchPageToFit,
 } from "./searchRequestContinuation.js";
 import { recordServedBytes } from "../util/packServeLog.js";
 import { decisionInvariantStrictEnabled } from "../util/flags.js";
 import { applyResponseCodec } from "./codec/pipeline.js";
+import { resolveReadReplyCeiling } from "./codec/clientProfile.js";
 import { ledgerCertificateBindingValid } from "./ledgerCertificateBinding.js";
+import { omitCoveredFrontierIndex } from "./frontierIndexDedup.js";
+import { compactReplyEnvelope, restateObligationsFromEvidence } from "./wireCompaction.js";
+import { groupEvidencePaths } from "./evidencePathGroups.js";
 import { trace, isTraceEnabled } from "../util/trace.js";
 
 /**
@@ -237,11 +242,43 @@ export function emitFinalizedPayload(
   const declaredMaxBytes = context.mode === "pack" && declaredMaxBytesRaw !== undefined
     ? Math.max(declaredMaxBytesRaw, floorBytes(kind, formOf(payload, kind)))
     : declaredMaxBytesRaw;
-  const limit = opts?.budgetOverrideBytes
+  // 2026-10-24 (read-page ceiling): A `read.text` / `read.batch` reply is bound
+  // to the client profile's response ceiling the way a task pack and a find page
+  // are -- the Copilot CLI spills a reply of 23,466 B or more into a temporary
+  // file, VS Code one above ~17 KB, and these two kinds were bound only to the
+  // 512 KiB / 128 KiB rows above and the producers' 24 KiB body caps (25.7-28.6 KB
+  // on the wire, measured). `bindToResponseCeiling` is the one rule (a declared
+  // budget below the ceiling wins, a larger one is clamped); `undefined` for a
+  // client without a ceiling, which keeps every such call byte-identical.
+  //
+  // `limit` is the effective response target after binding the caller's declared
+  // budget and this client's read-page ceiling. A page whose smallest honest form
+  // still exceeds the client ceiling is replaced with a bounded terminal
+  // `cap-exceeded` refusal: a budget retry cannot lift a profile ceiling, and a
+  // continuation would repeat the same impossible line. `refusalLimit` retains
+  // the caller-budget/calibrated-floor behavior for ordinary budget shortfalls.
+  const pageCeiling = (kind === "read.text" || kind === "read.batch") && opts?.budgetOverrideBytes === undefined
+    ? resolveReadReplyCeiling(context.clientId)
+    : undefined;
+  const boundMaxBytes = bindToResponseCeiling(declaredMaxBytes, pageCeiling);
+  const ceilingBinds = pageCeiling !== undefined && boundMaxBytes === pageCeiling
+    && (declaredMaxBytes === undefined || pageCeiling < declaredMaxBytes);
+  const refusalLimit = opts?.budgetOverrideBytes
     ?? (declaredMaxBytes !== undefined
       ? Math.min(declaredMaxBytes, calibratedLimit)
       : calibratedLimit);
-  const ladderContext = { ...(context.args !== undefined ? { args: context.args } : {}) };
+  const limit = opts?.budgetOverrideBytes
+    ?? (boundMaxBytes !== undefined
+      ? Math.min(boundMaxBytes, calibratedLimit)
+      : calibratedLimit);
+  const symbolCursorCall = context.searchRequest === undefined
+    ? undefined
+    : currentSymbolCursorCall(context.searchRequest);
+  const ladderContext = {
+    ...(context.args !== undefined ? { args: context.args } : {}),
+    ...(symbolCursorCall !== undefined ? { symbolCursorCall } : {}),
+    ...(ceilingBinds ? { finerCuts: true as const } : {}),
+  };
   const stableEditKind = kind === "edit.applied"
     || kind === "edit.rolled_back"
     || kind === "edit.state_unknown";
@@ -285,6 +322,21 @@ export function emitFinalizedPayload(
   const withReserve = (budget: number): number => continuationReserve === 0
     ? budget
     : Math.max(1, budget - continuationReserve);
+  // TL_EFF_EVIDENCE_PATH_GROUPS (default OFF): the ladder budgets the bytes that
+  // ship. A grouped reply is smaller than the whole payload the rungs cut, so
+  // measuring the whole one would shed rows the grouped reply holds within the
+  // budget the pack builder priced them against (evidencePathGroups.ts). With
+  // the flag off `groupEvidencePaths` is the identity and this is JSON.stringify.
+  //
+  // EVERY re-serialization of `current` between here and the final compaction
+  // block below goes through it too (after the request continuations, the
+  // post-rewrite shrink, the refusal conversions): a payload a continuation
+  // rewrites is measured against `limit` as the bytes that ship, so a grouped
+  // reply that fits is never judged by its whole-row size. Today only a
+  // `read.task_pack` groups and none is a staged read or search request, so those
+  // sites measure plain JSON; routing them here makes that true by construction
+  // rather than by which kinds the tools happen to emit (review F8, 2026-10-23).
+  const wireText = (candidate: ShedPayload): string => JSON.stringify(groupEvidencePaths(candidate));
   let ladder = runLadder({
     payload,
     kind,
@@ -292,21 +344,51 @@ export function emitFinalizedPayload(
     context: ladderContext,
     validate: (candidate) => validateShedCandidate(candidate, kind),
     canonicalize: (candidate) => canonicalizeBudgetDemotion(candidate),
+    serialize: wireText,
   });
   if (!stableEditKind
     && opts?.budgetOverrideBytes === undefined
-    && declaredMaxBytes !== undefined
-    && declaredMaxBytes < calibratedLimit
+    && boundMaxBytes !== undefined
+    && boundMaxBytes < calibratedLimit
     && ladder.used > limit) {
-    const reentered = runLadder({
-      payload: ladder.payload,
-      kind,
-      budget: withReserve(limit),
-      context: ladderContext,
-      validate: (candidate) => validateShedCandidate(candidate, kind),
-      canonicalize: (candidate) => canonicalizeBudgetDemotion(candidate),
-    });
-    if (reentered.used < ladder.used) ladder = reentered;
+    // A BATCH BOUND TO THE CLIENT'S CEILING (not to a budget its caller declared)
+    // first gives back whole trailing entries -- prose, then rung 6 -- and only
+    // then runs the full ladder: see `runLadder`'s `rungs` for why the registered
+    // order (prose, halve every entry, drop entries) is the wrong one for a
+    // transport ceiling.
+    //
+    // A STAGED LINE-ADDRESSED PAGE BOUND TO IT runs no ladder at all: the
+    // pre-settle fit below takes over (`fitStagedReadToBudget`, with the request's
+    // cursor or, when the state store cannot persist the request, its plain
+    // remainder -- `stateless`). The ladder's rung 4 halves the page's body, and
+    // nothing downstream can put the lines back, so a 25.7 KB page cut for an
+    // 18,432 B ceiling came out at 13 KB (71% full) and cost the agent a round
+    // trip in every four; and with several comment-separated segments it cut
+    // twice and named only the second cut in `limit.next`. The fit drops the
+    // fewest whole lines that make the real response -- continuation included --
+    // fit (99% full, measured), and owes every one of them.
+    //
+    // Every other call has the one pass it always had.
+    const fitTakesOver = ceilingBinds && kind === "read.text" && context.readRequest !== undefined;
+    const passes: Array<readonly number[] | undefined> = fitTakesOver
+      ? []
+      : ceilingBinds && kind === "read.batch"
+        ? [[1, 6], undefined]
+        : [undefined];
+    for (const rungs of passes) {
+      if (ladder.used <= limit) break;
+      const reentered = runLadder({
+        payload: ladder.payload,
+        kind,
+        budget: withReserve(limit),
+        context: ladderContext,
+        validate: (candidate) => validateShedCandidate(candidate, kind),
+        canonicalize: (candidate) => canonicalizeBudgetDemotion(candidate),
+        serialize: wireText,
+        ...(rungs !== undefined ? { rungs } : {}),
+      });
+      if (reentered.used < ladder.used) ladder = reentered;
+    }
   }
 
   let current = ladder.payload;
@@ -318,6 +400,7 @@ export function emitFinalizedPayload(
   // ... and whether the refused response was a multi-target `read.batch` (its floor is the smallest
   // whole-ENTRY batch, so its recovery stays the cursor — see `applyReadRequestContinuation`).
   let refusalOfBatch = false;
+  let terminalReadCeilingRefusal = false;
 
   // STILL OVER BUDGET AFTER THE LADDER — §4.3's tail, three outcomes and no
   // fourth. Unreachable at the calibrated table; reachable through
@@ -359,19 +442,28 @@ export function emitFinalizedPayload(
   // already names, with `budget.bytes` raised to that exact floor — so a
   // caller that only ever runs `next` verbatim (never reconstructing "same
   // call, higher budget" by hand) still recovers in one hop.
-  if (used > limit) {
+  if (pageCeiling !== undefined && used > pageCeiling && context.readRequest === undefined) {
+    const converted = failClosedClientCeiling(kind, context, used, pageCeiling);
+    if (converted !== undefined) {
+      current = converted;
+      onWire = "refusal";
+      terminalReadCeilingRefusal = true;
+      text = wireText(current);
+      used = measureResponseBytes(text);
+    }
+  } else if (used > refusalLimit) {
     // R2-R1: `used` is the ladder's own floor here (the smallest response it
     // could make); the conversion below overwrites it with the refusal's size.
     const ladderFloorBytes = used;
     const readBatchContinuation = ladder.continuation ?? existingNextOf(payload);
     const converted = kind === "read.batch"
       ? budgetBelowMinimumRefusal(context, readBatchRequiredMinBytes(used), readBatchContinuation, current)
-      : failClosed(kind, context, limit, used, readBatchContinuation);
+      : failClosed(kind, context, refusalLimit, used, readBatchContinuation);
     if (converted !== undefined) {
       current = converted;
       onWire = "refusal";
       refusalOfBatch = kind === "read.batch";
-      text = JSON.stringify(current);
+      text = wireText(current);
       used = measureResponseBytes(text);
       // R2-R1 (FX1 chip 3): a `cap-exceeded` names no floor, so the request tail
       // could only give it a cursor that re-runs the very page that just did not
@@ -389,13 +481,13 @@ export function emitFinalizedPayload(
       // the same producer payload exactly as the retry will run it — until that
       // budget holds what the ladder keeps there. Bounded; never lowers a floor.
       if (context.readRequest !== undefined && (kind === "read.text" || kind === "read.batch")) {
-        const measureCandidate = (candidate: ShedPayload): number => measureResponseBytes(JSON.stringify(candidate));
+        const measureCandidate = (candidate: ShedPayload): number => measureResponseBytes(wireText(candidate));
         let floor = Math.max(
           ladderFloorBytes,
           stagedReadFloorBytes({
             payload: ladder.payload,
             staged: context.readRequest,
-            claim: { budgetDeclared: declaredMaxBytes !== undefined, shed: ladder.records.length > 0 },
+            claim: { budgetDeclared: boundMaxBytes !== undefined, shed: ladder.records.length > 0 },
             measure: measureCandidate,
           }) ?? 0,
         );
@@ -408,6 +500,7 @@ export function emitFinalizedPayload(
               context: ladderContext,
               validate: (candidate) => validateShedCandidate(candidate, kind),
               canonicalize: (candidate) => canonicalizeBudgetDemotion(candidate),
+              serialize: wireText,
             });
             if (budget < calibratedLimit && simulated.used > budget) {
               const reentered = runLadder({
@@ -417,6 +510,7 @@ export function emitFinalizedPayload(
                 context: ladderContext,
                 validate: (candidate) => validateShedCandidate(candidate, kind),
                 canonicalize: (candidate) => canonicalizeBudgetDemotion(candidate),
+                serialize: wireText,
               });
               if (reentered.used < simulated.used) simulated = reentered;
             }
@@ -524,7 +618,7 @@ export function emitFinalizedPayload(
   });
   if (demoted !== current) {
     current = demoted;
-    text = JSON.stringify(current);
+    text = wireText(current);
     used = measureResponseBytes(text);
   }
 
@@ -551,16 +645,16 @@ export function emitFinalizedPayload(
   // bounds the pre-settle fit — the fit drops a line BEFORE anything is booked,
   // so `D` re-owes it and the chain stays exact-once.
   //
-  // BEST EFFORT, NEVER A NEW REFUSAL AND NEVER A STRUCTURAL CUT: the fit trims
-  // ESTIMATION error, not fixed overhead. A resumed page that overshoots its
+  // BEST EFFORT FOR INHERITED BUDGET ESTIMATION: the fit trims modest
+  // estimation error, not fixed overhead. A resumed page that overshoots its
   // inherited budget by up to `RESUME_TRIM_SLACK` (`choosePage` under-counts a
   // multi-window page's per-row overhead: +1..11% measured over 2-6 windows) is
   // trimmed by a line or two; one that overshoots by more, or that not even ONE
-  // line can make fit, ships as `choosePage` chose it, exactly as v0.14.4 did.
-  // Its overshoot is then a fixed overhead the ladder cannot shed — a markdown
-  // page's heading index (~2 KB for a 40-heading document) — and enforcing the
-  // budget there would answer a 1.5 KB request with one-line pages that each
-  // re-carry that index (measured: 6 pages became 100+).
+  // line can make fit, retains its producer form only when that form is still
+  // within the hard client ceiling. A one-line floor beyond the profile ceiling
+  // is converted below to a terminal refusal; ordinary inherited-budget fixed
+  // overhead remains best-effort to avoid 100 one-line pages that each re-carry
+  // a markdown heading index (measured: 6 pages became 100+).
   const inheritedBudgetBytes = declaredMaxBytes === undefined && context.readRequest?.mode === "resume"
     ? requestBudgetBytes(context.readRequest.state.budget)
     : undefined;
@@ -569,15 +663,20 @@ export function emitFinalizedPayload(
     const fit = fitStagedReadToBudget({
       payload: current,
       staged: context.readRequest,
-      claim: { budgetDeclared: declaredMaxBytes !== undefined || inheritedBudgetBytes !== undefined, shed: ladder.records.length > 0 },
+      claim: { budgetDeclared: boundMaxBytes !== undefined || inheritedBudgetBytes !== undefined, shed: ladder.records.length > 0 },
       limit: inheritedBudgetBytes !== undefined && trimToInherited ? Math.min(limit, inheritedBudgetBytes) : limit,
-      measure: (candidate) => measureResponseBytes(JSON.stringify(candidate)),
+      // The client's ceiling is a target (see `pageCeiling`): a page whose
+      // smallest form is wider than it ships in that form, under the limit this
+      // call has always been held to, rather than as a refusal.
+      ...(ceilingBinds && pageCeiling !== undefined ? { hardLimit: pageCeiling, stateless: true } : {}),
+      ...(pageCeiling !== undefined ? { trailingRows: true, restateElided: true } : {}),
+      measure: (candidate) => measureResponseBytes(wireText(candidate)),
     });
     if (fit.ok) {
       if (fit.payload !== current) {
         const usedBeforeFit = used;
         current = fit.payload;
-        text = JSON.stringify(current);
+        text = wireText(current);
         used = measureResponseBytes(text);
         // A LINE the fit dropped is shedding like any rung's, and the ledger
         // half below must know it: it is recorded in the ladder's OWN shed
@@ -586,6 +685,28 @@ export function emitFinalizedPayload(
         // settlement can never widen a corroborated window back out over the
         // lines that were cut. Prose peeled alone is not a window change.
         if (fit.shrunk) ladder.records.push({ rung: 4, bytes: usedBeforeFit - used });
+      }
+    } else if (
+      pageCeiling !== undefined
+      && fit.requiredMinBytes > pageCeiling
+    ) {
+      // No page can carry this requested line within the client's hard response
+      // ceiling. Return a small, terminal refusal: a budget retry cannot change
+      // the client profile ceiling, and replaying the same cursor would loop.
+      // The request is closed below without booking any source lines.
+      const forTool = advertisedTool(context.tool);
+      if (forTool !== undefined) {
+        current = canonicalizeEmittedToolCalls({
+          ...buildRefusal(forTool, {
+            code: "cap-exceeded",
+            retry: "none",
+            detail: "At least one requested source line exceeds this client's response ceiling; no source lines were served and no continuation is available.",
+          }),
+        }) as ShedPayload;
+        terminalReadCeilingRefusal = true;
+        onWire = "refusal";
+        text = wireText(current);
+        used = measureResponseBytes(text);
       }
     } else if (inheritedBudgetBytes === undefined) {
       // (A resumed page whose INHERITED budget not even one line fits is NOT refused: see below.)
@@ -602,7 +723,7 @@ export function emitFinalizedPayload(
         }) as ShedPayload;
         refusalOfBatch = onWire === "read.batch";
         onWire = "refusal";
-        text = JSON.stringify(current);
+        text = wireText(current);
         used = measureResponseBytes(text);
       }
     }
@@ -645,14 +766,17 @@ export function emitFinalizedPayload(
   // request — every call that is not a line-addressed read — it returns the
   // payload by identity and nothing is re-serialized.
   const continued = applyReadRequestContinuation(current, context.readRequest, {
-    budgetDeclared: declaredMaxBytes !== undefined,
+    budgetDeclared: boundMaxBytes !== undefined,
+    ...(ceilingBinds ? { stateless: true } : {}),
+    ...(pageCeiling !== undefined ? { restateElided: true } : {}),
     shed: ladder.records.length > 0,
     ...(refusalFloorBytes !== undefined ? { refusalFloorBytes } : {}),
     ...(refusalOfBatch ? { refusalOfBatch: true } : {}),
+    ...(terminalReadCeilingRefusal ? { terminalReadCeilingRefusal: true } : {}),
   });
   if (continued !== current) {
     current = continued;
-    text = JSON.stringify(current);
+    text = wireText(current);
     used = measureResponseBytes(text);
   }
   // R2-R1 (P1-5, `comments:"keep"`): a `content:"full"` request that has just been
@@ -699,7 +823,7 @@ export function emitFinalizedPayload(
   const searchContinued = applySearchRequestContinuation(current, context.searchRequest);
   if (searchContinued !== current) {
     current = searchContinued;
-    text = JSON.stringify(current);
+    text = wireText(current);
     used = measureResponseBytes(text);
   }
   // ---------------------------------------------------------------------
@@ -747,12 +871,14 @@ export function emitFinalizedPayload(
     // one below is the same length, so this measures the page that will ship.
     const shrunk = context.readRequest !== undefined
       ? shrinkLargestEvidenceByOneLine(current) ?? shrinkLargestBatchEntryByOneLine(current)
-      : shrinkSearchPageToFit(current, (candidate) => measureResponseBytes(JSON.stringify(candidate)) <= limit);
+      : shrinkSearchPageToFit(current, (candidate) => measureResponseBytes(wireText(candidate)) <= limit);
     if (shrunk !== undefined) {
       let reRewritten: ShedPayload;
       if (context.readRequest !== undefined) {
         reRewritten = applyReadRequestContinuation(shrunk, context.readRequest, {
-          budgetDeclared: declaredMaxBytes !== undefined,
+          budgetDeclared: boundMaxBytes !== undefined,
+          ...(ceilingBinds ? { stateless: true } : {}),
+          ...(pageCeiling !== undefined ? { restateElided: true } : {}),
           shed: true,
         });
       } else {
@@ -761,7 +887,7 @@ export function emitFinalizedPayload(
         }
         reRewritten = applySearchRequestContinuation(shrunk, context.searchRequest);
       }
-      const reText = JSON.stringify(reRewritten);
+      const reText = wireText(reRewritten);
       const reUsed = measureResponseBytes(reText);
       if (reUsed <= limit) {
         current = reRewritten;
@@ -769,7 +895,19 @@ export function emitFinalizedPayload(
         used = reUsed;
       }
     }
-    if (used > limit) {
+    // If a page still exceeds the hard client ceiling after the one-line
+    // correction, fail closed. A caller cannot raise a profile ceiling.
+    const impossibleClientCeiling = pageCeiling !== undefined && used > pageCeiling;
+    if (impossibleClientCeiling) {
+      const converted = failClosedClientCeiling(kind, context, used, pageCeiling!);
+      if (converted !== undefined) {
+        current = converted;
+        terminalReadCeilingRefusal = true;
+        onWire = "refusal";
+        text = wireText(current);
+        used = measureResponseBytes(text);
+      }
+    } else if (used > refusalLimit) {
       const forTool = advertisedTool(context.tool);
       if (forTool !== undefined) {
         current = canonicalizeEmittedToolCalls({
@@ -782,7 +920,7 @@ export function emitFinalizedPayload(
           }),
         }) as ShedPayload;
         onWire = "refusal";
-        text = JSON.stringify(current);
+        text = wireText(current);
         used = measureResponseBytes(text);
       }
     }
@@ -796,6 +934,45 @@ export function emitFinalizedPayload(
   // "REFACTOR AT DEFAULT BUDGETS" invariant above. Re-measured through the
   // ONE sanctioned byte counter so `emittedBytes`/`used` describe what is
   // actually on the wire.
+  if (context.clientId?.toLowerCase() === "copilot-cli") {
+    const compact = omitCoveredFrontierIndex(current);
+    if (compact !== current) { current = compact; text = JSON.stringify(current); }
+  }
+  // 2026-10-23, codex-copilot-proxy wire compaction: the members of a final
+  // reply that repeat what it already says leave the wire here — after the
+  // ladder, the ledger settlement and the request continuations have read the
+  // full payload, and after `omitCoveredFrontierIndex` has compared its
+  // `frontier_index` entries' roles with the evidence rows' (wireCompaction.ts).
+  //
+  // TL_EFF_EVIDENCE_PATH_GROUPS (default OFF): `path`/`handle` once per run of
+  // rows of one file (evidencePathGroups.ts), and the obligations' path, range
+  // and role restated from the rows (`restateObligationsFromEvidence`, which
+  // compares them with the whole rows BEFORE the pass below drops a row's
+  // `role`). The pack-fingerprint binding below matches the delivered rows by
+  // path, handle, range and body, so it is handed the text whose rows still
+  // carry their own (`addressedText`).
+  //
+  // Every pass is a pure function of the payload, and a defect in one must not
+  // cost the caller its reply: outside the test posture (the strict decision
+  // invariant every vitest config sets) a throw ships the payload as it stood.
+  let addressedText = text;
+  try {
+    const restated = restateObligationsFromEvidence(current, onWire);
+    if (restated !== current) { current = restated; text = JSON.stringify(current); }
+    // The call as the dispatch knew it: its arguments and whether the task it continues passed `surfaceRoles`.
+    const compacted = compactReplyEnvelope(current, onWire, context);
+    if (compacted !== current) { current = compacted; text = JSON.stringify(current); }
+    const grouped = groupEvidencePaths(current);
+    if (grouped !== current) {
+      // `text` may be the ladder's own (already grouped) serialization: the
+      // text with whole rows is the payload's own.
+      addressedText = JSON.stringify(current);
+      current = grouped;
+      text = JSON.stringify(current);
+    } else addressedText = text;
+  } catch (error) {
+    if (decisionInvariantStrictEnabled()) throw error;
+  }
   text = applyResponseCodec(text, current, onWire, context, limit);
   used = measureResponseBytes(text);
   noteEmission(context, { limit, used, ...(shed.length > 0 ? { shed } : {}) }, text, kind, shed.length > 0);
@@ -821,6 +998,11 @@ export function emitFinalizedPayload(
     );
   }
 
+  const finalizePackBinding = context.finalizePackFingerprintBinding;
+  delete context.finalizePackFingerprintBinding;
+  if (context.sizePreview !== true) {
+    try {finalizePackBinding?.(addressedText, context);} catch { /* Unproved residency remains unbound. */ }
+  }
   const finalized: FinalizableResult = {
     content: [{ type: "text", text }],
   };
@@ -1123,6 +1305,24 @@ function budgetBelowMinimumRefusal(
       required_min_bytes: requiredMinBytes,
       retry: "call",
       ...(next !== undefined ? { next } : {}),
+    }),
+  }) as ShedPayload;
+}
+
+function failClosedClientCeiling(
+  kind: Kind,
+  context: ProtocolCallContext,
+  used: number,
+  ceiling: number,
+): ShedPayload | undefined {
+  if (!shedderFor(kind).refusalConvertible || kind === "refusal") return undefined;
+  const forTool = advertisedTool(context.tool);
+  if (forTool === undefined) return undefined;
+  return canonicalizeEmittedToolCalls({
+    ...buildRefusal(forTool, {
+      code: "cap-exceeded",
+      retry: "none",
+      detail: `the ${kind} response floor (${used} B) exceeds this client's ${ceiling} B response ceiling; no source lines were served and no continuation is available`,
     }),
   }) as ShedPayload;
 }

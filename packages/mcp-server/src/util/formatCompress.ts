@@ -471,6 +471,59 @@ export function elideDocCommentsForDisplay(
 }
 
 /**
+ * The longest caller-named window `elideDocCommentsForExplicitWindow` serves
+ * with its comments kept when one comment block fills most of it.
+ */
+export const EXPLICIT_COMMENT_WINDOW_MAX_LINES = 40;
+
+/**
+ * `elideDocCommentsForDisplay` for a window the CALLER named with
+ * `range`/`ranges` (2026-10-19, v016 decision runs).
+ *
+ * A small explicit window that one comment block fills is a request for that
+ * comment. 6t-2 T13 rep0 #14 asked for tasks_init.cpp 209-222 — "the IMU
+ * registration note comment", which says the driver keeps a single callback
+ * slot — and got 209 and 219-222 with 210-218 elided; 6t-3 T13 rep2 #20
+ * asked for test_ekf.cpp 1-30, got 20-30 with its 19-line header elided, and
+ * spent #21 re-asking 1-19 alone so the comment-only fallback would serve it.
+ *
+ * The rule: the window is served raw, with a note — as the comment-only
+ * fallback already serves a window that is ALL comment — when it
+ *  - has at most `EXPLICIT_COMMENT_WINDOW_MAX_LINES` lines,
+ *  - is not the whole file (`1-N`, `range:"full"` ask for the file, not for
+ *    its comment, and keep the whole-file rendering `content:"full"` gives
+ *    it), and
+ *  - has ONE elided block covering at least half of its lines. Several short
+ *    doc blocks interleaved with code are the ordinary case the default
+ *    elision is for, however much of the window they add up to.
+ * Every other window renders exactly as `elideDocCommentsForDisplay` does, so
+ * an ordinary read does not grow, and nothing changes for a whole-file read,
+ * a served-range difference, a pack, or a window the server chose. `elided` is
+ * `[]` when the window is served raw: every line of it ships, and serve sites
+ * book what ships.
+ */
+export function elideDocCommentsForExplicitWindow(
+  text: string,
+  lang: string | undefined,
+  startLine: number,
+  /** Lines in the whole file the window is cut from. */
+  totalLines: number,
+): { content: string; note?: string; elided: Array<[number, number]> } {
+  const display = elideDocCommentsForDisplay(text, lang, false, startLine, "window");
+  if (display.elided.length === 0) return display;
+  const windowLines = text.replace(/\r?\n$/, "").split(/\r?\n/).length;
+  if (windowLines > EXPLICIT_COMMENT_WINDOW_MAX_LINES) return display;
+  if (startLine <= 1 && startLine + windowLines - 1 >= totalLines) return display;
+  const largestBlock = Math.max(...display.elided.map(([first, last]) => last - first + 1));
+  if (largestBlock * 2 < windowLines) return display;
+  return {
+    content: text,
+    note: "comment window kept (one comment block fills most of the lines you named)",
+    elided: [],
+  };
+}
+
+/**
  * C-comment-language pass. Recognizes a `/* ... *\/` block ONLY when `/*` is
  * the first non-whitespace on its line (line-start anchoring); a mid-line
  * `/*` is left as-is. String and template-literal state is tracked so a

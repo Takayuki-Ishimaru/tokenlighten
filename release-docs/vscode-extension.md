@@ -6,7 +6,7 @@ The TokenLighten VS Code extension bundles the CLI, MCP server, parsers, and req
 
 ## Install without building
 
-Download **[tokenlighten-vscode-extension-0.15.3.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.3/tokenlighten-vscode-extension-0.15.3.vsix)** from the v0.15.3 GitHub Release. The same VSIX works on Windows, macOS, and Linux.
+Download **[tokenlighten-vscode-extension-0.16.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.16.0/tokenlighten-vscode-extension-0.16.0.vsix)** from the v0.16.0 GitHub Release. The same VSIX works on Windows, macOS, and Linux.
 
 1. Open **Extensions**.
 2. Select **Install from VSIX…**.
@@ -14,7 +14,7 @@ Download **[tokenlighten-vscode-extension-0.15.3.vsix](https://github.com/Takayu
 4. Reload VS Code if prompted.
 
 ~~~bash
-code --install-extension tokenlighten-vscode-extension-0.15.3.vsix
+code --install-extension tokenlighten-vscode-extension-0.16.0.vsix
 ~~~
 
 To package the VSIX from source, use Node.js 22 or later:
@@ -59,7 +59,7 @@ permissions. Use `tl workspace setup --clients vscode --copilot-session-context 
 to leave the hook configuration unchanged. Disable/native controls turn off
 TokenLighten's managed Copilot guidance too.
 
-After upgrading to v0.15.3, re-run **Set up this workspace**, then start a
+After upgrading to v0.16.0, re-run **Set up this workspace**, then start a
 new agent session or reconnect the MCP client. This refreshes the managed
 guides, Copilot configuration, and prefixed tool names. See
 [Refresh an existing workspace](getting-started.md#refresh-an-existing-workspace-after-upgrading)
@@ -93,17 +93,23 @@ The sidebar shows local usage information and distinguishes measurements from fa
 
 ## Privacy and scope
 
-Repository indexing and context selection run locally. The extension does not add a model or upload repository contents on its own. Your coding agent remains responsible for requests to its model provider. Workspace-changing operations require a trusted VS Code workspace.
+Repository indexing and context selection run locally. Optional semantic search uses a local embedding model downloaded at your request and is off by default. Repository content is not sent to a model service by this engine. Your coding agent remains responsible for requests to its model provider. Workspace-changing operations require a trusted VS Code workspace.
+
+## Local analysis engines
+
+Open **TokenLighten: Manage Local Analysis Engines** from the Command Palette to configure typed symbol resolution, compound requests and semantic search. Typed resolution and semantic search are off by default. The panel supports model download, language-server configuration and license viewing. See [Local analysis engines](local-analysis.md).
 
 ## Settings
 
 | Setting | Default | Description |
 |---|---:|---|
 | `tokenlighten.enabled` | `true` | Enables or disables TokenLighten for the current workspace. |
-| `tokenlighten.updateCheck.enabled` | `true` | Checks published GitHub Releases for a newer VSIX at startup; installation always requires user action. |
+| `tokenlighten.autoUpdate.enabled` | `true` | Automatically downloads and installs newer VSIX releases. Toggle “Automatically update the extension” in the sidebar; changes apply immediately to all workspaces. When off, updates only produce notifications. Reload from the notification when convenient. |
+| `tokenlighten.updateCheck.enabled` | `true` | Checks GitHub Releases at startup and every six hours. Disabling also stops automatic updates. Enabling automatic updates in the sidebar also enables this setting. |
+| `tokenlighten.confirmResetOnUpdate` | `true` | After an update to a newer version (automatic or manual), asks whether to reset your TokenLighten user settings to their defaults, listing each one that differs from the new default; closing the notification without answering asks again at the next startup. Workspace and folder settings are never changed. Choose “Don't Ask Again” in the notification to turn this off. |
 | `tokenlighten.language` | `auto` | Uses the VS Code display language automatically or selects English/Japanese explicitly. |
 | `tokenlighten.toolSurface` | `full` | Advertised MCP tool surface: `full` (every capability) or `code` (code/plain-text/config only, a smaller tool schema). Changing this requires reconnecting. |
 | `tokenlighten.copilotGuide` | `standalone` | Copilot guide mode: short self-contained instructions, shared AGENTS.md instructions, or keep existing configuration. |
 | `tokenlighten.guideProfile` | `compact` | Shared guide size written during setup: `compact`, `medium`, or `full`. An explicit value takes precedence on both tool surfaces. |
 
-The desktop application is not included in the public v0.15.3 release.
+The desktop application is not included in the public v0.16.0 release.

@@ -178,6 +178,23 @@ export interface TaskChangeObligation {
   depends_on: string[];
 }
 
+/**
+ * An obligation as `plan.change_contract.obligations[]` ships on the wire
+ * when TL_EFF_EVIDENCE_PATH_GROUPS is on (2026-10-23, default OFF; the same
+ * "restated from the evidence rows" family as `GroupedEvidence`). `path`,
+ * `range` and `role` are left off when the first evidence row of the
+ * obligation's `handle` of the same reply carries the same value: an
+ * obligation without one of them has the value of that row — whole rows, so a
+ * reader resolves a grouped reply's rows first. An obligation whose handle no
+ * emitted row carries, or whose value differs from the row's (`range` is the
+ * surface's whole scope window, which is wider than the row's range when rows
+ * were split or windows are still owed), keeps the member. With the flag off
+ * (the default) every obligation is a whole `TaskChangeObligation`. Every other
+ * member is as in `TaskChangeObligation`.
+ */
+export type WireTaskChangeObligation =
+  Omit<TaskChangeObligation, "path" | "range" | "role"> & Partial<Pick<TaskChangeObligation, "path" | "range" | "role">>;
+
 /** Ordered, edit-ready projection of a task pack's located surfaces. */
 export interface TaskChangeContract {
   version: 1;
@@ -372,6 +389,8 @@ export interface TaskWiringStructuralCheck {
   id: string;
   description: string;
   handle: string;
+  /** Other served surfaces where the same obligation may be discharged instead (any one file suffices). */
+  alternate_handles?: string[];
   tokens: string[];
 }
 
@@ -1014,8 +1033,23 @@ export interface MockHeaderEntry {
   note: string;
 }
 
+/**
+ * util/verificationPack.ts nativeSyntaxCheck: a ready-to-run syntax check of edited native translation units;
+ * pythonSyntaxCheck: `<interpreter> -m py_compile` over edited .py files when the PATH's python3 falls short of their project.
+ */
+export interface SyntaxCheck {
+  /** One command per language family (C++ first): workspace-root-relative paths, run from the workspace root. */
+  commands: string[];
+  /** Edited files no command checks (no compiler for their language, past the unit cap, a header nothing checked reaches, or a .py file of another Python project). */
+  unchecked?: string[];
+  /** How to read the result (the printed exit status decides, never stderr text), or for Python which interpreter and why. */
+  note: string;
+}
+
 /** util/verificationPack.ts:99-172. */
 export interface HarnessInfo {
+  /** Present exactly when no build system sits above the native edits and the host has a compiler for their language, or when edited .py files' project needs an interpreter other than the PATH's python3. */
+  syntax_check?: SyntaxCheck;
   build_command?: { text: string; source: string; cwd?: string };
   build_command_synthesized?: true;
   entrypoint_commands?: Array<{ text: string; source: string; entrypoint: string }>;
@@ -1039,7 +1073,7 @@ export interface ToolchainInfo {
   build_entry?: string;
   build_entry_absent?: boolean;
   test_entry?: string;
-  /** node only: directory whose package.json declared `scripts.test` ("" = workspace root). */
+  /** Directory of the detected test script or Go module ("." = workspace root). */
   test_entry_dir?: string;
   /** node: `<test_entry_dir>/node_modules` exists; python: a venv runner exists. */
   deps_installed?: boolean;

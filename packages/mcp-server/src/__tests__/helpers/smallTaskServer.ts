@@ -8,16 +8,14 @@
 // server are invisible to the other.
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
 import { killServerGroup } from "./killServerGroup.js";
+import { TSX_NODE_ARGS } from "./tsxNode.js";
 
-const nodeRequire = createRequire(import.meta.url);
-const TSX_CLI = nodeRequire.resolve("tsx/cli");
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BIN_TS = path.resolve(HERE, "..", "..", "bin.ts");
 
@@ -66,7 +64,7 @@ export async function startSmallTaskServer(ws: string, options: StartOptions = {
   Object.assign(env, { HOME: home, USERPROFILE: home }, options.env ?? {});
   const child: ChildProcess = spawn(
     process.execPath,
-    [TSX_CLI, "--liftoff-only", BIN_TS, ws],
+    [...TSX_NODE_ARGS, BIN_TS, ws],
     { cwd: ws, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", env },
   );
   let stdoutBuf = "";

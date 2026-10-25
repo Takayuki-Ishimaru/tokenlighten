@@ -15,6 +15,7 @@
  */
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -93,6 +94,29 @@ describe("--print-schema-stamp (bin.ts) integration sanity", () => {
     // Best-effort: only a valid comparison if the built dist reflects this
     // same checkout's source (true for a normal `npm run build` workflow).
     expect(printed).toBe(computeSchemaStamp(stampedToolSurfaces()));
+  });
+
+  // 2026-10-22 (v0.16.0 release verification): the portable read cwd hint
+  // names the process's root, so the stamp moved with the directory it was
+  // computed from — the VS Code build (its package directory) and CI (the
+  // repository root) always disagreed. The stamp now uses one fixed root.
+  it("prints the same stamp from another working directory", () => {
+    const binPath = path.resolve(HERE, "..", "..", "dist", "bin.js");
+    if (!fs.existsSync(binPath)) return; // dist not built in this checkout
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "tl-stamp-cwd-"));
+    try {
+      const proc = spawnSync(process.execPath, [binPath, "--print-schema-stamp"], { encoding: "utf8", cwd: elsewhere });
+      expect(proc.status, proc.stderr).toBe(0);
+      expect(proc.stdout.trim()).toBe(computeSchemaStamp(stampedToolSurfaces()));
+    } finally {
+      fs.rmSync(elsewhere, { recursive: true, force: true });
+    }
+    const hints = (stampedToolSurfaces() as Array<Array<{ name: string; inputSchema: { properties: Record<string, { description?: string }> } }>>)
+      .flatMap((tools) => tools.filter((tool) => tool.name === "tl_read_file"))
+      .map((tool) => tool.inputSchema.properties["cwd"]?.description)
+      .filter((description) => description?.startsWith("Workspace cwd:"));
+    expect(hints.length).toBeGreaterThan(0);
+    expect(new Set(hints)).toEqual(new Set(['Workspace cwd: "/workspace"; no pwd.']));
   });
 });
 

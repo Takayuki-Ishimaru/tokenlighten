@@ -42,6 +42,7 @@ import {
   arrayAt,
   dropTrailingEntry,
   isRecord,
+  keptLinesPerPass,
   requestedRangeContentFull,
   str,
   carriesStripDisclosure,
@@ -352,7 +353,7 @@ function truncateRangedEntries(payload: ShedPayload, context: ShedContext): Shed
     const content = rawContent.endsWith("\n") ? rawContent.slice(0, -1) : rawContent;
     const lines = content.split("\n");
     if (lines.length < 2) continue;
-    const keep = Math.ceil(lines.length / 2);
+    const keep = keptLinesPerPass(lines.length, context);
     if (keep >= lines.length) continue;
 
     const [start] = bounds;

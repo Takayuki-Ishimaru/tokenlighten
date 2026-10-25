@@ -75,6 +75,8 @@ import {
 } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
+import { copyOnnxRuntimeLegalFiles } from "../../../scripts/onnxruntime-licenses.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const EXT_ROOT = join(__dirname, "..");
@@ -165,7 +167,7 @@ const publicCore2ExclusionPlugin = {
 };
 
 /** Bundle one package's entry to a single CJS file, with a minimal package.json shim next to it so `require.resolve("@tokenlighten/<name>")` succeeds from tl-cli.js's dist/node_modules layout. */
-async function bundleSiblingPackage({ name, srcEntry, outBasename, plugins = [], outDir }) {
+async function bundleSiblingPackage({ name, srcEntry, outBasename, plugins = [], subpaths = {}, outDir }) {
   const pkgRoot = join(outDir, "node_modules", ...name.split("/"));
   const pkgDist = join(pkgRoot, "dist");
   mkdirSync(pkgDist, { recursive: true });
@@ -177,6 +179,12 @@ async function bundleSiblingPackage({ name, srcEntry, outBasename, plugins = [],
     outfile,
     plugins,
   });
+  const exports = { ".": { default: `./dist/${outBasename}` }, "./package.json": "./package.json" };
+  for (const [subpath, source] of Object.entries(subpaths)) {
+    const basename = `${subpath}.js`;
+    await build({ ...commonOpts, entryPoints: [source], outfile: join(pkgDist, basename) });
+    exports[`./${subpath}`] = { default: `./dist/${basename}` };
+  }
 
   const realPkgDir = join(REPO_ROOT, "packages", name.replace("@tokenlighten/", ""));
   writeFileSync(
@@ -187,13 +195,137 @@ async function bundleSiblingPackage({ name, srcEntry, outBasename, plugins = [],
         version: pkgVersion(realPkgDir),
         type: "commonjs",
         main: `dist/${outBasename}`,
-        exports: { ".": { default: `./dist/${outBasename}` } },
+        exports,
       },
       null,
       2,
     ) + "\n",
   );
   return { pkgRoot, pkgDist, outfile };
+}
+
+/** Preserve upstream licensing alongside a runtime-only copy of a dependency. */
+function copyRuntimePackage(source, destination, members, packageJson = undefined) {
+  mkdirSync(destination, { recursive: true });
+  for (const member of members) {
+    const path = join(source, member);
+    if (!existsSync(path)) throw new Error(`bundle-cli: required runtime asset missing: ${path}`);
+    cpSync(path, join(destination, member), { recursive: true });
+  }
+  for (const member of ["LICENSE", "LICENSE.txt", "LICENSE.md", "NOTICE", "NOTICE.txt", "ThirdPartyNotices.txt", "README.md"]) {
+    if (existsSync(join(source, member))) cpSync(join(source, member), join(destination, member));
+  }
+  const manifest = packageJson ?? readJson(join(source, "package.json"));
+  writeFileSync(join(destination, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+  copyOnnxRuntimeLegalFiles(`${manifest.name}@${manifest.version}`, destination);
+}
+
+/**
+ * Text inference only: no Sharp/libvips or host-specific image packages enter
+ * a universal VSIX/install archive. The default is portable CPU WASM; the
+ * explicit native option adds available official bindings and retains WASM
+ * fallback (notably for macOS x64, which ONNX Runtime 1.30 no longer ships).
+ */
+async function bundleSemanticRuntime(outDir, nativeSemanticRuntime = false) {
+  const nodeModules = join(outDir, "node_modules");
+  const transformersSource = join(REPO_NODE_MODULES, "@huggingface", "transformers");
+  const transformersRoot = join(nodeModules, "@huggingface", "transformers");
+  const upstreamEntry = join(transformersSource, "dist", "transformers.node.mjs");
+  if (!existsSync(upstreamEntry)) throw new Error("bundle-cli: optional @huggingface/transformers must be installed to package semantic search");
+  const modificationNotice = "TokenLighten text-only distribution of Transformers.js.\n"
+    + "Changes: Sharp image backend replaced with null; feature extraction uses text only.\n"
+    + (nativeSemanticRuntime
+      ? "ONNX backend selects the official native CPU runtime when a platform binding exists, otherwise the official locally packaged CPU WASM runtime.\n"
+      : "ONNX backend uses the official locally packaged portable CPU WASM runtime. Native binaries are not included.\n")
+    + "Tensor constructors use the selected runtime. WASM binaries load from this package tree without CDN requests.\n"
+    + "Dependency metadata lists the packaged runtime closure; model weights are not included.\n";
+  const upstreamPackage = readJson(join(transformersSource, "package.json"));
+  copyRuntimePackage(transformersSource, transformersRoot, ["LICENSE"], {
+    ...upstreamPackage,
+    main: "./dist/transformers.node.mjs",
+    exports: { ".": { default: "./dist/transformers.node.mjs" } },
+    dependencies: {
+      ...(nativeSemanticRuntime ? { "onnxruntime-node": upstreamPackage.dependencies["onnxruntime-node"] } : {}),
+      "onnxruntime-web": upstreamPackage.dependencies["onnxruntime-web"],
+    },
+    scripts: {},
+    tokenlightenModification: {
+      textOnly: true,
+      nativeSemanticRuntime,
+      notice: "MODIFICATIONS.txt",
+      upstreamEntrySha256: createHash("sha256").update(readFileSync(upstreamEntry)).digest("hex"),
+    },
+  });
+  mkdirSync(join(transformersRoot, "dist"), { recursive: true });
+  writeFileSync(join(transformersRoot, "MODIFICATIONS.txt"), modificationNotice);
+  await build({
+    bundle: true, platform: "node", target: "node20", format: "esm", minify: true,
+    sourcemap: false, logLevel: "info", entryPoints: [upstreamEntry],
+    outfile: join(transformersRoot, "dist", "transformers.node.mjs"),
+    banner: { js: "/* Modified by TokenLighten: text-only Transformers.js with local native/WASM CPU inference. See ../MODIFICATIONS.txt and ../LICENSE. */" },
+    plugins: [{
+      name: "tokenlighten-transformers-text-only",
+      setup(context) {
+        context.onResolve({ filter: /^sharp$/ }, () => ({ path: "sharp-disabled", namespace: "tokenlighten-text-only" }));
+        context.onLoad({ filter: /.*/, namespace: "tokenlighten-text-only" }, () => ({ contents: "export default null;", loader: "js" }));
+        context.onLoad({ filter: /transformers\.node\.mjs$/ }, args => {
+          if (args.path !== upstreamEntry) return undefined;
+          let contents = readFileSync(args.path, "utf8");
+          const nativeImport = 'var onnx_node_default = requireFromHere("onnxruntime-node");';
+          const tensorImport = 'import { Tensor } from "onnxruntime-common";';
+          const imageGuard = 'throw new Error("Unable to load image processing library.");';
+          if (!contents.includes(nativeImport) || !contents.includes(tensorImport) || !contents.includes(imageGuard)) throw new Error("bundle-cli: Transformers text-only adaptation drifted");
+          const nativeSelection = nativeSemanticRuntime
+            ? `var nativePackageRoot = path.dirname(requireFromHere.resolve("onnxruntime-node/package.json"));
+var nativeBinding = path.join(nativePackageRoot, "bin", "napi-v6", process.platform, process.arch, "onnxruntime_binding.node");
+var nativeAvailable = fs.existsSync(nativeBinding);`
+            : "var nativeAvailable = false;";
+          contents = contents.replace(nativeImport, `${nativeSelection}
+var onnx_node_default = nativeAvailable ? requireFromHere("onnxruntime-node") : requireFromHere("onnxruntime-web");
+if (!nativeAvailable) {
+  env.useWasmCache = false;
+  var wasmRoot = path.dirname(requireFromHere.resolve("onnxruntime-web"));
+  onnx_node_default.env.wasm.wasmPaths = {
+    mjs: url.pathToFileURL(path.join(wasmRoot, "ort-wasm-simd-threaded.mjs")).href,
+    wasm: url.pathToFileURL(path.join(wasmRoot, "ort-wasm-simd-threaded.wasm")).href
+  };
+  onnx_node_default.env.wasm.numThreads = 1;
+}`);
+          contents = contents.replace(tensorImport, "var Tensor = onnx_node_default.Tensor;");
+          contents = contents.replace(imageGuard, 'loadImageFunction = async () => { throw new Error("Image processing is unavailable in the TokenLighten text-only runtime."); };');
+          return { contents, loader: "js", resolveDir: dirname(upstreamEntry) };
+        });
+      },
+    }],
+  });
+
+  if (nativeSemanticRuntime) {
+    const nativeSource = join(REPO_NODE_MODULES, "onnxruntime-node");
+    const nativeManifest = readJson(join(nativeSource, "package.json"));
+    copyRuntimePackage(nativeSource, join(nodeModules, "onnxruntime-node"), ["dist", "bin"], {
+      ...nativeManifest, scripts: {}, dependencies: { "onnxruntime-common": nativeManifest.dependencies["onnxruntime-common"] },
+    });
+    copyRuntimePackage(join(REPO_NODE_MODULES, "onnxruntime-common"), join(nodeModules, "onnxruntime-common"), ["dist"]);
+  }
+  const webSource = join(REPO_NODE_MODULES, "onnxruntime-web");
+  const webManifest = readJson(join(webSource, "package.json"));
+  const webRoot = join(nodeModules, "onnxruntime-web");
+  copyRuntimePackage(webSource, webRoot, [], {
+    ...webManifest, scripts: {}, main: "dist/ort.node.min.js",
+    exports: { ".": { default: "./dist/ort.node.min.js" } },
+    dependencies: { "onnxruntime-common": webManifest.dependencies["onnxruntime-common"] },
+  });
+  mkdirSync(join(webRoot, "dist"), { recursive: true });
+  for (const asset of ["ort.node.min.js", "ort-wasm-simd-threaded.mjs", "ort-wasm-simd-threaded.wasm"]) {
+    cpSync(join(webSource, "dist", asset), join(webRoot, "dist", asset));
+  }
+  const webCommonSource = join(webSource, "node_modules", "onnxruntime-common");
+  const commonSource = existsSync(webCommonSource) ? webCommonSource : join(REPO_NODE_MODULES, "onnxruntime-common");
+  copyRuntimePackage(commonSource, join(webRoot, "node_modules", "onnxruntime-common"), ["dist"]);
+
+  // The typed-symbol worker resolves the compiler and its standard libraries
+  // at runtime, independently of every esbuild entry above.
+  copyRuntimePackage(join(REPO_NODE_MODULES, "typescript"), join(nodeModules, "typescript"), ["lib", "bin"]);
 }
 
 /**
@@ -203,7 +335,7 @@ async function bundleSiblingPackage({ name, srcEntry, outBasename, plugins = [],
  * the same tree at an arbitrary location without re-running this file as a
  * subprocess.
  */
-export async function bundleCli({ outDir = DEFAULT_DIST } = {}) {
+export async function bundleCli({ outDir = DEFAULT_DIST, nativeSemanticRuntime = false } = {}) {
   // Start clean so stale grammar files / shims never survive a rename.
   rmSync(join(outDir, "tl-cli.js"), { force: true });
   rmSync(join(outDir, "tl-cli.js.map"), { force: true });
@@ -236,8 +368,14 @@ export async function bundleCli({ outDir = DEFAULT_DIST } = {}) {
     srcEntry: join(REPO_ROOT, "packages/mcp-server/src/bin.ts"),
     outBasename: "bin.js",
     plugins: [publicCore2ExclusionPlugin],
+    subpaths: {
+      engines: join(REPO_ROOT, "packages/mcp-server/src/features/engines/config.ts"),
+      "semantic-search": join(REPO_ROOT, "packages/mcp-server/src/features/semantic-search/index.ts"),
+      "typed-symbols": join(REPO_ROOT, "packages/mcp-server/src/features/typed-symbols/index.ts"),
+    },
     outDir,
   });
+  await bundleSemanticRuntime(outDir, nativeSemanticRuntime);
 
   // Archive support (tools/archive.ts) dynamic-imports
   // "libarchive.js/dist/libarchive-node.mjs", whose bundled-in code spawns a
@@ -289,6 +427,7 @@ export async function bundleCli({ outDir = DEFAULT_DIST } = {}) {
     join(REPO_ROOT, "THIRD_PARTY_NOTICES.md"),
     join(outDir, "THIRD_PARTY_NOTICES.md"),
   );
+  cpSync(join(REPO_ROOT, "MODEL_LICENSES.json"), join(outDir, "MODEL_LICENSES.json"));
 
   // 5. web-tree-sitter + tree-sitter-wasms — mcp-server's public
   //    tree-sitter code (packages/mcp-server/src/skeleton/treeSitter.ts)
@@ -334,14 +473,16 @@ function parseCliArgs(argv) {
       if (!value) throw new Error("bundle-cli: --out requires a value");
       options.outDir = resolve(value);
       i += 1;
+    } else if (argv[i] === "--native-semantic-runtime") {
+      options.nativeSemanticRuntime = true;
     }
   }
   return options;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const { outDir } = parseCliArgs(process.argv.slice(2));
-  bundleCli(outDir ? { outDir } : undefined).catch((err) => {
+  const options = parseCliArgs(process.argv.slice(2));
+  bundleCli(options).catch((err) => {
     process.stderr.write(`bundle-cli: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
     process.exit(1);
   });

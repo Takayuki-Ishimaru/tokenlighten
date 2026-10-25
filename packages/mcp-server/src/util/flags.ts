@@ -115,15 +115,26 @@
  *       nothing adds a kind, field, or tool argument. See `leanSchemaEnabled`'s
  *       doc block below for the gate's three results.
  *
+ *       TL_PACK_CONTAINMENT_DEDUP (2026-10-19, after the v0.16.0 decision runs
+ *       6t-2 and 6t-3; see `packContainmentDedupEnabled`'s doc block for the
+ *       evidence): a task-pack row whose lines and text another row of the
+ *       same file in the pack already carries ships once, default ON for
+ *       every client. Explicit `0`/`off` restores today's pack byte-for-byte
+ *       and remains the rollback path. It adds no kind, field, or tool
+ *       argument: a cut appended window is a row that does not ship, and a
+ *       contained surface carries the existing `code_unchanged` pointer
+ *       (`prior` on the wire).
+ *
  *       TL_EFF_TOLERANT_INPUT (USER ruling 2026-10-01, after the paired
  *       efficiency A/B in bench/workflows/experiments/2026-10-01-efficiency-ideas):
  *       unambiguous near-miss inputs that used to refuse are served instead,
  *       default ON. Explicit `0`/`off` restores every refusal byte-for-byte
  *       and remains the rollback path. It adds no kind, field, or tool
  *       argument; each rewrite is one the refusal's own `retry: call` named.
- *       The wider find cap that rode it in the experiment stays a (B) flag,
- *       TL_EFF_WIDE_FIND, because the guide documents `>5 queries` as a
- *       refusal.
+ *       The wider find cap that rode it in the experiment stayed a (B) flag,
+ *       TL_EFF_WIDE_FIND, because the guide documented `>5 queries` as a
+ *       refusal, until it too was promoted on 2026-10-18 with the guide's
+ *       cap moved to `>10` (see `effWideFindEnabled`).
  *
  *       TL_EFF_SLIM_EDIT (USER ruling 2026-10-01, same A/B; the T13 verified
  *       gap was traced to the verifier's static tracer, not to this flag --
@@ -134,6 +145,95 @@
  *       remains the rollback path. It adds no kind, field, or tool argument:
  *       a body-less kit entry is the existing `omitted` label with the kit's
  *       existing batched `next_call`.
+ *
+ *       TL_EFF_FIND_PHRASE (promoted 2026-10-18, after the v0.16.0 Sonnet
+ *       decision run bench/workflows/runs/2026-10-18-v016-decision-6t-1; see
+ *       `effFindPhraseEnabled`'s doc block for the evidence): a `find` whose
+ *       queries all match nothing, at least one of them a phrase, is re-run
+ *       once on the identifier-like tokens inside them, default ON. Explicit
+ *       `0`/`off` restores the all-miss reply and its absence certificate
+ *       byte-for-byte and remains the rollback path. It adds no kind, field,
+ *       or tool argument: a hit is the existing `search.matches` find reply
+ *       for those tokens, disclosed in the same `normalized` note
+ *       TL_EFF_TOLERANT_INPUT uses.
+ *
+ *       TL_EFF_EDIT_DIET (2026-10-19, after the v0.16.0 decision run
+ *       bench/workflows/runs/2026-10-18-v016-decision-6t-3; see
+ *       `effEditDietEnabled`'s doc block for the evidence): the `edit.applied`
+ *       reply diet, default ON for the CLI coding hosts only (Claude Code,
+ *       Copilot CLI, Codex CLI — server.ts passes the host classification, the
+ *       TL_PORTABLE_TOOLS precedent). Explicit `0`/`off` restores today's
+ *       reply for every client and remains the rollback path; explicit `1`
+ *       turns it on for every client. It adds no kind, field, or tool
+ *       argument: an echo window is the existing absent `after`, a kit delta
+ *       is the existing kit with fewer entries and its one `note`, and the
+ *       omitted batched read is the existing optional `next_call`.
+ *
+ *       TL_EFF_FIND_SNIPPET_CAP (2026-10-19, after the v0.16.0 decision run
+ *       bench/workflows/runs/2026-10-18-v016-decision-6t-3; see
+ *       `effFindSnippetCapEnabled`'s doc block for the evidence): a `find`
+ *       matching more than ten files keeps `snippets` only for the ten files
+ *       with the most matched lines, default ON for every client. Every file
+ *       still lists all of its `lines`, and the match set's completeness
+ *       (`total_*`, `truncated`/`limit`, `inventory`, `term_results`,
+ *       `absence`) is unchanged. Explicit `0`/`off` restores the uncapped
+ *       reply byte-for-byte and remains the rollback path. It adds one
+ *       optional find-form field, `snippet_cap` (the cap, the number of files
+ *       left with lines only, the `scope` that narrows the find to show
+ *       them), and no kind or tool argument.
+ *
+ *       TL_EFF_AUTOFOLLOW (2026-10-19, after the v0.16.0 decision run
+ *       bench/workflows/runs/2026-10-19-v016-decision-6t-4, whose T03 arm A
+ *       median was $0.585 against arm B's $0.502; see `effAutofollowEnabled`'s
+ *       doc block for the rules and the evidence): a `discover` task pack
+ *       whose one `next` re-issues the caller's own request is followed
+ *       server-side and answered as one reply, and so, since decision run
+ *       6t-6, is a follow-up that is itself such a pack reading more windows
+ *       of the files it serves, while the reply stays within 45,056 B;
+ *       default ON for every client. Explicit `0`/`off` restores the discover
+ *       reply and its `next` byte-for-byte and remains the rollback path. It
+ *       adds one optional task-pack field, `auto_followed` (`from`, `note`,
+ *       the discover packs' own `gaps`, and `hops` when follow-ups chained),
+ *       and no kind or tool argument.
+ *
+ *       TL_EFF_STRUCTURE_MAP (2026-10-20, after the v0.16.0 decision run
+ *       bench/workflows/runs/2026-10-20-v016-decision-6t-7, whose T03 arm A
+ *       cost $1.72 against arm B's $1.71; see `effStructureMapEnabled`'s doc
+ *       block for the rule and the evidence): a short, map-shaped answer
+ *       request about a type too large for one surface, naming a flow over
+ *       its concerns, is served the type's structure map in one `act.answer`
+ *       — its doc comment, its header, every member's signature and every
+ *       statement that calls a named concern, the enum types its header is
+ *       declared in beside it — while the member bodies stay owed; default
+ *       ON for every client. Under a pack ceiling below the Copilot CLI's
+ *       18,432 B (2026-10-24: VS Code's 14,336 B) the map is served only when
+ *       its first page holds the whole skeleton, the header's code and every
+ *       member's signature. Explicit `0`/`off` restores the whole-member
+ *       flow requirement and its discover chain byte-for-byte and remains the
+ *       rollback path. It adds no field, kind or tool argument.
+ *
+ *       TL_EFF_FLOW_ORDER_VOCAB (2026-10-25): additional EN/JA phrasings for
+ *       the call-order facet detector and its subject extraction, default ON.
+ *       Explicit `0` restores the prior detector within the existing response
+ *       families; it adds no kind, field, or tool argument. The phrasing and
+ *       subject rules are pinned by the structure-map entry/facet held-outs.
+ *
+ *       TL_EFF_REPLY_COMPACT (2026-10-23, codex-copilot-proxy wire audit,
+ *       bench/workflows/experiments/2026-10-21-codex-copilot-proxy/drafts/
+ *       fable-analysis-r16/wire-overhead-audit.md §5.1; the rules are in
+ *       protocol/wireCompaction.ts): members of a reply that repeat what the
+ *       reply already says leave the wire after the budget ladder has run,
+ *       default ON for every client — a task-pack evidence row's
+ *       `role:"unknown"` when neither the call nor the task it continues
+ *       passed `surfaceRoles`, the generic `likely_edits` pair (its kinds ride
+ *       alone), the informational `reason` of `profile_binding`, and the
+ *       all-zero `excluded_by_reason` of a complete `search.tree`
+ *       `scope_report`. Explicit `0`/`off` restores the previous reply
+ *       byte-for-byte and remains the rollback path. It adds no kind or tool
+ *       argument; every omitted member is one a caller already reads as
+ *       optional. (An obligation's `path`/`range`/`role` restated from its
+ *       evidence row was part of this set until the wire-compaction review of
+ *       2026-10-23 moved it behind TL_EFF_EVIDENCE_PATH_GROUPS, below.)
  *
  *   (B) out-of-contract, experiment-only (default OFF; D10(b)). Turning one on
  *       is an unfrozen capability addition, not a supported posture:
@@ -191,7 +291,35 @@
  *       question about one small, self-contained file skips the pathless
  *       locator and is built by the seeded builder and certification tail a
  *       caller-supplied target takes; its one evidence row omits `why` and
- *       `symbol`. No kind, field or tool argument; unset, byte-identical).
+ *       `symbol`. No kind, field or tool argument; unset, byte-identical),
+ *       TL_EFF_EVIDENCE_PATH_GROUPS (2026-10-23, same wire audit, §4.2 rank 1:
+ *       `path` and `handle` once per file): inside one `read.task_pack`
+ *       reply, consecutive evidence rows of one file carry `path` on the first
+ *       row of the run only, and `handle` on every row whose handle differs
+ *       from the row above; a row without them is the file (and handle) of
+ *       the row above. A top-level `evidence_note` says so whenever a reply
+ *       was grouped. In the same "restated from the evidence rows" family, a
+ *       plan obligation leaves off the `path`/`range`/`role` the first row of
+ *       its handle carries (moved here from TL_EFF_REPLY_COMPACT by the
+ *       wire-compaction review: an obligation without a `path` makes the model
+ *       look the row up to learn where an edit item goes, which no cohort has
+ *       exercised). It adds one optional task-pack field and takes members
+ *       off rows and obligations a reader used to find on each, so it stays
+ *       default OFF until a model cohort has run it; unset, byte-identical.
+ *       The pack builder prices the grouped rows too
+ *       (`estimateStructureMapReplyBytes`, the task-pack size previews), so
+ *       the bytes it saves can hold more rows.
+ *
+ *       TL_EFF_MAP_ANSWER_FIRST (2026-10-23, codex-copilot-proxy answer-first
+ *       experiment; the rule is in `effMapAnswerFirstEnabled`'s doc block): a
+ *       structure-map answer under a compact host ceiling is `act.answer` on
+ *       its CORE evidence (the type's header, every member's signature, the
+ *       state enums, and the whole bodies of the members that cover the named
+ *       concerns) instead of `discover`, the other member bodies staying owed
+ *       (`remaining`) and named, with the facts their absence would invite
+ *       wrong, in the existing top-level `advisory`. It adds no kind, field or
+ *       tool argument and changes which windows the map REQUIRES, so it stays
+ *       default OFF until a model cohort has run it; unset, byte-identical.
  *
  *       v0.15 W-CORE-FLAGS (2026-09-02): the Semantic Frontier v2 program's
  *       ten registered flags -- TL_SF_STATEFUL, TL_SF_DEMOTE,
@@ -258,14 +386,22 @@
  *       alpha.1): a startup-once dual-era transport selector
  *       (legacy|modern, default legacy); never read by domain handlers and
  *       never a response-shape branch within an era. v0.10 alpha.2 (PI-09)
- *       adds the explicit-state locations and kill switch, all
+ *       adds the explicit-state locations and kill switch in the
  *       operational/platform class: TOKENLIGHTEN_STATE_KEY_DIR /
  *       TOKENLIGHTEN_CONFIG_HOME / TOKENLIGHTEN_HOME (+ the platform
  *       APPDATA / XDG_CONFIG_HOME fallbacks) locate the installation HMAC
  *       key (state/handleKeys.ts), and TOKENLIGHTEN_STATE_STORE=off
  *       disables the per-workspace persistent store (state/stateStore.ts) —
  *       a disabled/missing store degrades to the honest handle-unknown
- *       refusal path, never a response-shape change. v0.10 "simultaneous-
+ *       refusal path, never a response-shape change.
+ *       v0.16 adds TOKENLIGHTEN_ENGINES_FILE (features/engines/config.ts):
+ *       an optional path to trusted user-scoped local-analysis settings.
+ *       It chooses providers and retrieval behavior, without choosing a
+ *       codec, transport, advertised tool or wire schema. Effective settings
+ *       enter the causal configuration digest; unset uses user defaults.
+ *       SystemRoot is the Windows OS directory used to locate taskkill.exe
+ *       for owned Language Server process-tree cleanup; no wire-shape effect.
+ *       v0.10 "simultaneous-
  *       instance locking" adds TOKENLIGHTEN_STATE_LOCK_STALE_MS
  *       (state/writerLock.ts): a test-only override of the advisory
  *       cross-process writer lock's staleness window (production default
@@ -914,6 +1050,17 @@ export function coveragePackerV2Enabled(): boolean {
   return coveragePackerMode() === "v2";
 }
 
+/**
+ * 2026-10-16 simple bench (S) supported policy, DEFAULT ON: an edit target
+ * the server located itself carries the definitions its body depends on
+ * (callee bodies and referenced constants, one hop, bounded) as review-only
+ * context (readCodeTaskPack.ts `editContextCandidates`). Caller-named
+ * targets are unaffected. TL_EDIT_CONTEXT=0 restores target-only edit packs.
+ */
+export function editContextEnabled(): boolean {
+  return parseBool(process.env["TL_EDIT_CONTEXT"], true);
+}
+
 /** v0.14 supported literal-first policy; explicit OFF is the rollback path. */
 export function literalFirstRoutingEnabled(): boolean {
   return parseBool(process.env["TL_LITERAL_FIRST_ROUTING"], true);
@@ -985,6 +1132,7 @@ export function wireShadowEnabled(): boolean {
  */
 export function activeExperimentFlags(): readonly string[] {
   const active: string[] = [];
+  if (portableToolsEnabled()) active.push("TL_PORTABLE_TOOLS");
   if (bm25fCandidateEnabled()) active.push("TL_BM25F_CANDIDATE");
   // Consolidated tri-state flags report their exact env assignment so a trace
   // diff distinguishes the base capability from its folded-in extension.
@@ -1067,14 +1215,25 @@ export function activeExperimentFlags(): readonly string[] {
   // and TL_EFF_SLIM_EDIT were promoted to supported policy, DEFAULT ON (see
   // this file's header), so -- matching taskHandleRecoveryEnabled/
   // leanSchemaEnabled's own precedent -- they are no longer reported here.
-  if (effAutofollowEnabled()) active.push("TL_EFF_AUTOFOLLOW");
+  // TL_EFF_FIND_PHRASE and TL_EFF_WIDE_FIND followed them on 2026-10-18, and
+  // TL_EFF_AUTOFOLLOW on 2026-10-19; none is reported either.
   if (effLenientEditEnabled()) active.push("TL_EFF_LENIENT_EDIT");
-  if (effWideFindEnabled()) active.push("TL_EFF_WIDE_FIND");
   if (effPlanTrimEnabled()) active.push("TL_EFF_PLAN_TRIM");
-  if (effFindPhraseEnabled()) active.push("TL_EFF_FIND_PHRASE");
   if (effHubWholeEnabled()) active.push("TL_EFF_HUB_WHOLE");
   if (effEditNoteEnabled()) active.push("TL_EFF_EDIT_NOTE");
   if (effLightAnswerEnabled()) active.push("TL_EFF_LIGHT_ANSWER");
+  // TL_EFF_EDIT_DIET (2026-10-19): ON by default for the CLI coding hosts
+  // only, which is a shipped default, not an experiment; like
+  // TL_PORTABLE_TOOLS above, only an explicit value is reported.
+  if (effEditDietEnabled()) active.push("TL_EFF_EDIT_DIET");
+  // TL_EFF_EVIDENCE_PATH_GROUPS (2026-10-23): default OFF experiment, so a
+  // stock session's `flags_active` is byte-identical to before it. The
+  // sibling TL_EFF_REPLY_COMPACT is a shipped default (ON) and, like
+  // TL_EFF_STRUCTURE_MAP above, is not reported.
+  if (effEvidencePathGroupsEnabled()) active.push("TL_EFF_EVIDENCE_PATH_GROUPS");
+  // TL_EFF_MAP_ANSWER_FIRST (2026-10-23): default OFF experiment, reported
+  // only while on, so a stock session's `flags_active` is byte-identical.
+  if (effMapAnswerFirstEnabled()) active.push("TL_EFF_MAP_ANSWER_FIRST");
   return active;
 }
 
@@ -1258,6 +1417,35 @@ export function packFairTrimEnabled(): boolean {
 }
 
 /**
+ * TL_PACK_CONTAINMENT_DEDUP (2026-10-19), (S) supported pack policy, DEFAULT
+ * ON for every client; explicit `0`/`off` is the rollback path and restores
+ * today's pack byte-for-byte.
+ *
+ * ON: `dedupeTrimAndPersist` (readCodeTaskPack.ts
+ * `applyPackContainmentDedup`) runs one more model-free pass before
+ * `trimToCap`, so the bytes it frees go back to the trim ladder. A row whose
+ * lines and text another row of the SAME file in this pack already carries
+ * ships once: an appended window (`buildAnswerTaskPack`'s query-focused
+ * member and facet excerpts) that its own surface's served body or a larger
+ * kept window of it already holds is cut, and a separate surface inside
+ * another surface's served body gets the `code_unchanged` pointer
+ * `applyPackDedupe` gives an identical row, unless it is protected, on the
+ * certified action frontier, required, edit-bearing, caller-named,
+ * explicit-identifier evidence, or cited by the certificate.
+ * `applyPackDedupe` matches only identical (handle, range, hash) rows.
+ *
+ * Measured on the v0.16.0 decision runs 6t-2 and 6t-3 (arm A, 36 cells):
+ * the only contained rows were T03's four windows of OrderOrchestrator.java
+ * (144-153, 146-151, 145-150, 147-152), all inside the class head's own
+ * 107-165 body. Replayed, the six T03 first packs shrink by 2,287-2,465 B
+ * (16-17%) with the same decision and `next`, and no other reply of the 36
+ * cells moves. Adds no kind, field or tool argument.
+ */
+export function packContainmentDedupEnabled(): boolean {
+  return parseBool(process.env["TL_PACK_CONTAINMENT_DEDUP"], true);
+}
+
+/**
  * F5 (2026-09-19) introduced this as D10 (B): out-of-contract, default OFF.
  * SPC (2026-09-29) promotes it to (S) supported, DEFAULT ON for every
  * client — see this file's "F5 addendum" and "SPC addendum" doc blocks
@@ -1344,7 +1532,11 @@ export function jaQueryBridgeEnabled(): boolean {
  * the presented string. On a match the call proceeds as if that recovered handle had been
  * presented — same task, same wire `task.id` on the way out — instead of
  * refusing `handle-unknown`. Two or more qualifying candidates is ambiguous
- * and recovers nothing. (c) (2026-10-02, Copilot standard-setup evaluation)
+ * and recovers nothing. A long deletion/ellipsis near-miss with at least 80
+ * retained characters also uses that unique live lane candidate on read/search,
+ * provided the call names neither a CAS version nor a new epoch; short display
+ * abbreviations and every edit keep strict authentication/refusal handling.
+ * (c) (2026-10-02, Copilot standard-setup evaluation)
  * when nothing was recovered and the SAME call sends `task.epoch:"new"`
  * without `expected_state_version`, a handle that names no live task (any
  * outcome but `wrong-workspace`) is dropped and the call proceeds as the new
@@ -1547,15 +1739,21 @@ export function identifierGroundingEnabled(): boolean {
  * transform is never invoked and every read-family body is byte-identical to
  * pre-WP-S4 output. Adds no kind, field, or tool argument — only WHICH BYTES
  * of an existing `evidence[].body` / `entries[].content` a numbered line
- * carries.
+ * carries. Unset, it is also ON for the CLI coding hosts (`cliHost`: Claude
+ * Code and Copilot CLI, 2026-10-17), whose citation answers re-read whole
+ * files to count lines.
  */
-export function answerLineGutterEnabled(): boolean {
+export function answerLineGutterEnabled(cliHost = false): boolean {
   // Same PRESENCE-first read as `seededGenerousEnabled`/
   // `identifierGroundingEnabled` above, for the same reason: the member's own
   // variable is an override, not a defaulted value.
   const raw = process.env["TL_ANSWER_LINE_GUTTER"];
   if (raw !== undefined) return parseBool(raw, false);
-  return turnEconomyEnabled();
+  // 2026-10-17 simple paired bench (DESIGN-v0.14-plan §20.8): also ON for the
+  // CLI coding hosts (`cliHost`: Claude Code, Copilot CLI and, §20.11, Codex
+  // CLI), whose answers cite file:line and re-read whole files to learn the
+  // line numbers.
+  return turnEconomyEnabled() || cliHost;
 }
 
 /**
@@ -1807,7 +2005,10 @@ export function reserveSmallWindowsEnabled(): boolean {
  * enforces every one of these constraints at dispatch regardless of what is
  * advertised, so nothing served becomes stricter or looser than today.
  *
- * OFF (the default), or any other client: every emitted call is
+ * Copilot CLI also opts into the existing minimal advertisement when both
+ * TL_LEAN_CALLS=1 and TL_MINIMAL_TOOLS=1; emitted continuations remain scoped
+ * to VS Code. The CLI variant preserves recovery fields through open objects.
+ * OFF (the default), or an unrelated client: every emitted call is
  * byte-identical to pre-WP-V1 output, and so is every advertised schema apart
  * from the two elements `TL_LEAN_SCHEMA` (`leanSchemaEnabled` below) sheds for
  * EVERY client since v0.15.0 -- with `TL_LEAN_SCHEMA=0` as well, byte-identical
@@ -1826,7 +2027,8 @@ export function leanCallsEnabled(): boolean {
  * Copilot retest r5 (2026-10-03), turn-economy policy — DEFAULT OFF, a member
  * of the TL_TURN_ECONOMY umbrella with `seededGenerousEnabled`'s override
  * semantics, and in effect only where `leanCallsEnabled` is (the resolved
- * "vscode" client, through server.ts's `leanToolDefinitionForClient`).
+ * "vscode" client, plus exact "copilot-cli" when BOTH flags are enabled,
+ * through server.ts's `leanToolDefinitionForClient`).
  *
  * ON: the vscode advertisement keeps only the arguments a Copilot model
  * writes on its own (query; targets path/handle/range/symbol/purpose; task
@@ -1940,6 +2142,27 @@ export function findSmallBodiesEnabled(): boolean {
  */
 export function leanSchemaEnabled(): boolean {
   return parseBool(process.env["TL_LEAN_SCHEMA"], true);
+}
+
+/**
+ * D10(B): model/client-independent compact advertisement. Select with
+ * --guide-profile portable during workspace setup, or set TL_PORTABLE_TOOLS=1
+ * for the schema alone. Does not join TL_TURN_ECONOMY.
+ * Projects canonical schemas after tool-surface filtering; keeps routing,
+ * task continuity, budgets and edit safety discoverable. Rare fields remain
+ * host-valid in open objects and dispatch validates the complete contract.
+ * Unset, it is OFF except for the CLI coding hosts (Claude Code, Copilot
+ * CLI, Codex CLI; server.ts `portableAdvertisementForClient`, 2026-10-17), whose every
+ * request pays for the advertised bytes. TL_PORTABLE_TOOLS=0 restores the
+ * previous client-specific advertisements for every client.
+ */
+export function portableToolsEnabled(defaultOn = false): boolean {
+  // 2026-10-17 simple paired bench (DESIGN-v0.14-plan §20.8): server.ts passes
+  // `defaultOn` = true for the CLI coding hosts (Claude Code, Copilot CLI,
+  // Codex CLI),
+  // whose every request carries every advertised schema. An explicit value
+  // still decides for every client; `activeExperimentFlags` reports only it.
+  return parseBool(process.env["TL_PORTABLE_TOOLS"], defaultOn);
 }
 
 // ---------------------------------------------------------------------------
@@ -2272,19 +2495,70 @@ export function usageInventoryEnabled(): boolean {
 // ---------------------------------------------------------------------------
 // EFF (2026-10-01): efficiency experiment, class (B), default OFF, except
 // TL_EFF_TOLERANT_INPUT and TL_EFF_SLIM_EDIT, promoted to supported policy,
-// DEFAULT ON (USER ruling 2026-10-01; see this file's header). Measured
+// DEFAULT ON (USER ruling 2026-10-01; see this file's header),
+// TL_EFF_FIND_PHRASE and TL_EFF_WIDE_FIND, promoted the same way on
+// 2026-10-18, and TL_EFF_AUTOFOLLOW, promoted on 2026-10-19. Measured
 // against the h2 decision windows (2026-09-30/10-01): each lever targets a
 // reply byte or round-trip cost observed there.
 // ---------------------------------------------------------------------------
 
 /**
- * TL_EFF_AUTOFOLLOW: a task pack whose decision is `discover` with exactly one
- * executable tl_read_file `next` (the shape every recorded solver re-issued
- * verbatim) runs that follow-up server-side and returns its pack, carrying the
- * first pack's evidence the follow-up does not repeat.
+ * TL_EFF_AUTOFOLLOW: a task pack whose decision is `discover` with ONE
+ * executable tl_read_file `next` that re-issues the caller's own request (the
+ * T03 shape) runs that follow-up server-side and returns one reply holding
+ * both (server.ts `autofollowDiscoverPack`). Default ON since 2026-10-19;
+ * explicit `0`/`off` restores the discover reply and its `next`
+ * byte-for-byte.
+ *
+ * The 2026-10-19 rules: only a `next` whose `query` is the caller's own, in
+ * the same epoch, on a pack with no `plan`; never a discover whose gaps
+ * include `ambiguous-target` (a pick among candidates is the agent's call);
+ * and no booked-but-undelivered bytes — a follow-up that served anything is
+ * delivered (a task pack merges; a plain read rides as rows), only one that
+ * served nothing is dropped. The first version followed plain reads and
+ * candidate picks too, and returned the discover reply unchanged when it could
+ * not merge, leaving the follow-up booked: on the HEAD build the solver's own
+ * read of the dropped window (6t-3 T10 rep2 #8) got a 157 B `code-unchanged`
+ * receipt for 5,843 B it never received, and 6t-2 T13 rep0 #9 grew 7.9 KB.
+ * Replayed on both windows' 36 arm-A cells under the rules
+ * (rc/autofollowDiscover.rc.spec.ts holds the T03, T09 and T10 shapes): each
+ * T03 first call is one `act.answer` of 20,246-20,388 B against 24,631-24,958
+ * B for the two recorded packs, and no other reply changes.
+ *
+ * The default flip (2026-10-19, after decision run 6t-4) fixed what turning
+ * it on exposed. A pack built under a byte ceiling (the request's `budget`,
+ * TOKENLIGHTEN_TASK_PACK_MAX_BYTES, or the client profile's, VS Code's
+ * 14,336 B) is never followed: two packs in one reply overran a 14,336 B
+ * budget at 17,421 and 21,135 B. The discover pack's own `decision.gaps`
+ * ride `auto_followed.gaps`: the follow-up's `act.*` decision has no member
+ * to keep them, and a chain that disclosed `missing-evidence` before it
+ * closed reached the client as one silent `act.answer`. And its
+ * `server_build` and `answer_resolution` stay on the merged reply, which had
+ * dropped both. Replayed on 6t-4's arm-A first calls, T03's is one
+ * `act.answer` of 20,955 B where the discover and the `next` every cell sent
+ * came to 11,846 + 10,413 B, and no other task's first reply changes.
+ * Turning it on moved 31 tests in 13 files. Those whose subject is the client
+ * running the discover's `next` (repack monotonicity, the qref re-pack,
+ * pack-serve and sequence chains, the spelling of a server-authored `next`)
+ * pin `TL_EFF_AUTOFOLLOW=0`; the rest expect the merged reply, most with a
+ * rollback control beside it.
+ *
+ * The chain (2026-10-19, after decision run 6t-6). A follow-up that is itself
+ * a discover pack whose one `next` reads more windows of the files the reply
+ * serves, under the same task and the request's own query, is followed
+ * again, three follow-ups at most, and only while an upper-bound estimate of
+ * the reply, taken before the read, stays within 45,056 B: Claude Code moves
+ * a tool result over 50,000 characters out of the conversation into a file.
+ * Each 6t-6 T03 cell had run that chain by hand: 21,678 B, its next 33,398 B,
+ * then the act.answer, one model turn each. Replayed on its first call (a
+ * fixture-only cell, whose shorter workspace path trims about 100 B), the
+ * first reply carries OrderOrchestrator.java through line 823 (37,201 B,
+ * `auto_followed.hops` 2) and its next is the act.answer (28,239 B): two
+ * replies where there were three. No other task's first reply changes. The
+ * first follow-up is not held to the cap, as before.
  */
 export function effAutofollowEnabled(): boolean {
-  return parseBool(process.env["TL_EFF_AUTOFOLLOW"], false);
+  return parseBool(process.env["TL_EFF_AUTOFOLLOW"], true);
 }
 
 /**
@@ -2323,10 +2597,17 @@ export function effTolerantInputEnabled(): boolean {
 /**
  * TL_EFF_WIDE_FIND: a `find` accepts up to ten `queries` instead of refusing
  * past five. Split from TL_EFF_TOLERANT_INPUT when that flag became default
- * ON, since the guide documents the five-query refusal.
+ * ON, since the guide documented the five-query refusal. Default ON since
+ * 2026-10-18 (USER ruling: 「TL_EFF_WIDE_FINDをデフォルトオン」), with the
+ * full guide's cap moved to `>10`; explicit `0` restores the five-query
+ * refusal. Evidence: the v0.16.0 decision rerun
+ * (bench/workflows/runs/2026-10-18-v016-decision-6t-2) refused two finds of
+ * six and seven queries in T03 (rep0 #5, rep2 #5); each refusal's `next` was
+ * the first five, so each cost a turn, and rep2's follow-up find for the
+ * leftover token then met the repeated all-served guard.
  */
 export function effWideFindEnabled(): boolean {
-  return parseBool(process.env["TL_EFF_WIDE_FIND"], false);
+  return parseBool(process.env["TL_EFF_WIDE_FIND"], true);
 }
 
 /**
@@ -2345,10 +2626,288 @@ export function effPlanTrimEnabled(): boolean {
  * names, file names, ALLCAPS words), at most five, and that result is served
  * with a `normalized` note naming the tokens. Measured 2026-10-01: 33 of the
  * 93 finds in the efficiency A/B's treatment arm were phrases that matched
- * nothing, each costing the solver a turn.
+ * nothing, each costing the solver a turn; replayed offline on the A/B's 42
+ * zero-match phrase finds, 32 hit (DESIGN-v0.14-plan.md §19.11).
+ * Default ON since 2026-10-18; explicit `0` restores the all-miss reply (its
+ * absence certificate, no re-run). Promoted after the v0.16.0 Sonnet decision
+ * run (bench/workflows/runs/2026-10-18-v016-decision-6t-1), whose arm A sent
+ * a phrase find in T05c rep0 -- ["CW prop CCW prop motor direction",
+ * "drv_motor motor direction spin", "DRV_MOTOR_COUNT motor index FR FL BL
+ * BR", "yaw sign convention clockwise"] -- that matched nothing and was
+ * answered with an authoritative absence certificate. The re-run would have
+ * searched `drv_motor` and `DRV_MOTOR_COUNT`; the solver's next call asked
+ * for the bare `DRV_MOTOR_COUNT`, which matched.
  */
 export function effFindPhraseEnabled(): boolean {
-  return parseBool(process.env["TL_EFF_FIND_PHRASE"], false);
+  return parseBool(process.env["TL_EFF_FIND_PHRASE"], true);
+}
+
+/**
+ * TL_EFF_FIND_SNIPPET_CAP (2026-10-19): a `find` that matches more than
+ * FIND_SNIPPET_MAX_FILES (10) files keeps `snippets` only for the ten files
+ * with the most matched lines. Every matched file still lists all of its
+ * `lines`, and the reply's `snippet_cap` gives the cap, the number of files
+ * left with lines only, and the `scope` that narrows the same find to a
+ * directory matching no more than ten files, where every snippet comes back
+ * (features/search/find/findText.ts `capFindSnippets`). The match set and its
+ * completeness (`total_files`/`total_matches`, `truncated`/`limit`,
+ * `inventory`, `term_results`, `absence`) are unchanged. Measured on the
+ * v0.16.0 decision run bench/workflows/runs/2026-10-18-v016-decision-6t-3,
+ * arm A: 12 of its 49 finds matched 13-31 files and ran 4.7-11.1 KB, mostly
+ * snippets of up to eight lines per file — T09 rep1 #4 (`IssuePriority`,
+ * `priority`) was 31 files in 10,674 B, CONTRACT.md alone 10 lines and 8
+ * snippets. Default ON; explicit `0` restores the uncapped reply
+ * byte-for-byte.
+ */
+export function effFindSnippetCapEnabled(): boolean {
+  return parseBool(process.env["TL_EFF_FIND_SNIPPET_CAP"], true);
+}
+
+/**
+ * TL_EFF_STRUCTURE_MAP (2026-10-20): an answer request that asks for a short
+ * or map-shaped answer (features/task-pack/structureMap.ts
+ * `asksForStructureMap`), names a flow facet, and whose first candidate is a
+ * type with direct members too large for one surface is served the type's
+ * STRUCTURE MAP (readCodeTaskPack.ts `structureMapForAnswer`): its own doc
+ * comment, its header (declaration, fields, constants and tables, the
+ * constructors), every member's signature, and every statement that calls a
+ * named concern or one of the type's own helpers that does, in source order,
+ * with the workspace enum types the header is declared in beside it. The flow
+ * facets require exactly those windows of each member they match, so the
+ * certificate is issued over served rows; the member bodies stay owed
+ * (`remaining`). The first page is the largest of a ladder of source allowances
+ * (16 KB down to 2 KB in steps of 1 KB, under every ceiling) whose estimated
+ * reply fits the pack's code-bearing tier under the active byte ceiling. From the
+ * ceiling at which a map's owed windows are served in batches sized to it (the
+ * Copilot CLI's 18,432 B, and every pack without a ceiling) any page that fits is
+ * a map. Below it (VS Code's 14,336 B) a page is admitted only when it carries
+ * the map's skeleton — the code lines of the header and of every member's
+ * signature, which the planner takes before any member body — and the builder
+ * will keep it: the estimate, priced as a builder without the size preview
+ * measures it (ungrouped), stays STRUCTURE_MAP_UNBATCHED_ADMISSION_MARGIN_BYTES
+ * (1,536 B) under the ceiling, and the follow-up that asks for the windows the page
+ * left owed is batched like the larger tier's. A ceiling too small for the
+ * skeleton (T03's is 127 code lines, 15,046 B estimated) is served no map and
+ * keeps the whole-member requirement. Measured on the 69 map-shaped chains of the
+ * generality audit under VS Code's 14,336 B: the map stands in 23 of them, up
+ * from 2, the mean chain takes 4.14 round trips where it took 4.26, and over the
+ * 38 chains that reach an answer both ways 3.26 where they took 3.71 (24.7 to
+ * 22.7 KB), 10 taking fewer and 2 more. Measured on the v0.16.0
+ * decision run bench/workflows/runs/2026-10-20-v016-decision-6t-7: each T03
+ * arm A cell's first reply was a 37,307 B discover through
+ * OrderOrchestrator.java line 823, and its next the 28,045-28,239 B
+ * act.answer; replayed on the same first call (a fixture-only cell) it is one
+ * act.answer of 24,877 B, and no other task's first reply changes. Default
+ * ON; explicit `0` restores the whole-member requirement and its chain
+ * byte-for-byte.
+ *
+ * WHICH LANGUAGES, AND WHAT A MEMBER IS (2026-10-24, design: bench/workflows/
+ * experiments/2026-10-21-codex-copilot-proxy/drafts/fable-analysis-r16/
+ * out-of-line-maps-design.md, Stage 1). Java, TypeScript, Python, C# and Kotlin
+ * types have their members inside them, and map as above. Go, Rust, C and C++
+ * types have members OUTSIDE their range, which the map reaches through
+ * features/task-pack/structureMapMembers.ts (the parser is not changed):
+ *
+ *   Go     the methods of the same file whose receiver is `T` / `*T` (generic
+ *          too), their `//` doc comments included; `New…` / `new…` functions
+ *          whose result holds `T` are its constructors, mapped with the header.
+ *          A `type T interface` is never mapped.
+ *   Rust   the fns of the same file's `impl T { … }` / `impl Trait for T { … }`
+ *          blocks (generics, lifetimes and `where` clauses read through), outside
+ *          a `#[cfg(test)]` module; `new` is the constructor.
+ *   C      a `struct T { … }` DEFINITION and the functions of the same file whose
+ *          first parameter is a pointer to it (`struct T *`, `T *`, `T_t *`,
+ *          `const T *`), named from their signature text (the parser names a
+ *          function after the first `struct X` of its line). NOT covered: "the
+ *          file is the module" (no struct, nothing for the request to name) and
+ *          `typedef struct { … } T_t;` (no symbol: the locator cannot reach it).
+ *   C++    the methods defined in the class body and the `T::m` definitions of
+ *          the same file (`T::T` the constructor; a constructor or destructor
+ *          whose body begins below its signature line has no symbol and is read
+ *          from the text, initialiser list included). NOT covered: the usual
+ *          layout, a `.hpp` class with its definitions in the counterpart `.cpp`
+ *          — the multi-path map is the design's Stage 2 (the seams are
+ *          `StructureMapMember.path`, `StructureMapType.memberFiles` and
+ *          `cppOutOfLineMembers`' `source`) — a two-level qualifier with an
+ *          Allman brace and `operator` definitions (the parser gives them no
+ *          symbol); an out-of-line template member is read from its signature.
+ *
+ * The map of such a type is of its EXTENT: `range` runs from the first line of
+ * its doc or first member to the last member, and the code of other types and
+ * functions between the members is never required and never served — it is in
+ * `remaining_ranges` as lines not served, and a row never carries it along
+ * (coalesceAnswerRows `canBridge`). The members the type has in OTHER files
+ * (a Go package's other files, a Rust crate's other modules) are not mapped;
+ * the reply's `advisory` says how many and where, when the room under the
+ * ceiling allows (`attachStructureMapElsewhereNote`); a chain the server follows
+ * on its own keeps that one line (`mergeAutofollowReplies`). The Go receiver
+ * variable counts like `this` for a call to a helper of the type.
+ *
+ * LOCATOR (same change): a plain word the request frames as a declaration — "the
+ * big Transport struct", "type Transport", "impl Decimal", "struct engine",
+ * "Transport 構造体" — is an explicit identifier like a backticked one
+ * (features/task-pack/declarationFraming.ts, readCodeTaskPack.ts
+ * `explicitCodeIdentifiers`), so the first candidate is the declaration and not
+ * a test that mentions the word. Such a name is matched in the spelling of its
+ * frame (the lowercase method `transport()` of another file is not the struct
+ * `Transport`), and when the request also names a file that declares the type,
+ * that declaration is the first candidate (`framedTypeInNamedFiles`). This is not
+ * behind the flag: it applies to every answer pack, and the generic uses of the
+ * same nouns name nothing.
+ *
+ * The ENTRY rule (2026-10-24, generality audit §3.3.3: of 16 natural
+ * paraphrases of the T03 question 1 EN and no JA one passed both detectors) is
+ * two closed vocabularies written for paraphrases, not for one request.
+ * `asksForStructureMap` reads brevity words about the SIZE OF THE ANSWER:
+ * "TL;DR", "short summary / version / answer", "quick rundown", "keep it
+ * short", "be brief", "at a glance", "in a nutshell", "in a few lines",
+ * ざっと, 簡単に説明して, 要点, …を中心にまとめて。 — and none of their other
+ * senses ("short-circuit", "shortcut", "quick fix", "how quickly", "the
+ * summary field", `summary.total`, 簡単に直せますか, まとめて削除) and none of
+ * them negated ("Don't summarize", 「要約せずに」): a request wrongly judged
+ * map-shaped is answered from rows instead of whole members, so a miss costs a
+ * hop and a false match costs evidence. The flow facet (requestFacets.ts
+ * `isCallOrderClause`, FLOW_JA_RE) reads the ORDER OF CALLS anchored to a call
+ * or execution verb or noun — "the order it calls payment in", "what order
+ * does it call …", "in which order do A, B and C get invoked", "which of A /
+ * B / C runs first", "when A / B / C get called", "the sequence of … calls",
+ * "call order", 呼ぶ順番, 呼び出し順, 最初に実行される — never the bare word
+ * "order" / 順番 (a purchase order, a sort order, 注文の順番, 順番待ち). A
+ * request that fails either detector keeps the whole-member requirement.
+ * Scored on two held-out sets (entryHeldout1.ts, a development set;
+ * entryHeldout2.ts, blind) by structureMapEntry.heldout{1,2}.spec.ts and
+ * requestFacets.heldout{8,9}.spec.ts, pinned rule by rule by
+ * structureMapEntry.rules.spec.ts and end to end by
+ * structureMapEntryPhrasing.spec.ts.
+ */
+export function effStructureMapEnabled(): boolean {
+  return parseBool(process.env["TL_EFF_STRUCTURE_MAP"], true);
+}
+
+/** Additional EN/JA call-order question phrasings; independent of map layout.
+ * Default ON. Set TL_EFF_FLOW_ORDER_VOCAB=0 to restore the prior flow detector
+ * and subject extraction, including when TL_EFF_STRUCTURE_MAP is disabled.
+ */
+export function effFlowOrderVocabEnabled(): boolean {
+  return parseBool(process.env["TL_EFF_FLOW_ORDER_VOCAB"], true);
+}
+
+/**
+ * TL_EFF_MAP_ANSWER_FIRST (2026-10-23, codex-copilot-proxy answer-first
+ * experiment; design: bench/workflows/experiments/2026-10-21-codex-copilot-proxy/
+ * drafts/fable-analysis-r16/answer-first-design.md; generality rules 2026-10-24,
+ * drafts/fable-analysis-r16/generality-audit.md): the structure map
+ * (`TL_EFF_STRUCTURE_MAP`) answers on its CORE evidence instead of requiring
+ * every member that names a concern. The flow facets then require
+ *
+ *   core = the type's header code, every direct member's signature, the state
+ *          enums the header is declared in, and the WHOLE bodies of the
+ *          members that cover the request's named concerns (structureMap.ts
+ *          `coverMembers`: the entry point first, then the member that
+ *          accounts for most of what is left),
+ *
+ * and the first page, which is the core and nothing else, is `act.answer` with
+ * its certificate: one call where the map's chain is a discover, a cursor page
+ * and an answer. The bodies of the other members stay owed on the head row
+ * (`remaining`, optional depth), `limit` stays `capped`, and no `next` is
+ * issued; the same request restated in the same task is answered by a receipt
+ * whose row lists, as `remaining`, the windows the page left owed that no read
+ * has since served (not the map's whole extent). The top-level `advisory` (an existing optional field) states, as
+ * facts and in this priority within its byte budget, which member bodies were
+ * not served (those of the members that call a requested concern, with their
+ * ranges, `via helper` for one that reaches the concern only through a helper of
+ * the type, and that every other member is signature-only), the loop guards inside
+ * them (the Java loop-guard review), the same-file uses of the constants declared
+ * in the served header (each line classified lexically as a `set`, which stores
+ * the value, or a `read`, any other use: a comparison, a lookup, an argument of
+ * another call; an assignment TO the constant, its initializer, is no use), and the
+ * concern calls of each unserved member in source order (calls in different
+ * cases of one switch or arms of one if/else chain are marked as alternatives:
+ * `[case FULFILLED] / [case DELIVERED]`); it never says what to do, so the
+ * agent chooses its own depth.
+ *
+ * THE INVARIANT. With the flag set, every reply of every chain is one of two things:
+ * the answer-first `act.answer` as the FIRST reply (the core served, the advisory with
+ * at least its first tier), or — byte for byte — the reply the same request gets with the
+ * flag unset. There is no third reply: no chain that runs on the core's requirements
+ * after a first reply that did not answer (a "silent relaxation": fewer of the type's
+ * lines than the ordinary map, no advisory). The decision is made BEFORE the pack is
+ * built and booked (readCodeTaskPack.ts `buildAnswerTaskPack`, at the facet-hook seat): a
+ * DRY RUN of the facet hook against the core (`FacetClosureTrial`: the real hook on copies
+ * of the selection, no handle, cursor or session state, not counted as a run of the hook,
+ * no plan recorded) says what the request's facets would require, and the core is
+ * adopted only when its first page holds all of it (`answerFirstPageHolds`) and proves
+ * what the contract asks of a page (`answerFirstPageProves`: the code identifiers the
+ * request names, and `behavior-body` — the concerns it lists are in a callable's served
+ * text and every callable it names has a line of its body shown). A flow whose call sites
+ * lie in another function of the file or another file, a second facet whose subject lies
+ * elsewhere, a member the core does not hold, a constructor named like the type whose
+ * body the page leaves out — each takes the ordinary map, and the request is served
+ * exactly as without the flag. Should an adopted page still not ship as the answer (a late
+ * pass withdrew a window it cites; not even the first tier of the advisory fits under the
+ * ceiling), the facet plan of the ordinary map is recorded again and the reply is a
+ * discover that names what the ordinary requirements still need
+ * (`restoreOrdinaryFacetPlan`, `rederiveAfterPlanRestore`): the rest of the chain is the
+ * ordinary chain's, never the core's. That first reply is then neither of the two above, so
+ * the backstop is for what the decision cannot see (a pass added later); the admission
+ * estimate (`STRUCTURE_MAP_GROUPED_ADMISSION_MARGIN_BYTES`) and the contract pre-check keep
+ * it from being reached by any request measured.
+ *
+ * WHAT COUNTS. A concern call is, for the cover, the members the facts list and the call
+ * index (one rule per type, structureMap.ts `answerFirstCover`): a call on one of the type's
+ * collaborator fields — the fields a constructor receives, builds (`this.x = new X(…)`,
+ * `self._s = requests.Session()`, `self.x = X(…)`, `_x = x;` to a declared field, a C++
+ * initializer list) or conventionally holds (C# `private readonly IFoo _foo;` and the
+ * get-only property `public IFoo Foo { get; }`, the C++ members `X* x_;`, `X& x_;`,
+ * `std::unique_ptr<X> x_;`, `std::shared_ptr<X> x_;`) — and only when that finds no member
+ * at all, a call whose receiver chain or callee names a concern, except a no-argument call
+ * on a parameter or local of the member (`req.paymentMethod()`, a record accessor, is no
+ * payment call) and a call of the type's own member through `this`/`self` (a helper: the
+ * facts follow it one level). A member the request names (`subjectCallableNamesIn`, the
+ * code identifiers) that calls a concern is in the cover too, up to the cover's three
+ * members; a cover that cannot hold the named members is no cover and the ordinary map
+ * is served. The words a request uses to describe the answer's form (`briefly`, `big`,
+ * `around`, `call`, `map`, `lines`, `order`, `flow`, 概要, 順番 …: structureMap.ts
+ * `ANSWER_FORM_WORDS`) are no concern word of this map; the ordinary map's own terms
+ * are unchanged. A request that spells the type's own file name (`Orders.java`) is
+ * planned as the same request without it (readCodeTaskPack.ts `withoutNamedFileArtifacts`:
+ * requestFacets.ts reads `Orders.java` as member `java` of owner `Orders`, which sends
+ * the default path's flow facet to the constructor and its callees; that default behavior
+ * is unchanged).
+ *
+ * WHAT THE BYTES ARE MADE OF. No constant here is tuned to one class. The admission margin
+ * (STRUCTURE_MAP_FIT_MARGIN_BYTES, 1,536 B) is the difference of the size preview's own
+ * reserves for a pack whose decision is derived later and one whose contract is built
+ * (protocol/taskPackSizePreview.ts, 2,048 B and 512 B), and the preview reserve the
+ * advisory is planned beside is the second of them. The advisory itself is measured, not
+ * allowed for: composed for the whole room the finished pack leaves, attached, and the pack
+ * measured again with the advisory on it — by the size preview (`taskPackSizePreview`, the
+ * first measurement of the shed ladder's `packWireBytes`) or, for a client whose bodies the
+ * preview cannot prove exact, as the plan's estimate plus the advisory's own wire bytes —
+ * then recomposed for less (tiers and calls dropped from the end) while it is over the
+ * ceiling. No tuned allowance beside it: a pack with no room for the first tier is not the
+ * answer-first reply.
+ *
+ * Effective only for an answer-profile structure map that cannot answer on its
+ * first page, under a compact host ceiling (an active pack byte ceiling below
+ * 20 KiB: the Copilot CLI's 18,432 B, and VS Code's 14,336 B under
+ * TL_TURN_ECONOMY when the core fits it — a 6-step desk answers in one 7.3 KB
+ * reply there, the 1,552-line T03 class does not fit it and is left alone), and
+ * whose core, certificate and advisory fit the first reply (T03 fits the Copilot
+ * CLI's only with TL_EFF_EVIDENCE_PATH_GROUPS's grouped rows, its constructor body
+ * then being the last thing the page spends bytes on); otherwise nothing changes
+ * for that pack. LANGUAGE REACH: a structure map exists where the type's methods sit
+ * inside its range (`structureMapTypeOf`): Java, C#, C++, Python, TypeScript/JavaScript,
+ * Kotlin, PHP and Ruby; Go, Rust and C keep their methods outside the type, have no
+ * map, and are never touched by this flag; the branch labels and the loop-guard review
+ * of the advisory read brace languages (Java only for the review), Python gets the call
+ * index without labels. It changes which windows a map REQUIRES, which is observable content
+ * and a different contract for the certificate's `request-item:*` obligations
+ * (the cited windows are the core's), so it is class (B), default OFF: unset,
+ * every reply is byte-identical.
+ */
+export function effMapAnswerFirstEnabled(): boolean {
+  return parseBool(process.env["TL_EFF_MAP_ANSWER_FIRST"], false);
 }
 
 /**
@@ -2391,4 +2950,133 @@ export function effEditNoteEnabled(): boolean {
  */
 export function effLightAnswerEnabled(): boolean {
   return parseBool(process.env["TL_EFF_LIGHT_ANSWER"], false);
+}
+
+/**
+ * TL_EFF_EDIT_DIET (2026-10-19): the `edit.applied` reply diet. Three cuts,
+ * each to bytes the caller already holds or does not use:
+ *   - an `applied[].after` window is left out when every replacement the
+ *     caller sent for that file landed in it verbatim, exactly once, and the
+ *     server rewrote nothing (no escape or whitespace normalization, no CR
+ *     line endings, no `target:"all"` fan-out, no elision anchor) — the
+ *     window would only echo the caller's own text and the lines it was
+ *     served; `applied_note` then says the post-edit state equals the content
+ *     sent;
+ *   - a verification kit repeats no entry this task's earlier kits already
+ *     carried in this lane: only the new or changed entries ride, and the
+ *     kit's `note` counts what was left out (the whole-kit `kit_unchanged`
+ *     receipt still answers a byte-identical repeat; `task.force_serve:true`
+ *     and a new task epoch send the whole kit again);
+ *   - a kit that carries a harness `build_command` omits its batched
+ *     `next_call` (the bodies stay listed with their handles).
+ * Measured on the v0.16.0 decision run 2026-10-18-v016-decision-6t-3, arm A:
+ * 227,769 B of `edit.applied` replies, of which about 108.8 KB were
+ * `after.body` echoes and 83.6 KB verification kits whose compile_facts,
+ * link_set and harness were re-sent on every later edit (6.9-9.6 KB each);
+ * one cell followed a kit `next_call` into a 36.5 KB read it never used.
+ * Unset, ON for the CLI coding hosts (`cliHost`: Claude Code, Copilot CLI,
+ * Codex CLI; server.ts passes `isCliCodingHost`), OFF for every other client,
+ * whose replies stay byte-identical. Explicit `0` restores today's reply for
+ * every client; explicit `1` turns the diet on for every client.
+ */
+export function effEditDietEnabled(cliHost = false): boolean {
+  return parseBool(process.env["TL_EFF_EDIT_DIET"], cliHost);
+}
+
+/**
+ * TL_EFF_REPLY_COMPACT (2026-10-23, codex-copilot-proxy wire audit
+ * bench/workflows/experiments/2026-10-21-codex-copilot-proxy/drafts/
+ * fable-analysis-r16/wire-overhead-audit.md §5.1 "SAFE"): the reply envelope
+ * leaves off members that repeat what the reply already says, in one pass
+ * after the budget ladder (protocol/wireCompaction.ts `compactReplyEnvelope`,
+ * called from protocol/emit.ts). Everything upstream (the pack builder, the
+ * ladder, the served-range ledger, the size previews) keeps seeing the full
+ * envelope, so which rows and decisions a call produces does not depend on
+ * this flag; only the bytes that ship do:
+ *   - a `read.task_pack` evidence row's `role:"unknown"`, when the call passed
+ *     no `surfaceRoles` (a call that did keeps the value: absence of `role`
+ *     is the readback "the selector did not bind", protocol.ts [R4-2]). A
+ *     continuation page (a cursor, a `qref` re-pack) carries no scope of its
+ *     own, so the task-pack dispatch publishes whether the TASK was first
+ *     requested with roles (state/session.ts `rememberTaskQuery`, the qref's
+ *     slot, persisted with it) and the page keeps `"unknown"` as its first
+ *     page did (`ProtocolCallContext.surfaceRolesPassed`);
+ *   - a row's generic `likely_edits` pair (an `inspect-slice` and a
+ *     `handle-scoped-edit` hint on the row's own handle, at 0.5/0.4 or
+ *     0.85/0.75), replaced by its kinds; any other value is left as it is;
+ *   - the informational `reason` of `profile_binding` ("no high-confidence
+ *     task-shape marker", "query matched X", ...); advice that tells the
+ *     caller what to send (it names `task.profile`) stays;
+ *   - the all-zero `excluded_by_reason` of a complete `search.tree`
+ *     `scope_report`.
+ * An `obligations[]` entry's `path`/`range`/`role` restated from its evidence
+ * row is NOT among them: it is a model-behaviour change on edit tasks (the
+ * model looks a row up by `handle` to learn where an edit item goes) that no
+ * cohort has exercised, so it belongs to TL_EFF_EVIDENCE_PATH_GROUPS and
+ * obligations ship whole by default (wireCompaction.ts
+ * `restateObligationsFromEvidence`).
+ * `server_build` needs no entry here: it already rides the first task pack of
+ * a session only (server.ts `attachServerBuildOnce`).
+ * Default ON; explicit `0`/`off` restores the previous reply byte-for-byte.
+ * Measured on the r18 replies (bytes, the default against the rolled-back
+ * reply): T03 none on the answer-declared chain and -32 B on the first page of
+ * the profile-omitted one (the binding's reason); T07 -265 B (seven unclassified
+ * rows, the generic pair, the reason); T09 -44 B on its first pack and -831 B on
+ * its second page (unclassified rows, generic pairs, the reason).
+ */
+export function effReplyCompactEnabled(): boolean {
+  return parseBool(process.env["TL_EFF_REPLY_COMPACT"], true);
+}
+
+/**
+ * TL_EFF_EVIDENCE_PATH_GROUPS (2026-10-23, same audit §4.2 rank 1): evidence
+ * `path` and `handle` once per file. Within one `read.task_pack` reply the
+ * rows of a run of consecutive rows on the same `path` (two or more) drop
+ * `path` after the first row, and drop `handle` from every row whose handle
+ * equals the one on the row above; a row without them IS the file and the
+ * handle of the row above. A grouped reply carries `evidence_note`
+ * (protocol/evidencePathGroups.ts `EVIDENCE_PATH_GROUP_NOTE`) so the reader,
+ * model or program, knows the convention is in force; a reply with no such
+ * run is left as it was.
+ *
+ * Same family, same flag: a plan obligation leaves off the `path`, `range` and
+ * `role` the first evidence row of its `handle` carries
+ * (wireCompaction.ts `restateObligationsFromEvidence`; a reader restores them
+ * from the whole rows with `resolveObligations`). It was in the default-ON
+ * TL_EFF_REPLY_COMPACT set until the wire-compaction review of 2026-10-23:
+ * an obligation without a `path` makes the model look the row up by `handle`
+ * to learn where an edit item goes (r18's Codex wrote every edit item with a
+ * `path`), a behaviour change on edit tasks that no cohort has exercised.
+ *
+ * Measured on the r18 first packs: written in place, T03's 30-row structure map
+ * (28 rows of one file on one handle, 2 of another) loses 2,667 B of 17,196
+ * (15.5 %, the note paid for); the paged owed rows (one file, a handle per
+ * row) lose 230-380 B; T09's two packs lose 141 and 348 B for the grouped rows
+ * and 424 and 520 B more for the restated obligations (565 and 868 B in all);
+ * T07's first pack saves less than the note costs and ships whole. As built
+ * (the saved bytes
+ * priced, below), T03's three-reply chain is 48,934 B against 51,475 (-4.9 %),
+ * its first page 15,964 B. A reply is grouped only when it saves at least
+ * EVIDENCE_PATH_GROUP_MIN_NET_SAVING_BYTES (64 B) net of the note.
+ *
+ * The bytes that ship are what is budgeted when the flag is on: the pack
+ * builder prices the grouped rows (`estimateStructureMapReplyBytes`,
+ * `taskPackSizePreview`, `auxiliaryEnumAttachmentSizePreview`) and the emit
+ * ladder measures the grouped text, so the bytes the grouping saves can hold
+ * more rows or more source (the structure map's first page is admitted one
+ * source step larger) and a caller-declared budget binds what ships. A map
+ * cannot be shed row by row, and its estimate is not an upper bound of the
+ * pack built from it, so the first page's admission keeps
+ * STRUCTURE_MAP_GROUPED_ADMISSION_MARGIN_BYTES of headroom (readCodeTaskPack.ts;
+ * without it a state store that issues no cursor, which restates the request in
+ * `next`, left the ladder only the map itself: a 1.6 KB head where the page is
+ * 16 KB). With the flag off nothing is priced, measured or admitted differently.
+ *
+ * Default OFF: it moves `path`/`handle` off rows that every reader used to
+ * find there, which is a wire-contract change for models (an edit item still
+ * needs the `path`) as much as for programs, and it adds one optional
+ * task-pack field. Unset, the wire is byte-identical.
+ */
+export function effEvidencePathGroupsEnabled(): boolean {
+  return parseBool(process.env["TL_EFF_EVIDENCE_PATH_GROUPS"], false);
 }

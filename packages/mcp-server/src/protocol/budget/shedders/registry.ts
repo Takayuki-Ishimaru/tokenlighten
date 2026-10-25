@@ -73,7 +73,27 @@ export type ShedPayload = Record<string, unknown>;
  */
 export type ShedContext = {
   readonly args?: Readonly<Record<string, unknown>>;
+  /** A valid symbols cursor for this response's original page, if staged. */
+  readonly symbolCursorCall?: ToolCall;
+  /**
+   * 2026-10-24 (read-page ceiling): the response is being cut to a client's
+   * transport ceiling, not to a budget its caller declared, so the body-narrowing
+   * rungs (`readText.ts`/`readBatch.ts` rung 4) take a QUARTER off a pass
+   * instead of a half. A halving lands anywhere between 50% and 100% of the
+   * target (a 24 KiB window cut for an 18 KiB ceiling came out at 9 KB), which a
+   * caller that asked for less of everything expects of itself and a client that
+   * is simply being paged for does not: its page is worth the ceiling. Absent =
+   * halve, as every declared budget has always been cut.
+   */
+  readonly finerCuts?: boolean;
 };
+
+/** How much of a body a narrowing rung keeps per pass: half, or three quarters under `ShedContext.finerCuts`. */
+export function keptLinesPerPass(lineCount: number, context: ShedContext): number {
+  return context.finerCuts === true
+    ? Math.min(lineCount - 1, Math.ceil(lineCount * 0.75))
+    : Math.ceil(lineCount / 2);
+}
 
 /**
  * FIX-A3 (TL-05 follow-up, 2026-09-21) — the marker `server.ts`'s

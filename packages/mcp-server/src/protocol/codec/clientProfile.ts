@@ -57,12 +57,20 @@ export interface ClientProfile {
    * this client, consulted ONLY by task_pack/batch size governance
    * (readCodeTaskPack.ts's capForResult, server.ts's handles/full batch
    * loops) as the fallback used when the CALLER passes neither maxBytes nor
-   * maxTokens on the call itself -- an explicit caller argument always wins
-   * over this. Deliberately NOT a codec-compatibility claim (it never touches
-   * allowedCodecIds / isCodecAllowedForClient): it is a conservative,
-   * evidence-grounded byte budget, safe to apply even without an E2E codec
-   * replay, since shipping FEWER bytes than a generic client expects can
-   * never desync its parser the way a wrong codec choice could.
+   * maxTokens on the call itself. Deliberately NOT a codec-compatibility claim
+   * (it never touches allowedCodecIds / isCodecAllowedForClient): it is a
+   * conservative, evidence-grounded byte budget, safe to apply even without an
+   * E2E codec replay, since shipping FEWER bytes than a generic client expects
+   * can never desync its parser the way a wrong codec choice could.
+   *
+   * 2026-10-24 (read-page ceiling): it also bounds every `read.text` and
+   * `read.batch` REPLY -- the first page of a line-addressed read, every
+   * `limit.next` / cursor page after it, a batch of windows -- through
+   * `resolveReadReplyCeiling` below (protocol/emit.ts and server.ts's page-sizing
+   * sites). There an explicit caller budget BELOW the ceiling still wins, but one
+   * above it is clamped to it (`bindToResponseCeiling`): the ceiling is the
+   * client's transport limit, not a default the caller can outbid. (A pack and a
+   * find page keep their older rule, in which an explicit budget replaces it.)
    */
   readonly responseByteCeiling?: number;
 }
@@ -162,6 +170,22 @@ const VSCODE_CLIENT_PROFILE: ClientProfile = {
   responseByteCeiling: 14336, // 16 KiB minus envelope margin
 };
 
+/**
+ * Copilot CLI 1.0.96's exact initialize name, observed in the practical
+ * benchmark (2026-10-20). Replies of 20,016 B reached the model; replies
+ * of 23,466 B and above were spilled to a temporary file with a 500-char
+ * preview. Keep a margin below the delivered size, using the existing
+ * size-governance/continuation machinery rather than truncating text.
+ * This is a byte-budget profile only; it grants no codec permissions.
+ */
+const COPILOT_CLI_CLIENT_PROFILE: ClientProfile = {
+  id: "copilot-cli",
+  profileVersion: "1",
+  lastValidated: "2026-10-20",
+  allowedCodecIds: [],
+  responseByteCeiling: 18 * 1024,
+};
+
 /** True when `clientId` (a raw clientInfo.name) identifies VS Code's built-in MCP client -- see VSCODE_CLIENT_NAME_SUBSTRINGS' doc comment above for exactly which builds match and why. */
 function isVsCodeClientId(clientId: string): boolean {
   const lower = clientId.toLowerCase();
@@ -188,6 +212,7 @@ export function resolveClientProfile(clientId: string | undefined, now: number =
   // a channel suffix an exact map key can never match), not a replacement
   // for it.
   const profile = KNOWN_CLIENT_PROFILES.get(clientId)
+    ?? (clientId.toLowerCase() === "copilot-cli" ? COPILOT_CLI_CLIENT_PROFILE : undefined)
     ?? (isVsCodeClientId(clientId) ? VSCODE_CLIENT_PROFILE : undefined);
   if (profile === undefined) return UNKNOWN_CLIENT_PROFILE;
   if (isProfileStale(profile, now)) return UNKNOWN_CLIENT_PROFILE;
@@ -245,4 +270,26 @@ export function resolveDefaultResponseByteCeiling(
     );
   }
   return profile.responseByteCeiling;
+}
+
+/**
+ * 2026-10-24 (read-page ceiling): the response ceiling a `read.text` /
+ * `read.batch` reply is bound to for `clientId` -- the SAME number a task pack
+ * is bound to (`resolveDefaultResponseByteCeiling` over the resolved profile
+ * and TOKENLIGHTEN_TASK_PACK_MAX_BYTES, which is why that env var, set to 0,
+ * lifts it for reads too), so the two families can never be held to different
+ * limits by one client. `undefined` for a client whose profile carries none
+ * (claude-code, codex, any unrecognised or stale id): such a client's read
+ * replies are sized exactly as they were before this function existed.
+ *
+ * `protocol/emit.ts` calls this with the per-call `ProtocolCallContext.clientId`
+ * (already the handshake capture with the TOKENLIGHTEN_CLIENT_ID override on top,
+ * `server.ts`'s `resolvedClientId()`); the rule that combines it with a
+ * caller's own budget is `bindToResponseCeiling` (protocol/budget/wireBudget.ts).
+ */
+export function resolveReadReplyCeiling(
+  clientId: string | undefined,
+  envRaw: string | undefined = process.env["TOKENLIGHTEN_TASK_PACK_MAX_BYTES"],
+): number | undefined {
+  return resolveDefaultResponseByteCeiling(resolveClientProfile(clientId), envRaw);
 }

@@ -4,14 +4,15 @@
   "matches": {
     "form": "find",
     "query": "hotSym",
+    "snippet_cap": {
+      "top": 10,
+      "more": 30
+    },
     "files": [
       {
         "path": "src/m0/f.ts",
         "lines": [
           1
-        ],
-        "snippets": [
-          "const hotSym_0_0 = 0;"
         ]
       },
       {
@@ -19,10 +20,6 @@
         "lines": [
           1,
           2
-        ],
-        "snippets": [
-          "const hotSym_1_0 = 0;",
-          "const hotSym_1_1 = 1;"
         ]
       },
       {
@@ -31,11 +28,6 @@
           1,
           2,
           3
-        ],
-        "snippets": [
-          "const hotSym_10_0 = 0;",
-          "const hotSym_10_1 = 1;",
-          "const hotSym_10_2 = 2;"
         ]
       },
       {
@@ -57,9 +49,6 @@
         "path": "src/m12/f.ts",
         "lines": [
           1
-        ],
-        "snippets": [
-          "const hotSym_12_0 = 0;"
         ]
       },
       {
@@ -67,10 +56,6 @@
         "lines": [
           1,
           2
-        ],
-        "snippets": [
-          "const hotSym_13_0 = 0;",
-          "const hotSym_13_1 = 1;"
         ]
       },
       {
@@ -79,11 +64,6 @@
           1,
           2,
           3
-        ],
-        "snippets": [
-          "const hotSym_14_0 = 0;",
-          "const hotSym_14_1 = 1;",
-          "const hotSym_14_2 = 2;"
         ]
       },
       {
@@ -105,9 +85,6 @@
         "path": "src/m16/f.ts",
         "lines": [
           1
-        ],
-        "snippets": [
-          "const hotSym_16_0 = 0;"
         ]
       },
       {
@@ -115,10 +92,6 @@
         "lines": [
           1,
           2
-        ],
-        "snippets": [
-          "const hotSym_17_0 = 0;",
-          "const hotSym_17_1 = 1;"
         ]
       },
       {
@@ -127,11 +100,6 @@
           1,
           2,
           3
-        ],
-        "snippets": [
-          "const hotSym_18_0 = 0;",
-          "const hotSym_18_1 = 1;",
-          "const hotSym_18_2 = 2;"
         ]
       },
       {
@@ -155,20 +123,12 @@
           1,
           2,
           3
-        ],
-        "snippets": [
-          "const hotSym_2_0 = 0;",
-          "const hotSym_2_1 = 1;",
-          "const hotSym_2_2 = 2;"
         ]
       },
       {
         "path": "src/m20/f.ts",
         "lines": [
           1
-        ],
-        "snippets": [
-          "const hotSym_20_0 = 0;"
         ]
       },
       {
@@ -176,10 +136,6 @@
         "lines": [
           1,
           2
-        ],
-        "snippets": [
-          "const hotSym_21_0 = 0;",
-          "const hotSym_21_1 = 1;"
         ]
       },
       {
@@ -188,11 +144,6 @@
           1,
           2,
           3
-        ],
-        "snippets": [
-          "const hotSym_22_0 = 0;",
-          "const hotSym_22_1 = 1;",
-          "const hotSym_22_2 = 2;"
         ]
       },
       {
@@ -214,9 +165,6 @@
         "path": "src/m24/f.ts",
         "lines": [
           1
-        ],
-        "snippets": [
-          "const hotSym_24_0 = 0;"
         ]
       },
       {
@@ -224,10 +172,6 @@
         "lines": [
           1,
           2
-        ],
-        "snippets": [
-          "const hotSym_25_0 = 0;",
-          "const hotSym_25_1 = 1;"
         ]
       },
       {
@@ -236,11 +180,6 @@
           1,
           2,
           3
-        ],
-        "snippets": [
-          "const hotSym_26_0 = 0;",
-          "const hotSym_26_1 = 1;",
-          "const hotSym_26_2 = 2;"
         ]
       },
       {
@@ -262,9 +201,6 @@
         "path": "src/m28/f.ts",
         "lines": [
           1
-        ],
-        "snippets": [
-          "const hotSym_28_0 = 0;"
         ]
       },
       {
@@ -272,10 +208,6 @@
         "lines": [
           1,
           2
-        ],
-        "snippets": [
-          "const hotSym_29_0 = 0;",
-          "const hotSym_29_1 = 1;"
         ]
       },
       {
@@ -299,11 +231,6 @@
           1,
           2,
           3
-        ],
-        "snippets": [
-          "const hotSym_30_0 = 0;",
-          "const hotSym_30_1 = 1;",
-          "const hotSym_30_2 = 2;"
         ]
       },
       {
@@ -325,9 +252,6 @@
         "path": "src/m32/f.ts",
         "lines": [
           1
-        ],
-        "snippets": [
-          "const hotSym_32_0 = 0;"
         ]
       },
       {
@@ -335,10 +259,6 @@
         "lines": [
           1,
           2
-        ],
-        "snippets": [
-          "const hotSym_33_0 = 0;",
-          "const hotSym_33_1 = 1;"
         ]
       },
       {
@@ -347,11 +267,6 @@
           1,
           2,
           3
-        ],
-        "snippets": [
-          "const hotSym_34_0 = 0;",
-          "const hotSym_34_1 = 1;",
-          "const hotSym_34_2 = 2;"
         ]
       },
       {
@@ -373,9 +288,6 @@
         "path": "src/m36/f.ts",
         "lines": [
           1
-        ],
-        "snippets": [
-          "const hotSym_36_0 = 0;"
         ]
       },
       {
@@ -383,10 +295,6 @@
         "lines": [
           1,
           2
-        ],
-        "snippets": [
-          "const hotSym_37_0 = 0;",
-          "const hotSym_37_1 = 1;"
         ]
       },
       {
@@ -395,11 +303,6 @@
           1,
           2,
           3
-        ],
-        "snippets": [
-          "const hotSym_38_0 = 0;",
-          "const hotSym_38_1 = 1;",
-          "const hotSym_38_2 = 2;"
         ]
       },
       {
@@ -421,9 +324,6 @@
         "path": "src/m4/f.ts",
         "lines": [
           1
-        ],
-        "snippets": [
-          "const hotSym_4_0 = 0;"
         ]
       },
       {
@@ -431,10 +331,6 @@
         "lines": [
           1,
           2
-        ],
-        "snippets": [
-          "const hotSym_5_0 = 0;",
-          "const hotSym_5_1 = 1;"
         ]
       },
       {
@@ -443,11 +339,6 @@
           1,
           2,
           3
-        ],
-        "snippets": [
-          "const hotSym_6_0 = 0;",
-          "const hotSym_6_1 = 1;",
-          "const hotSym_6_2 = 2;"
         ]
       },
       {
@@ -469,9 +360,6 @@
         "path": "src/m8/f.ts",
         "lines": [
           1
-        ],
-        "snippets": [
-          "const hotSym_8_0 = 0;"
         ]
       },
       {
@@ -479,10 +367,6 @@
         "lines": [
           1,
           2
-        ],
-        "snippets": [
-          "const hotSym_9_0 = 0;",
-          "const hotSym_9_1 = 1;"
         ]
       }
     ],

@@ -70,7 +70,10 @@ export interface TokenLightenWorkspaceSetupResult {
   schemaVersion: 1;
   workspaceRoot: string;
   clients: readonly TokenLightenSetupClient[];
+  /** Whether all selected clients allow writes. */
   writeEnabled: boolean;
+  /** Present when selected clients have different write permissions. */
+  writeEnabledByClient?: Partial<Record<TokenLightenSetupClient, boolean>>;
   usageLoggingEnabled: true;
   rulesWritten: readonly string[];
   configFilesWritten: readonly string[];
@@ -86,6 +89,8 @@ export interface TokenLightenWorkspaceSummary {
   workspaceRoot: string;
   clients: readonly TokenLightenSetupClient[];
   writeEnabled: boolean;
+  /** Per-client posture for mixed permissions; absent in older uniform entries. */
+  writeEnabledByClient?: Partial<Record<TokenLightenSetupClient, boolean>>;
   usageLoggingEnabled: boolean;
   configFilesWritten: readonly string[];
   updatedAt: string;

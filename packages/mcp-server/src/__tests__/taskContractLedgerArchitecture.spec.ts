@@ -3,17 +3,25 @@ import {
   clearTaskContract,
   clearTaskContractsForLane,
   bindTaskContractHandle,
+  applyTaskContractObservationToSnapshot,
   MAX_TASK_CONTRACTS_PER_LANE,
   queryTaskContract,
   recordAuthoritativeAbsentConcerns,
   recordEvidenceExpansion,
+  recordExpansionExplicitGap,
   recordExplicitGap,
   recordTaskContract,
   resetTaskContractStoreForTest,
   taskContractLedgerSnapshotForTest,
+  taskContractEvaluationSnapshot,
+  taskContractProjectionForSnapshot,
+  taskContractGapProjection,
+  taskContractDischargeCertificate,
   TASK_CONTRACT_STATE_TTL_MS,
   type TaskContractScope,
 } from "../features/task-pack/taskContractStore.js";
+import { computeEpochTaskContractObservation } from "../features/task-pack/readCodeTaskPack.js";
+import type { TaskPackResult } from "../features/task-pack/model.js";
 import { CAPACITY_OBLIGATION, MAX_LEDGER_OBLIGATIONS } from "../state/obligationLedger.js";
 import { resetStateStoresForTests } from "../state/stateStore.js";
 import * as fs from "node:fs";
@@ -44,6 +52,128 @@ afterEach(() => {
 });
 
 describe("task-contract ledger architecture", () => {
+  it("computes an immutable observation with prior enumerated concerns as explicit input", () => {
+    const root = makeRoot("observation-compute");
+    const query = "Inspect invoice implementation";
+    const epochTokens = ["inspect", "invoice", "implementation"];
+    const priorConcernTokens = ["enumerated-item:abc123:legacyFacet"];
+    const result = {
+      mode: "task_pack",
+      coverage: "focused",
+      surfaces: [],
+      missing: [],
+      required_surfaces: ["domain", "test"],
+    } as unknown as TaskPackResult;
+    const observation = computeEpochTaskContractObservation(root, result, query, undefined, false, priorConcernTokens)!;
+
+    expect(observation.epochTokens).toEqual(epochTokens);
+    expect(observation.taskContract.concernTokens).toContain("enumerated-item:abc123:legacyFacet");
+    expect(Object.isFrozen(observation)).toBe(true);
+    expect(Object.isFrozen(observation.taskContract)).toBe(true);
+    expect(Object.isFrozen(observation.taskContract.concernTokens)).toBe(true);
+    expect(taskContractLedgerSnapshotForTest(root)).toBeUndefined();
+
+    recordTaskContract(root, observation.epochTokens, observation.taskContract);
+    recordEvidenceExpansion(root, observation.expansion.targets, observation.expansion.servedDefinitions);
+    if (observation.literalSourceUniverse) {
+      recordEvidenceExpansion(root, ["literal-source-universe"], ["literal-source-universe"]);
+    }
+    if (observation.explicitGap !== undefined) {
+      recordExpansionExplicitGap(root, observation.explicitGap.parent, observation.explicitGap.targets, observation.explicitGap.witness);
+    }
+    expect(taskContractLedgerSnapshotForTest(root)?.obligations).toEqual(
+      applyTaskContractObservationToSnapshot(undefined, observation)?.ledger.obligations,
+    );
+  });
+
+  it("evaluates ordered observations on detached snapshots with ordinary ledger parity", () => {
+    const root = makeRoot("detached-evaluation");
+    const scope: TaskContractScope = { lane: "detached", taskHandle: "task-1" };
+    const epochTokens = ["invoice", "status"];
+    const first = {
+      epochTokens,
+      query: "invoice status",
+      taskContract: {
+        query: "invoice status",
+        requiredRoles: ["domain", "test"],
+        concernTokens: ["status", "invoice"],
+        servedRoles: ["domain"],
+        coveredConcernTokens: ["invoice"],
+      },
+      expansion: { targets: ["readStatus", "missingStatus", "unservedDependency"], servedDefinitions: ["readstatus"] },
+      literalSourceUniverse: false,
+    } as const;
+    const second = {
+      epochTokens,
+      query: "invoice status",
+      taskContract: {
+        query: "invoice status",
+        requiredRoles: [],
+        concernTokens: [],
+        servedRoles: ["test"],
+        coveredConcernTokens: ["status"],
+      },
+      expansion: { targets: [], servedDefinitions: [] },
+      literalSourceUniverse: true,
+      explicitGap: {
+        parent: { kind: "dependency-definitions", target: "open-universe" },
+        targets: ["missingStatus"],
+        witness: "bounded expansion stopped",
+      },
+    } as const;
+    const third = {
+      epochTokens,
+      query: "invoice status",
+      taskContract: {
+        query: "invoice status",
+        requiredRoles: [],
+        concernTokens: [],
+        servedRoles: [],
+        coveredConcernTokens: [],
+      },
+      expansion: { targets: ["unservedDependency"], servedDefinitions: ["unservedDependency"] },
+      literalSourceUniverse: false,
+    } as const;
+
+    let detached = applyTaskContractObservationToSnapshot(undefined, first);
+    expect(detached).toBeDefined();
+    const untouchedStore = taskContractLedgerSnapshotForTest(root, scope);
+    expect(untouchedStore).toBeUndefined();
+    detached = applyTaskContractObservationToSnapshot(detached, second);
+    detached = applyTaskContractObservationToSnapshot(detached, third);
+    expect(detached?.query).toBe("invoice status");
+
+    recordTaskContract(root, epochTokens, first.taskContract, scope);
+    recordEvidenceExpansion(root, first.expansion.targets, first.expansion.servedDefinitions, scope);
+    recordTaskContract(root, epochTokens, second.taskContract, scope);
+    recordEvidenceExpansion(root, second.expansion.targets, second.expansion.servedDefinitions, scope);
+    recordEvidenceExpansion(root, ["literal-source-universe"], ["literal-source-universe"], scope);
+    recordExpansionExplicitGap(root, second.explicitGap.parent, second.explicitGap.targets, second.explicitGap.witness, scope);
+    recordTaskContract(root, epochTokens, third.taskContract, scope);
+    recordEvidenceExpansion(root, third.expansion.targets, third.expansion.servedDefinitions, scope);
+
+    const persisted = taskContractEvaluationSnapshot(root, epochTokens, scope);
+    expect(detached?.ledger).toEqual(persisted?.ledger);
+    const firstProof = persisted!.ledger.obligations.find((entry) => entry.proof !== undefined)!;
+    Reflect.set(firstProof.proof!, "witness", "mutated through snapshot");
+    expect(taskContractEvaluationSnapshot(root, epochTokens, scope)?.ledger).toEqual(persisted?.ledger);
+    const detachedProjection = taskContractProjectionForSnapshot(detached, epochTokens);
+    expect(detachedProjection.projection).toEqual(taskContractGapProjection(root, epochTokens, scope));
+    expect(detachedProjection.certificate?.digest).toBe(taskContractDischargeCertificate(root, epochTokens, scope)?.digest);
+    expect(detachedProjection.certificate?.digest).toBeDefined();
+    expect(detachedProjection.projection.open).toEqual([]);
+    expect(detachedProjection.projection.explicitGaps).toContain("dependency-definitions:missingStatus (bounded expansion stopped)");
+    expect(detachedProjection.projection.resolved).toContain("dependency-definitions:literal-source-universe");
+
+    const unrelated = applyTaskContractObservationToSnapshot(detached, {
+      ...first,
+      epochTokens: ["customer", "refund"],
+    });
+    expect(unrelated?.epochTokens).toEqual(["customer", "refund"]);
+    expect(unrelated?.ledger.obligations).not.toEqual(detached?.ledger.obligations);
+    expect(applyTaskContractObservationToSnapshot(detached, { ...first, epochTokens: [] })).toEqual(detached);
+  });
+
   it("binds each ledger to lane and task handle instead of workspace alone", () => {
     const root = makeRoot("architecture");
     const alpha: TaskContractScope = { lane: "alpha", taskHandle: "handle-a" };

@@ -18,8 +18,11 @@ import {
   dynamicDerivationOf,
   dynamicEnumConsumerVerdict,
   enumSubjectSymbols,
+  isPerSiteCheckSurface,
 } from "../tools/readCodeTaskPack.js";
 import { handleTable } from "../util/handles.js";
+import { LISTED_ITEM_DERIVED_WHY } from "../features/task-pack/listedScopeItems.js";
+import { REQUIRED_ENUM_REVIEW_PURPOSE } from "../features/task-pack/changeScopeContinuation.js";
 import { getPackChecks, resetAll } from "../util/session.js";
 import { resetPackServeLogForTest } from "../util/packServeLog.js";
 
@@ -31,6 +34,18 @@ function write(dir: string, rel: string, content: string): void {
   fs.mkdirSync(path.dirname(abs), { recursive: true });
   fs.writeFileSync(abs, content, "utf8");
 }
+
+describe("retained enum review literal-check routing", () => {
+  it.each([LISTED_ITEM_DERIVED_WHY, REQUIRED_ENUM_REVIEW_PURPOSE])("keeps no-edit proof out of literal checks: %s", why => {
+    for (const required of [undefined, false, true]) {
+      expect(isPerSiteCheckSurface({role:"contract",why,required})).toBe(false);
+    }
+  });
+  it("keeps ordinary contract and static API checks", () => {
+    expect(isPerSiteCheckSurface({role:"contract"})).toBe(true);
+    expect(isPerSiteCheckSurface({role:"api",required:true})).toBe(true);
+  });
+});
 
 describe("IMPROVEMENT C — dynamicDerivationOf (pure)", () => {
   it("matches every documented dynamic-derivation form for the subject symbol", () => {

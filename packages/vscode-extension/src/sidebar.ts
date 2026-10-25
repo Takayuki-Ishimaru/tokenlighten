@@ -21,6 +21,8 @@ const VIEW_ID = "tokenlighten-control-center";
 const RUNNABLE_COMMANDS = new Set([
   "tokenlighten.setup",
   "tokenlighten.logs.export",
+  "tokenlighten.licenses.show",
+  "tokenlighten.engines.show",
 ]);
 
 interface SidebarMessage {
@@ -28,6 +30,7 @@ interface SidebarMessage {
   command?: unknown;
   enabled?: unknown;
   language?: unknown;
+  autoUpdate?: unknown;
 }
 
 function escapeHtml(value: string): string {
@@ -67,6 +70,8 @@ const COPY = {
     exportLogs: "Export this workspace's privacy-safe logs",
     settings: "Settings",
     workspaceEnabled: "Enable TL in this workspace",
+    autoUpdate: "Automatically update the extension",
+    autoUpdateDetail: "Applies to all workspaces and saves immediately. Checks GitHub Releases at startup and every six hours. Turn off for update notifications only.",
     language: "Display language",
     save: "Save settings",
     allSettings: "All settings",
@@ -100,6 +105,8 @@ const COPY = {
     exportLogs: "このワークスペースのプライバシー保護ログを出力",
     settings: "設定",
     workspaceEnabled: "このワークスペースでTLを有効にする",
+    autoUpdate: "拡張機能を自動更新する",
+    autoUpdateDetail: "全ワークスペース共通で、変更は即時保存されます。起動時と6時間ごとにGitHub Releasesを確認します。無効にすると更新通知のみになります。",
     language: "表示言語",
     save: "設定を保存",
     allSettings: "すべての設定",
@@ -203,6 +210,21 @@ body.vscode-high-contrast .mark,body.vscode-high-contrast-light .mark{border:1px
       return;
     }
 
+    if (message.action === "setAutoUpdate") {
+      if (typeof message.autoUpdate !== "boolean") return;
+      const updateConfig = vscode.workspace.getConfiguration("tokenlighten");
+      await updateConfig.update(
+        "autoUpdate.enabled",
+        message.autoUpdate,
+        vscode.ConfigurationTarget.Global,
+      );
+      if (message.autoUpdate) {
+        await updateConfig.update("updateCheck.enabled", true, vscode.ConfigurationTarget.Global);
+      }
+      this.refresh();
+      return;
+    }
+
     if (message.action === "openSettings") {
       await vscode.commands.executeCommand(
         "workbench.action.openSettings",
@@ -257,6 +279,9 @@ body.vscode-high-contrast .mark,body.vscode-high-contrast-light .mark{border:1px
   private async render(webview: vscode.Webview): Promise<string> {
     const config = getTokenLightenConfiguration();
     const enabled = config.get<boolean>("enabled", true);
+    const updateConfig = vscode.workspace.getConfiguration("tokenlighten");
+    const autoUpdateEnabled = updateConfig.get<boolean>("autoUpdate.enabled", true)
+      && updateConfig.get<boolean>("updateCheck.enabled", true);
     const configuredLanguage: ConfiguredLanguage = getConfiguredLanguage();
     const language = getDisplayLanguage();
     const copy = COPY[language];
@@ -631,7 +656,13 @@ body.vscode-high-contrast .mark,body.vscode-high-contrast-light .mark{border:1px
   </div>
 
   <h2>${copy.settings}</h2>
+  <div class="actions">
+    <button data-command="tokenlighten.engines.show">${language === "ja" ? "解析エンジン・モデルを管理" : "Manage engines and models"}</button>
+    <button data-command="tokenlighten.licenses.show">${language === "ja" ? "ライセンス一覧" : "View licenses"}</button>
+  </div>
   <label class="toggle" for="workspaceEnabled"><input id="workspaceEnabled" type="checkbox" ${enabledChecked}>${copy.workspaceEnabled}</label>
+  <label class="toggle" for="autoUpdate"><input id="autoUpdate" type="checkbox" ${autoUpdateEnabled ? "checked" : ""} aria-describedby="autoUpdateDetail">${copy.autoUpdate}</label>
+  <span class="muted" id="autoUpdateDetail">${copy.autoUpdateDetail}</span>
   <label for="language">${copy.language}</label>
   <select id="language">
     <option value="auto" ${configuredLanguage === "auto" ? "selected" : ""}>${copy.automatic}</option>
@@ -649,6 +680,9 @@ body.vscode-high-contrast .mark,body.vscode-high-contrast-light .mark{border:1px
     button.addEventListener("click", () => {
       vscode.postMessage({ action: "run", command: button.dataset.command });
     });
+  });
+  document.getElementById("autoUpdate").addEventListener("change", (event) => {
+    vscode.postMessage({ action: "setAutoUpdate", autoUpdate: event.target.checked });
   });
   document.getElementById("language").addEventListener("change", (event) => {
     vscode.postMessage({

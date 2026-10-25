@@ -437,11 +437,14 @@ export function resetGitignorePatternsCache(): void {
  * exclusions live in DEFAULT_IGNORE / `.tokenlightenignore`, not in scattered
  * product-code constants.
  */
-export function isWalkIgnoredPath(workspace: string, relPath: string): boolean {
+export function isWalkIgnoredPath(workspace: string, relPath: string, options: { readonly respectGitignore?: boolean } = {}): boolean {
   const p = normalizeRelPath(relPath);
   if (!p) return false;
   const matcher = ignoreMatcherFor(false, workspace);
-  return matcher.ignores(p);
+  if (matcher.ignores(p)) return true;
+  if (!options.respectGitignore) return false;
+  const patterns = loadGitignorePatternsCached(workspace);
+  return patterns.length > 0 && createIgnoreMatcherSync(patterns).ignores(p);
 }
 
 /**

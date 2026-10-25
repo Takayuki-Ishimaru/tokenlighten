@@ -13,16 +13,16 @@
  * `readRequestContinuation.spec.ts`'s own pattern.
  */
 import { afterAll, afterEach, describe, expect, it } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
-import { createRequire } from "node:module";
+import { type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildHttpCorpusWorkspace } from "./helpers/evaluation0927Scenarios.js";
+import { TSX_NODE_ARGS } from "./helpers/tsxNode.js";
+import { pooledSpawn } from "./helpers/serverPool.js";
+import { killServerGroup } from "./helpers/killServerGroup.js";
 
-const nodeRequire = createRequire(import.meta.url);
-const TSX_CLI = nodeRequire.resolve("tsx/cli");
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BIN_TS = path.resolve(HERE, "..", "bin.ts");
 
@@ -36,17 +36,14 @@ const servers: Server[] = [];
 const workspaces: string[] = [];
 
 function startServer(cwd: string, extraArgs: readonly string[] = []): Server {
-  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, "--liftoff-only", BIN_TS, cwd, ...extraArgs], {
+  const child: ChildProcess = pooledSpawn(process.execPath, [...TSX_NODE_ARGS, BIN_TS, cwd, ...extraArgs], {
     cwd,
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, TOKENLIGHTEN_ALLOWED_PARENTS: os.tmpdir() },
     detached: process.platform !== "win32",
   });
   const killGroup = (): void => {
-    try {
-      if (process.platform !== "win32" && child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
-      else child.kill("SIGKILL");
-    } catch { /* already gone */ }
+    killServerGroup(child);
   };
   let buffer = "";
   let stderr = "";

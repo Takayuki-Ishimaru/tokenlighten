@@ -1,6 +1,8 @@
 {
   "extension.description": "Workspace-scoped TokenLighten setup, savings, and logs for Copilot, Codex, and Claude Code",
   "command.status": "TokenLighten: Show Status",
+  "command.licenses.show": "TokenLighten: View Licenses",
+  "command.engines.show": "TokenLighten: Manage Local Analysis Engines",
   "command.setup": "TokenLighten: Set Up This Workspace",
   "command.usage.show": "TokenLighten: Show This Workspace's Usage and Savings",
   "command.logs.export": "TokenLighten: Export This Workspace's Usage Logs",
@@ -12,5 +14,7 @@
   "config.language.auto": "Automatic (use the VS Code display language)",
   "config.language.en": "English",
   "config.language.ja": "Japanese",
-  "config.updateCheck.enabled": "Check GitHub Releases for a newer TokenLighten VSIX when VS Code starts."
+  "config.autoUpdate.enabled": "Automatically download and install newer TokenLighten VSIX releases when update checks are enabled. Disable to receive update notifications only.",
+  "config.updateCheck.enabled": "Check GitHub Releases for a newer TokenLighten VSIX at startup and every six hours. Disabling this also stops automatic updates.",
+  "config.confirmResetOnUpdate": "After TokenLighten is updated to a newer version (automatically or manually), ask whether to reset your TokenLighten user settings to their default values when any of them differs from its default; closing the notification without answering asks again at the next startup. Workspace and folder settings are never changed."
 }

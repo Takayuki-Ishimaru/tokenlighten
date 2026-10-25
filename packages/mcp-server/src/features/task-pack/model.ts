@@ -298,6 +298,15 @@ export interface TaskPackResult {
    */
   create_note?: string;
   /**
+   * TL_EFF_MAP_ANSWER_FIRST (2026-10-23): the optional, non-binding top-level
+   * `advisory` of the wire (`ReadTaskPackResult.advisory`, kept by the task-pack
+   * projector). An answer-first structure map states in it, as facts and within
+   * the bytes the pack has left under its ceiling, which member bodies it did not
+   * serve and what they hold (answerFirstFacts.ts). Attached after the shed
+   * ladder (`attachAnswerFirstAdvisory`), like the plan aids; absent otherwise.
+   */
+  advisory?: string;
+  /**
    * DESIGN-v0.8 §A7: on a PARTIAL pack only, a compact (≤PARTIAL_TREE_CAP_BYTES)
    * one-line-per-dir inventory of the surfaces' dominant root cluster, so an
    * agent that would otherwise resort to a native `find -type f` after a

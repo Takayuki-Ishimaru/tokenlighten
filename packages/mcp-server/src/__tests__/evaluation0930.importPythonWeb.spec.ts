@@ -1397,21 +1397,38 @@ describe("robustness: hostile input costs edges, never an exception or unbounded
       "src/main.ts": "",
       "src/a.ts": "export const a = 1;\n",
       "src/barrel.ts": "export {".repeat(40000),
+      "src/barrel8.ts": "export {".repeat(5000),
     });
-    const timed = <T>(fn: () => T): { result: T; ms: number } => {
-      const t0 = performance.now();
-      const result = fn();
-      return { result, ms: performance.now() - t0 };
-    };
-    const cases: Array<() => unknown> = [
-      () => webEdges(ws, "src/main.ts", "from '".repeat(200_000)),
-      () => webEdges(ws, "src/main.ts", "import x from ".repeat(30_000)),
-      () => webEdges(ws, "src/main.ts", "import { a } from './barrel';\n"),
-      () => webEdges(ws, "src/main.ts", "import a from './a';\n".repeat(60_000)),
-      () => pyEdges(ws, "src/main.py", `from ${".".repeat(50_000)}x import y\nfrom ${".".repeat(50_000)}\n`),
-      () => pyEdges(ws, "src/main.py", "from x import (\n".repeat(30_000)),
+    // Linear time is checked as a ratio, not against a wall-clock bound: each
+    // shape at full size is timed against 1/8 of itself, the two alternately,
+    // with the import caches cleared before every run (each run is the cold
+    // call the shape is about), keeping the least of five runs of each. 8x
+    // the input costs at most ~8x when linear or capped (measured 2026-10-20:
+    // 1.2x to 7.7x; the unclosed barrel 31 -> 242 ms), 64x when quadratic.
+    // The former 1.5 s bound per call kept 7.5x headroom on the barrel, less
+    // than the 8.7x slowdown measured beside 40 CPU burners
+    // (helpers/repoPackTimeout.ts).
+    const shapes: Array<(scale: number) => unknown> = [
+      (scale) => webEdges(ws, "src/main.ts", "from '".repeat(200_000 / scale)),
+      (scale) => webEdges(ws, "src/main.ts", "import x from ".repeat(30_000 / scale)),
+      (scale) => webEdges(ws, "src/main.ts", scale === 1 ? "import { a } from './barrel';\n" : "import { a } from './barrel8';\n"),
+      (scale) => webEdges(ws, "src/main.ts", "import a from './a';\n".repeat(60_000 / scale)),
+      (scale) => pyEdges(ws, "src/main.py", `from ${".".repeat(50_000 / scale)}x import y\nfrom ${".".repeat(50_000 / scale)}\n`),
+      (scale) => pyEdges(ws, "src/main.py", "from x import (\n".repeat(30_000 / scale)),
     ];
-    for (const run of cases) expect(timed(run).ms).toBeLessThan(1500);
+    for (const [index, shape] of shapes.entries()) {
+      const least = [Infinity, Infinity];
+      for (let run = 0; run < 5; run++) {
+        for (const [slot, scale] of [8, 1].entries()) {
+          resetWebImportCaches();
+          resetPythonImportCaches();
+          const t0 = performance.now();
+          shape(scale);
+          least[slot] = Math.min(least[slot]!, performance.now() - t0);
+        }
+      }
+      expect(least[1]! / least[0]!, `shape ${index}: ${least[0]!.toFixed(2)} ms -> ${least[1]!.toFixed(2)} ms`).toBeLessThan(32);
+    }
   });
 });
 

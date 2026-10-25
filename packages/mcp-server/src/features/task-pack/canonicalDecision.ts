@@ -5,6 +5,7 @@ import {
 } from "../../util/continuation.js";
 import type { TaskPackResult } from "./model.js";
 import { codeTaskPackSurfaces } from "./artifactSections.js";
+import {changeScopeFollowupTarget} from "./changeScopeContinuation.js";
 import { semanticFrontierGuardEnabled, sfDemoteEnabled, batchHintsEnabled } from "../../util/flags.js";
 import { isSemanticFrontierContinuationOptional } from "./semanticFrontier.js";
 import { sfPackContextFor, isAddressGroundingOpenConcern } from "./sfSatisfaction.js";
@@ -1068,6 +1069,12 @@ export function discoveryBundleNext(
   // `deriveCanonicalTaskDecisionRaw` it preempts no single-document zoom — and
   // a `discover` whose wire `next` does not name the caller's own undelivered
   // range is the defect, not the fix.
+  const changeScope = typeof result.qref === "string" && result.qref !== ""
+    ? changeScopeFollowupTarget(result) : undefined;
+  if (changeScope !== undefined && semanticFrontierNextAllowed(result, guardEnabled)) {
+    const scoped = sanitizeSemanticFrontierNext(result, changeScope, guardEnabled);
+    if (scoped !== undefined) return scoped;
+  }
   const callerRangedBundle = unservedCallerRangedTargetsNext(result, 1);
   if (callerRangedBundle !== undefined) return callerRangedBundle;
   if (!semanticFrontierNextAllowed(result, guardEnabled) || result.coverage === "complete" || typeof result.qref !== "string" || result.qref === "") return undefined;
@@ -1112,6 +1119,10 @@ export function discoveryBundleNext(
     let hasUncoveredCandidate = false;
     for (const surface of surfaces) {
       if (guardEnabled && isSemanticFrontierContinuationOptional(surface)) continue;
+      // An edit target's dependency definition is no candidate to choose
+      // between (`isSupportingEvidenceWhy`): bundling it re-packed the context
+      // files as caller-named targets (gauge fixture, 2026-10-17).
+      if (String((surface as { why?: unknown }).why ?? "").startsWith("edit-context:")) continue;
       const candidatePath = (surface as { path?: unknown }).path;
       if (
         typeof candidatePath === "string" && candidatePath !== ""
@@ -1242,10 +1253,14 @@ function servedDocumentZoom(result: TaskPackResult): ContinuationCall | undefine
  * readiness falsification pass (`… (readiness-falsification-counterexample)`).
  * Such a window is evidence for the answer, never an alternative the question
  * could mean, so neither the contract's pending choice nor the wire's
- * `candidates[]` counts it.
+ * `candidates[]` counts it. So is an edit target's dependency definition
+ * (`edit-context: <name> (used by <focal>)`, readCodeTaskPack.ts's
+ * `augmentEditContextSurfaces`): listing those made a one-target pack ask the
+ * caller to choose among four files (gauge fixture, 2026-10-17).
  */
 export function isSupportingEvidenceWhy(why: string | undefined): boolean {
-  return why !== undefined && (why.startsWith("closure:") || why.includes("readiness-falsification-counterexample"));
+  return why !== undefined
+    && (why.startsWith("closure:") || why.startsWith("edit-context:") || why.includes("readiness-falsification-counterexample"));
 }
 
 /**
@@ -2007,9 +2022,16 @@ function applyDiscoverDecision(
 ): void {
   const call = decision.next_call;
   if (call === undefined) return;
+  // §5.4 rung 3 (`enforceContinuationBudget`): a plan over
+  // CONTINUATION_HARD_CAP_BYTES collapses to `next` alone — `continuation` is
+  // dropped, `next` kept, and the projection below still applies. Returning
+  // here instead left a discovery contract beside the answer route the pack
+  // was built with: T03's follow-up pack once the served-range ledger stopped
+  // holding lines no reply carried (its next re-issues the request with five
+  // OrderOrchestrator.java windows, over the cap), 2026-10-19.
   const plan = planFor(call);
-  if (plan === undefined) return;
-  result.continuation = plan;
+  if (plan === undefined) delete result.continuation;
+  else result.continuation = plan;
   result.next = call;
   contract.state = "needs-followup";
   contract.readiness = "needs-followup";

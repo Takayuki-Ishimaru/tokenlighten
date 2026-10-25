@@ -38,7 +38,6 @@
 
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { createRequire } from "node:module";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -52,9 +51,8 @@ import {
 import { killServerGroup } from "./helpers/killServerGroup.js";
 import { rmDirWithRetry, waitForExit } from "./helpers/rmDirWithRetry.js";
 import { symlinkSupported } from "./helpers/symlinkSupported.js";
+import { TSX_NODE_ARGS } from "./helpers/tsxNode.js";
 
-const nodeRequire = createRequire(import.meta.url);
-const TSX_CLI = nodeRequire.resolve("tsx/cli");
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BIN_TS = path.resolve(HERE, "..", "bin.ts");
 const HOME = process.env["HOME"] ?? process.env["USERPROFILE"] ?? os.homedir();
@@ -109,7 +107,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function startServer(ws: string, env: Record<string, string | undefined>): ServerHandle {
-  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, "--liftoff-only", BIN_TS, ws], {
+  const child: ChildProcess = spawn(process.execPath, [...TSX_NODE_ARGS, BIN_TS, ws], {
     cwd: ws,
     stdio: ["pipe", "pipe", "pipe"],
     detached: process.platform !== "win32",

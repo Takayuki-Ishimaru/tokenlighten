@@ -31,16 +31,15 @@
 // has no way to mint that handle dynamically.
 
 import { afterAll, afterEach, describe, expect, it } from "vitest";
-import { spawn, type ChildProcess } from "child_process";
-import { createRequire } from "node:module";
+import { type ChildProcess } from "child_process";
 import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { killServerGroup } from "../helpers/killServerGroup.js";
+import { TSX_NODE_ARGS } from "../helpers/tsxNode.js";
+import { pooledSpawn } from "../helpers/serverPool.js";
 
-const nodeRequire = createRequire(import.meta.url);
-const TSX_CLI = nodeRequire.resolve("tsx/cli");
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BIN_TS = path.resolve(HERE, "..", "..", "bin.ts");
 const SPAWN_TIMEOUT_MS = 90_000;
@@ -88,7 +87,7 @@ const tmpDirs: string[] = [];
 const spawnedServers: ServerHandle[] = [];
 
 function startServer(ws: string): ServerHandle {
-  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, "--liftoff-only", BIN_TS, ws], {
+  const child: ChildProcess = pooledSpawn(process.execPath, [...TSX_NODE_ARGS, BIN_TS, ws], {
     cwd: ws,
     stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32",
     env: { ...process.env },
@@ -213,9 +212,13 @@ describe("WP-S6: query-less multi-target read with per-entry symbol windows", ()
       await server.initialize();
 
       // A first pack, mirroring the live session's already-prepared context.
+      // `task.epoch:"new"` keeps it a pack: since 2026-10-18 a query-less
+      // batch of small whole files without one is a plain read.batch
+      // (explicitTargetsBatchRead.rc.spec.ts).
       const seed = await callTool(server, "tl_read_file", {
         targets: [{ path: "src/orderController.ts" }, { path: "src/orderService.ts" }],
         content: "auto",
+        task: { epoch: "new" },
         cwd: ws,
       });
       expect(seed["kind"], JSON.stringify(seed).slice(0, 500)).toBe("read.task_pack");
@@ -245,7 +248,7 @@ describe("WP-S6: query-less multi-target read with per-entry symbol windows", ()
   );
 
   it(
-    "{path,range} x2, no symbol anywhere: unaffected -- still resolved through today's task_pack promotion with the exact requested windows",
+    "{path,range} x2, no symbol anywhere: one read.batch with the exact requested windows (2026-10-18; was a promoted task_pack)",
     async () => {
       const ws = mkWorkspace();
       tmpDirs.push(ws);
@@ -261,10 +264,14 @@ describe("WP-S6: query-less multi-target read with per-entry symbol windows", ()
         cwd: ws,
       });
 
-      expect(body["kind"], JSON.stringify(body).slice(0, 800)).toBe("read.task_pack");
-      const evidence = body["evidence"] as Array<Record<string, unknown>>;
-      const controllerEv = evidence.find((e) => String(e["path"]).includes("orderController.ts"));
-      const serviceEv = evidence.find((e) => String(e["path"]).includes("orderService.ts"));
+      // 2026-10-18 (v016 decision 6t-2): a query-less batch of explicit
+      // windows that fits one response is read.batch, not a promoted task
+      // pack with a new task and certificate (explicitTargetsBatchRead.rc.spec.ts).
+      expect(body["kind"], JSON.stringify(body).slice(0, 800)).toBe("read.batch");
+      expect(body["task"], JSON.stringify(body).slice(0, 800)).toBeUndefined();
+      const entries = body["entries"] as Array<Record<string, unknown>>;
+      const controllerEv = entries.find((e) => String(e["path"]).includes("orderController.ts"));
+      const serviceEv = entries.find((e) => String(e["path"]).includes("orderService.ts"));
       expect(controllerEv?.["range"], JSON.stringify(body).slice(0, 800)).toBe("1-3");
       expect(serviceEv?.["range"], JSON.stringify(body).slice(0, 800)).toBe("1-3");
     },
@@ -376,7 +383,7 @@ describe("WP-S6: query-less multi-target read with per-entry symbol windows", ()
       expect(entries[1]!["handle"]).toBe(handleB);
     }, SPAWN_TIMEOUT_MS);
 
-    it("plain multi-path (all bare, no symbol/range anywhere): unaffected, still a task_pack", async () => {
+    it("plain multi-path of small whole files (no symbol/range anywhere): read.batch since 2026-10-18", async () => {
       const ws = mkWorkspace();
       tmpDirs.push(ws);
       const server = startServer(ws);
@@ -387,8 +394,14 @@ describe("WP-S6: query-less multi-target read with per-entry symbol windows", ()
         content: "auto",
         cwd: ws,
       });
-      expect(body["kind"], JSON.stringify(body).slice(0, 800)).toBe("read.task_pack");
-      expect(body["decision"]).toBeDefined();
+      // 2026-10-18 (v016 decision 6t-2): small whole files (mode=auto's
+      // whole-file threshold) are a plain read.batch now; a bigger file or a
+      // directory still seeds the exploratory pack (explicitTargetsBatchRead.rc.spec.ts).
+      expect(body["kind"], JSON.stringify(body).slice(0, 800)).toBe("read.batch");
+      expect(body["decision"]).toBeUndefined();
+      const paths = (body["entries"] as Array<Record<string, unknown>>).map((e) => String(e["path"]));
+      expect(paths.some((p) => p.includes("orderController.ts")), JSON.stringify(body).slice(0, 800)).toBe(true);
+      expect(paths.some((p) => p.includes("orderService.ts")), JSON.stringify(body).slice(0, 800)).toBe(true);
     }, SPAWN_TIMEOUT_MS);
   });
 });

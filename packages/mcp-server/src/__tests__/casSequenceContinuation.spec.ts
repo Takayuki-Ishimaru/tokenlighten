@@ -90,7 +90,10 @@ describe("CAS refusal then prescribed-find continuation does not fall to new-tas
     // STEP 1: a WRONG expected_state_version refuses fail-closed and names
     // the LIVE version via `actual` — the exact shape
     // pi09StateHandles.spec.ts's own expected_state_version suite pins.
-    const wrongVersion = liveVersion + 7;
+    // Behind the live version: the stale view whose recovery is the re-pack
+    // family (a version the task never reached re-issues directly instead —
+    // pi09StateHandles.spec.ts, 2026-10-17).
+    const wrongVersion = liveVersion - 1;
     const refused = await dispatch("tl_read_file", {
       mode: "task_pack", query, cwd, lane,
       task_handle: taskHandle, expected_state_version: wrongVersion,

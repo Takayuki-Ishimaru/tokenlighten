@@ -34,6 +34,14 @@ No permission is granted to use an organization's name or logo to promote TokenL
 
 TokenLighten is provided without warranty. The project does not provide a support commitment, service-level agreement, uptime guarantee, or obligation to provide updates.
 
+## Third-party runtime and optional model
+
+Bundled runtime components retain their own licenses and notices in
+`THIRD_PARTY_NOTICES.md`. The optional multilingual E5 model is downloaded
+separately; its pinned metadata and upstream MIT notice are in
+`MODEL_LICENSES.json`. Inspect these with `tl models licenses` or the
+VS Code licenses view. See [Local analysis engines](local-analysis.md).
+
 ## Future versions
 
 The maintainer may offer future versions under different pricing, support, or licensing terms. Those later terms apply only to the versions distributed under them; they do not retroactively change the terms governing a version you already received.

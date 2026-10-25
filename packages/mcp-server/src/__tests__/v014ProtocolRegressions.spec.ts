@@ -1,14 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { killServerGroup } from "./helpers/killServerGroup.js";
+import { TSX_NODE_ARGS } from "./helpers/tsxNode.js";
 
-const nodeRequire = createRequire(import.meta.url);
-const TSX_CLI = nodeRequire.resolve("tsx/cli");
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BIN_TS = path.resolve(HERE, "..", "bin.ts");
 const tmpDirs: string[] = [];
@@ -36,7 +34,7 @@ function write(root: string, rel: string, content: string): void {
 }
 
 function startServer(root: string, allowWrite = false): ServerHandle {
-  const args = [TSX_CLI, "--liftoff-only", BIN_TS, root];
+  const args = [...TSX_NODE_ARGS, BIN_TS, root];
   if (allowWrite) args.push("--allow-write");
   const child: ChildProcess = spawn(process.execPath, args, {
     cwd: root,
@@ -244,7 +242,7 @@ describe("v0.14 canonical task-pack calls", () => {
     expect(wire).not.toContain("OUTSIDE_SENTINEL");
   }, 180_000);
 
-  it("NEXT-01 replays a resolved task continuation verbatim with minted task, resolved cwd, and explicit lane", async () => {
+  it("NEXT-01 replays a resolved task continuation verbatim with minted task and explicit lane (no cwd under the configured root)", async () => {
     const root = workspace("next01");
     write(root, "src/order.ts", [
       "export function applyOrder(value: string): string {",
@@ -294,11 +292,13 @@ describe("v0.14 canonical task-pack calls", () => {
     const rawNext = decision["next"];
     expect(Array.isArray(rawNext)).toBe(false);
     const next = rawNext as { tool: string; arguments: Record<string, unknown> };
+    // 2026-10-24: a read next published under the configured root carries no cwd (an omitted cwd resolves to that
+    // root, protocol/readCallContinuation.ts omitConfiguredRootCwdOnNext), and still replays verbatim.
     expect(next.arguments).toMatchObject({
-      cwd: root,
       lane: "next-01-lane",
       task: { epoch: "new" },
     });
+    expect(next.arguments).not.toHaveProperty("cwd");
     const nextTask = (next.arguments["task"] ?? {}) as Record<string, unknown>;
     // RV-1: a producer-declared epoch:new starts a fresh task and must not be
     // rewritten into a same-task handle continuation by the finalizer.

@@ -1,11 +1,26 @@
 {
   "name": "@tokenlighten/mcp-server",
-  "version": "0.15.3",
+  "version": "0.16.0",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
+    "./engines": {
+      "types": "./dist/features/engines/config.d.ts",
+      "import": "./dist/features/engines/config.js",
+      "default": "./dist/features/engines/config.js"
+    },
+    "./semantic-search": {
+      "types": "./dist/features/semantic-search/index.d.ts",
+      "import": "./dist/features/semantic-search/index.js",
+      "default": "./dist/features/semantic-search/index.js"
+    },
+    "./typed-symbols": {
+      "types": "./dist/features/typed-symbols/index.d.ts",
+      "import": "./dist/features/typed-symbols/index.js",
+      "default": "./dist/features/typed-symbols/index.js"
+    },
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts",
@@ -40,6 +55,7 @@
     "officecrypto-tool": "^0.0.19",
     "pptx2json": "^0.0.10",
     "tree-sitter-wasms": "^0.1.12",
+    "typescript": "^5.9.3",
     "unpdf": "^1.6.2",
     "web-tree-sitter": "^0.23.0"
   },
@@ -47,13 +63,15 @@
     "@modelcontextprotocol/client": "^2.2.0",
     "@types/node": "^20",
     "ajv": "^8.20.0",
-    "typescript": "^5.6.3",
     "vitest": "^4.1.11"
   },
   "files": [
     "dist",
     "!dist/core2"
   ],
+  "optionalDependencies": {
+    "@huggingface/transformers": "4.3.1"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Takayuki-Ishimaru/tokenlighten.git"

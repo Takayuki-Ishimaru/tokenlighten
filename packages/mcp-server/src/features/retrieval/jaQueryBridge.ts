@@ -79,11 +79,12 @@ export const MAX_VOCAB_WORDS = 20_000;
 
 /**
  * Generic English function words and cross-language programming keywords
- * that must never be admitted as a bridge target, regardless of source
- * (path segment or file content) -- orchestrator Phase 2 requirement: a
- * content scan of real source files pulls in "return"/"const"/"class"/...
- * constantly, and none of them is ever what a Japanese query's glossary
- * stem or katakana match should resolve to.
+ * that must never be admitted as standalone vocabulary words, regardless
+ * of source (path segment or file content): a content scan pulls in
+ * "return"/"const"/"class"/... constantly. Keyword loanwords are consumed
+ * without expanding to unrelated prefix siblings. An explicit semantic
+ * glossary mapping may still recover a stem of a different identifier
+ * (for example, 返品→return matches `returns`).
  *
  * General knowledge, not fixture-derived, and deliberately cross-checked
  * against every stem in jaGlossary.ts so this list can never silently
@@ -290,7 +291,11 @@ function phoneticSegmentWords(kanaSegment: string, vocab: JaBridgeVocabulary, wh
 function glossarySegmentWords(kanaSegment: string, vocab: JaBridgeVocabulary): string[] | undefined {
   const stems = GLOSSARY_EXACT_MAP.get(kanaSegment);
   if (!stems) return undefined;
-  const admitted = [...new Set(stems.filter((s) => vocab.hasStemPrefix(s)).map((s) => s.toLowerCase()))];
+  // Known language keywords are deliberately absent from the vocabulary.
+  // Consume their exact loanword segments without falling back to an unrelated
+  // phonetic neighbour (including when they occur inside a compound).
+  if (stems.every((stem) => COMMON_WORD_STOPLIST.has(stem))) return [];
+  const admitted = [...new Set(stems.filter((s) => !COMMON_WORD_STOPLIST.has(s) && vocab.hasStemPrefix(s)).map((s) => s.toLowerCase()))];
   return admitted.length > 0 ? admitted : undefined;
 }
 
@@ -490,11 +495,30 @@ function matchCompoundRun(run: string, vocab: JaBridgeVocabulary): string[] {
   const n = run.length;
   if (n < 2) return [];
 
-  const allGlossary = matchAllGlossaryCover(run, vocab);
-  if (allGlossary) return collectCoverWords(run, allGlossary);
+  const cover = matchAllGlossaryCover(run, vocab) ?? matchMixedCover(run, vocab);
+  if (!cover) return [];
 
-  const mixed = matchMixedCover(run, vocab);
-  return mixed ? collectCoverWords(run, mixed) : [];
+  const ignoredStems = new Set<string>();
+  let hasLexicalSegment = false;
+  for (let i = 1; i < cover.bounds.length; i++) {
+    const start = cover.bounds[i - 1]!, end = cover.bounds[i]!;
+    const words = cover.segWords[end];
+    if (words?.length === 0) {
+      for (const stem of GLOSSARY_EXACT_MAP.get(run.slice(start, end)) ?? []) {
+        if (COMMON_WORD_STOPLIST.has(stem)) ignoredStems.add(stem);
+      }
+    } else if (words && words.length > 0) hasLexicalSegment = true;
+  }
+  // Ignoring a keyword must not erase an observed compound identifier.
+  // Restore only whole phonetic candidates that spell every ignored keyword:
+  // classroom is retained; queriesroom cannot stand in for クラスルーム.
+  if (hasLexicalSegment && ignoredStems.size > 0) {
+    const requiredStems = [...ignoredStems];
+    const whole = (phoneticSegmentWords(run, vocab, true) ?? [])
+      .filter(word => requiredStems.every(stem => word.includes(stem)));
+    if (whole.length > 0) return rankCandidates(whole, katakanaToRomaji(run) ?? "");
+  }
+  return collectCoverWords(run, cover);
 }
 
 function matchKatakanaRun(run: string, vocab: JaBridgeVocabulary): string[] {
@@ -537,6 +561,9 @@ export function unresolvedKatakanaRuns(text: string, vocab: JaBridgeVocabulary):
     let words: string[];
     try {
       words = matchKatakanaRun(run, vocab);
+      // A complete glossary cover with no output is a known, ignored keyword,
+      // not an unknown loanword for the fallback to search again.
+      if (words.length === 0 && matchAllGlossaryCover(run, vocab)) continue;
     } catch {
       words = [];
     }
@@ -585,6 +612,9 @@ export function bridgeJaQuery(query: string, vocab: JaBridgeVocabulary): JaBridg
   if (totalTokens < MAX_TOTAL_TOKENS) {
     for (const { term, stems } of glossaryLongestMatchScan(query)) {
       if (totalTokens >= MAX_TOTAL_TOKENS) break;
+      // Known keyword loanwords are already consumed by the katakana pass.
+      // Keep explicit semantic mappings such as 返品→return for `returns`.
+      if (extractKatakanaRuns(term).includes(term) && stems.every((s) => COMMON_WORD_STOPLIST.has(s))) continue;
       const admitted = stems.filter((s) => vocab.hasStemPrefix(s) && !emitted.has(s.toLowerCase()));
       if (admitted.length === 0) continue;
       const tokens = admitted.slice(0, MAX_TOTAL_TOKENS - totalTokens).map((s) => s.toLowerCase());

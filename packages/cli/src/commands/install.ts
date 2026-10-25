@@ -115,7 +115,7 @@ Options:
   --clients <list>|auto|none   Which vendor-CLI hosts to register (default: auto)
   --read-only               Generated entries omit --allow-write
   --tool-surface code|full  Advertised tool surface for generated entries
-  --guide-profile full|medium|compact
+  --guide-profile full|medium|compact|portable
   --copilot-inline-results raise|keep
                              Raise (default) GitHub Copilot's inline tool-result
                              limit in each workspace's .vscode/settings.json, or

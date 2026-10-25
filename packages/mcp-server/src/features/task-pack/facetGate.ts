@@ -72,6 +72,8 @@ export interface FacetPlanWindow {
   readonly end: number;
   /** Constant / callee / caller-enclosing symbol name (for reasons and TL_TRACE only). */
   readonly name: string;
+  /** An import/re-export statement to serve separately from callable focus windows. */
+  readonly binding?: boolean;
   /** FIX-FAB item 6 (eval-0927 review #10, bigConstants): true for a `constant` window whose recorded `[start,end]` is a CAP, not the declaration's real close (evidenceClosure.ts's `ConstantWindow.truncated`, propagated through `NamedWindow`). The gate never treats this window as fully covering the value merely because `[start,end]` itself is served — see `evaluateFacetRequirement`'s continuation handling below. Absent/false for every other window. */
   readonly truncated?: boolean;
 }
@@ -179,6 +181,8 @@ export interface FacetPlanEntry {
   readonly flowMembersComplete?: boolean;
   /** flow / value / condition, callable focal (Copilot retest 2026-10-02): false when the focal's direct callee list was cut at MAX_SCANNED_CALLEE_NAMES / MAX_REQUIRED_CALLEE_WINDOWS (readCodeTaskPack.ts `calleeDefinitionsForFocal`) -- the facet is then undetermined, never covered by the callees that did fit. Absent = taken whole. */
   readonly calleesComplete?: boolean;
+  /** Named workspace imports called by the focal whose implementation was not resolved. */
+  readonly unresolvedCallees?: readonly string[];
   /** flow, non-callable focal only (FIX-FAB2): clause subject terms (length >= 3, excluding the focal's own name and — 2026-10-10 — the clause's non-point words, requestFacets.ts `nonPointTermsIn`) that matched NO member of the focal at all — a non-empty list means the clause names something no served member accounts for, so the facet is never "covered" (P1/P3). */
   readonly ungroundedFlowTerms?: readonly string[];
   /**
@@ -1105,6 +1109,10 @@ export function evaluateFacetRequirement(
   // costs those round trips for nothing (see `calleesComplete`).
   if (requirement.facet !== "callers" && entry.calleesComplete === false) {
     return undetermined(`${focal.name} calls more in-workspace functions than this pack can require in one pass`, true, servedWindows);
+  }
+
+  if (requirement.facet !== "callers" && (entry.unresolvedCallees?.length ?? 0) > 0) {
+    return undetermined(`${requirement.facet} depends on unresolved callee(s): ${entry.unresolvedCallees!.join(", ")}`, true, servedWindows);
   }
 
   if (open.length > 0) {

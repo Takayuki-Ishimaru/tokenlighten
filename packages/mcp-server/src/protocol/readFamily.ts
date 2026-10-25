@@ -1451,6 +1451,17 @@ const DOWNGRADE_FIELDS = [
   "total_lines", "skeleton", "remaining_ranges", "next", "alternatives",
 ] as const;
 
+/** `entry` with `range` inserted right after its `path` key (wire reading order). */
+function withRangeAfterPath(entry: Body, range: string): Body {
+  const ordered: Body = {};
+  for (const [key, value] of Object.entries(entry)) {
+    ordered[key] = value;
+    if (key === "path") ordered["range"] = range;
+  }
+  if (!("range" in ordered)) ordered["range"] = range;
+  return ordered;
+}
+
 function batchEntry(raw: Body): Body | undefined {
   const path = str(raw["path"]);
   const handle = str(raw["handle"]);
@@ -1463,6 +1474,11 @@ function batchEntry(raw: Body): Body | undefined {
     const entry: Body = { form: "file-downgraded" };
     keep(entry, raw, DOWNGRADE_FIELDS);
     if (entry["path"] === undefined && path !== undefined) entry["path"] = path;
+    // §20.17: an `already-served` entry names the window it answers, right
+    // after `path`. Only that class: the symbol-over-cap downgrade's raw
+    // `range` is the whole symbol while its `content` is a trimmed head, so
+    // naming it there would read as "this content covers that range".
+    if (entry["reason"] === "already-served" && range !== undefined) return withRangeAfterPath(entry, range);
     return entry;
   }
 
@@ -2470,6 +2486,37 @@ function projectTaskPack(body: Body): Body {
     keptOnTaskPack = keptOnTaskPack.filter((member) => member !== "profile_binding");
   }
   keep(projected, body, keptOnTaskPack);
+  // Keep one authoritative copy of an exactly duplicated, ready verification hint.
+  // Never deduplicate source, executable calls, or incomplete verification recipes.
+  const verification = isRecord(plan["verification"]) ? plan["verification"] : undefined;
+  const commands = projected["verify"], ready = projected["decision"];
+  if (body["limit"] === undefined && projected["limit"] === undefined && isRecord(ready)
+    && (ready["kind"] === "act.answer" || ready["kind"] === "act.edit")
+    && verification?.["available"] === true && typeof verification["command"] === "string"
+    && verification["command"].length > 0
+    && Object.keys(verification).every(key => key === "available" || key === "command")
+    && Array.isArray(commands) && commands.length === 1 && commands[0] === verification["command"]) {
+    delete projected["verify"];
+  }
+  // A completed small single-source answer needs no discovery rationale.
+  // Keep the profile choice and certificate intact; only shorten advisory
+  // prose after the full pipeline has proved the answer.
+  const answer = projected["decision"];
+  const rows = projected["evidence"];
+  const certificate = isRecord(answer) && isRecord(answer["certificate"]) ? answer["certificate"] : undefined;
+  if (projected["profile"] === "answer" && isRecord(answer) && answer["kind"] === "act.answer"
+    && (task?.["coverage"] === "focused" || task?.["coverage"] === "complete") && projected["plan"] === undefined
+    && projected["limit"] === undefined && certificate?.["gaps"] === undefined
+    && Array.isArray(certificate?.["obligations"]) && certificate["obligations"].length === 1
+    && certificate["obligations"][0] === "surface-content"
+    && Array.isArray(rows) && rows.length === 1 && isRecord(rows[0])
+    && typeof rows[0]["body"] === "string"
+    // At most three UTF-8 bytes per UTF-16 code unit: this conservative
+    // small-body bound leaves response measurement to the protocol funnel.
+    && rows[0]["body"].length <= 170 && rows[0]["remaining"] === undefined) {
+    const { why: _why, ...evidence } = rows[0];
+    projected["evidence"] = [evidence];
+  }
   // EFF (TL_EFF_EDIT_NOTE, default OFF): at the act.edit decision point, say
   // why tl_edit_file is the cheaper write path. Rides the existing `advisory`
   // member (appended to any advisory already there); no new kind or field.

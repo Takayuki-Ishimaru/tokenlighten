@@ -33,10 +33,13 @@ import {
   defaultSearchPageBudgetBytes,
   effectiveSearchPageBudgetBytes,
   mintSearchCursor,
+  openSymbolSearchRequest,
+  persistSymbolSearchRequest,
   rewindSearchRequestDelivered,
   searchRequestCappedExhausted,
   searchRequestComplete,
   settleSearchRequest,
+  settleSymbolSearchRequest,
   type StagedSearchRequest,
 } from "../state/searchRequestStore.js";
 
@@ -127,11 +130,18 @@ function withPaginationAdvice(payload: ShedPayload, staged: StagedSearchRequest)
   if (estimatedRemainingBytes <= budget.bytes * 2) return payload;
   const recommended = Math.min(defaultSearchPageBudgetBytes(), Math.ceil(estimatedRemainingBytes / 1000) * 1000);
   if (recommended <= budget.bytes) return payload;
-  const advised = { ...payload, matches: { ...matches,
+  const advice = { ...payload, matches: { ...matches, pagination_advice: {
+    remaining_lines: remaining,
+    estimated_remaining_bytes: estimatedRemainingBytes,
+    recommended_budget: { bytes: recommended },
+  } } };
+  const cap = effectiveSearchPageBudgetBytes(staged.state, budget.bytes);
+  // Give clients numbers before optional prose, without displacing matches.
+  if (measureResponseBytes(JSON.stringify(advice)) > cap) return payload;
+  const advised = { ...advice, matches: { ...advice.matches,
     hint: `For all ${remaining} remaining lines, try budget.bytes:${recommended} (estimate). Current budget is unchanged.` } };
   // Optional advice must fit without shrinking this page's real evidence.
-  return measureResponseBytes(JSON.stringify(advised)) <= effectiveSearchPageBudgetBytes(staged.state, budget.bytes)
-    ? advised : payload;
+  return measureResponseBytes(JSON.stringify(advised)) <= cap ? advised : advice;
 }
 
 /**
@@ -270,7 +280,9 @@ export function applySearchRequestContinuation(
 ): ShedPayload {
   if (staged === undefined) return payload;
   const matches = payload["matches"];
-  if (!isRecord(matches) || matches["form"] !== "find") return payload;
+  if (!isRecord(matches)) return payload;
+  if (matches["form"] === "symbols") return applySymbolSearchContinuation(payload, matches, staged);
+  if (matches["form"] !== "find") return payload;
   // Rule T (A.5.3-A.5.10 preamble): `truncated` never rides the wire body —
   // its INTERNAL meaning is folded into `limit`'s mere PRESENCE ("absence of
   // `limit` IS completeness"). A staged request whose producer body was NOT
@@ -304,6 +316,115 @@ export function applySearchRequestContinuation(
   const cursor = mintSearchCursor(staged);
   if (cursor === undefined) return payload;
   return withPaginationAdvice({ ...payload, limit: { cause: "wire", next: cursorCall(staged, cursor) } }, staged);
+}
+
+/**
+ * How many symbol records this FINALIZED page actually carries. A symbols
+ * page is projected onto the find `files[]` group shape (one `lines[]` entry
+ * per record), so a record counts as shipped iff its line survived AND — when
+ * the ladder ran its snippet-shed rung at all — its snippet is a string,
+ * exactly like `shippedLineKeysOf` requires for find.
+ */
+function shippedSymbolRecordCount(matches: Record<string, unknown>): number {
+  const locations = matches["locations"];
+  if (Array.isArray(locations)) {
+    let kept = 0;
+    for (const raw of locations) {
+      if (raw !== null && typeof raw === "object" && !Array.isArray(raw)) {
+        const loc = raw as Record<string, unknown>;
+        if (typeof loc["path"] === "string" && typeof loc["line"] === "number") kept += 1;
+      }
+    }
+    return kept;
+  }
+  const files = matches["files"];
+  if (!Array.isArray(files)) return 0;
+  let shipped = 0;
+  for (const raw of files) {
+    if (!isRecord(raw)) continue;
+    const lines = raw["lines"];
+    if (!Array.isArray(lines)) continue;
+    const snippets = raw["snippets"];
+    lines.forEach((line, index) => {
+      if (typeof line !== "number") return;
+      if (Array.isArray(snippets) && typeof snippets[index] !== "string") return;
+      shipped += 1;
+    });
+  }
+  return shipped;
+}
+
+/** The canonical continuation for a symbols chain: the SAME request + cursor. */
+function symbolCursorCall(staged: StagedSearchRequest, cursor: string): ToolCall {
+  const original = staged.state.original_input;
+  const scope: Record<string, unknown> = { kind: "symbol" };
+  for (const key of ["path", "lang", "includeScores"] as const) {
+    if (original[key] !== undefined) scope[key] = original[key];
+  }
+  const args: Record<string, unknown> = { action: "find", scope };
+  if (typeof original["query"] === "string" && original["query"] !== "") args["queries"] = [original["query"]];
+  args["cursor"] = cursor;
+  if (staged.state.budget !== undefined) args["budget"] = staged.state.budget;
+  const echo = staged.echo;
+  if (echo.cwd !== undefined && echo.cwd !== "") args["cwd"] = echo.cwd;
+  if (echo.lane !== undefined && echo.lane !== "") args["lane"] = echo.lane;
+  if (echo.taskHandle !== undefined && echo.taskHandle !== "") args["task"] = { handle: echo.taskHandle };
+  return canonicalToolCall("tl_search_files", args) as ToolCall;
+}
+
+/** Mint the currently staged symbols page cursor for the budget shedder. */
+export function currentSymbolCursorCall(staged: StagedSearchRequest | undefined): ToolCall | undefined {
+  if (staged === undefined || staged.state.action !== "symbols") return undefined;
+  const cursor = mintSearchCursor(staged);
+  return cursor === undefined ? undefined : symbolCursorCall(staged, cursor);
+}
+
+/**
+ * Settle a staged symbols request from the FINALIZED page and install its ONE
+ * canonical continuation, or clear the continuation once nothing is owed.
+ *
+ * A symbols chain mints a FRESH record per page (the `references` precedent),
+ * so a resent cursor re-reads an unchanged record and re-serves the same page
+ * instead of advancing twice.
+ */
+function applySymbolSearchContinuation(
+  payload: ShedPayload,
+  matches: Record<string, unknown>,
+  staged: StagedSearchRequest,
+): ShedPayload {
+  if (payload["limit"] === undefined) return payload;
+  const start = staged.symbolPageStart ?? staged.state.delivered;
+  const shippedCount = shippedSymbolRecordCount(matches);
+  if (shippedCount === 0) {
+    // Never mint a fresh nonce at the same position: that turns a rejected or
+    // empty finalized page into an executable no-progress loop. Keep the
+    // honest capped disclosure and leave the presented cursor record intact
+    // so the caller can retry the same request with an adequate budget.
+    return { ...payload, limit: { cause: "capped" } };
+  }
+  const settled = settleSymbolSearchRequest(staged, start, shippedCount);
+  if (settled === undefined) return { ...payload, limit: { cause: "capped" } };
+  const total = settled.total_matches ?? start;
+  if (settled.delivered >= total) {
+    const next: ShedPayload = { ...payload };
+    delete next["limit"];
+    return next;
+  }
+  const successor = openSymbolSearchRequest({
+    workspaceRoot: staged.workspaceRoot,
+    ...(settled.lane !== undefined ? { lane: settled.lane } : {}),
+    ...(settled.task_handle !== undefined ? { taskHandle: settled.task_handle } : {}),
+    originalInput: settled.original_input,
+    ...(settled.budget !== undefined ? { budget: settled.budget } : {}),
+    echo: staged.echo,
+    delivered: settled.delivered,
+    totalMatches: total,
+    sourceFingerprint: settled.source_fingerprint ?? settled.scope_fingerprint,
+  });
+  if (persistSymbolSearchRequest(successor) === undefined) return { ...payload, limit: { cause: "capped" } };
+  const cursor = mintSearchCursor(successor);
+  if (cursor === undefined) return { ...payload, limit: { cause: "capped" } };
+  return { ...payload, limit: { cause: "records", next: symbolCursorCall(successor, cursor) } };
 }
 
 /**

@@ -100,6 +100,8 @@ import type { SemanticFrontierWithholdingMarks } from "./semanticFrontierTraceCo
 // meant to call it, unchanged.
 import { semanticFrontierDemotionCounters } from "./decisionWire.js";
 import { batchHintsEnabled, leanCallsEnabled, sfDemoteEnabled } from "../util/flags.js";
+// TL_EFF_EVIDENCE_PATH_GROUPS: a leaf module (imports util/flags.ts only).
+import { expandEvidencePathGroups } from "./evidencePathGroups.js";
 // WP-V1 (2026-09-20): the same pure, cycle-free client-profile lookup
 // clientAdvertisement.ts uses (see that module's own header on why it is
 // safe to import here: no dependency on server.ts either way).
@@ -130,7 +132,7 @@ import { handleTable } from "../util/handles.js";
 // `protocol/envelope.ts -> state/session.ts` only — the same direction this
 // file already reaches session.ts through transitively (via `./emit.js` and
 // `./readFamily.js`, both imported above), never the reverse edge that broke.
-import { mintRangedContinuationWindow } from "../state/session.js";
+import { mintRangedContinuationWindow, takeEpochRepeatAdvisory } from "../state/session.js";
 
 /** §1.1, D1. One integer, one value, one server process. */
 export const PROTOCOL_VERSION = 1 as const;
@@ -165,6 +167,16 @@ export interface ProtocolCallContext {
    * different search — the class TC-2 exists to catch and §2.1.2 to forbid.
    */
   readonly args?: Readonly<Record<string, unknown>>;
+  /**
+   * The task this call belongs to was first requested with `surfaceRoles`
+   * (wire-compaction review F1, 2026-10-23), published by the task-pack
+   * dispatch. A continuation page (a cursor, a qref re-pack) carries no scope
+   * of its own, so `args` alone cannot say so; the page still reads a missing
+   * `role` as "the selector did not bind" (types `Evidence.role`), and
+   * `wireCompaction.ts` leaves `role:"unknown"` on it for that reason. Never
+   * serialized onto the wire itself.
+   */
+  surfaceRolesPassed?: boolean;
   /** The tl_read_file mode the dispatcher actually resolved (post-`auto` promotion). */
   mode?: string;
   /** The tl_search_files action the dispatcher actually resolved. */
@@ -305,6 +317,15 @@ export interface ProtocolCallContext {
   /** Opaque task identity minted while projecting this response. */
   continuationTaskHandle?: string;
   /**
+   * 2026-10-19 (v016 decision 6t-3, T09 rep0 #11): a task handle THIS call
+   * presented that this server refused as dead (`server.ts`'s
+   * `taskHandleRefusal`, `tl_edit_file` arm). Its refusal's `next` is the same
+   * call without the handle; `attributedContinuationArguments` must not put the
+   * caller's dead handle back on it, or running the `next` verbatim would draw
+   * the same refusal again. Non-wire.
+   */
+  refusedTaskHandle?: string;
+  /**
    * P3a S1: body bytes this call's response measured at the ONE emission point
    * (`budget/measure.ts`, via `emit.ts`). Written by `noteEmission`, once, on
    * every funnel exit that carries a text body — including the three opaque
@@ -369,6 +390,31 @@ export interface ProtocolCallContext {
    * serialized onto the wire itself.
    */
   serialSingleTargetHint?: boolean;
+  /**
+   * 2026-10-20 (decision run 6t-8): the workspace root of a tl_read_file or
+   * tl_search_files call that declared `task.epoch:"new"`, set by both
+   * `guardExecutionDiscovery` call sites in server.ts. The guard may have left
+   * the epoch-repeat advisory this call earned pending in that root's session
+   * (state/session.ts); `applyEpochRepeatAdvisory` takes it at the funnel
+   * tail. Never serialized onto the wire itself.
+   */
+  epochNewRoot?: string;
+  /** A refusal's authenticated routing correction must not grant source windows. */
+  refusalRecovery?: true;
+  /** Internal wire-size projection must never grant an un-emitted source window. */
+  sizePreview?: true;
+  /**
+   * The workspace root a `tl_read_file` call that omits `cwd` resolves to
+   * (server.ts `resolveWorkspaceRoot(undefined, activeRoot)`), published for
+   * the wire-size projection (`taskPackSizePreview`): the transport copy drops
+   * the `cwd` of every `tl_read_file` next the reply publishes under this root
+   * (`omitConfiguredRootCwdOnNext`), so the projection counts it only when the
+   * call's workspace is another. Absent when the root could not be resolved —
+   * every `cwd` is then counted. Never serialized onto the wire itself.
+   */
+  configuredRoot?: string;
+  /** Internal optimization, committed only against the final serialized response. */
+  finalizePackFingerprintBinding?: (text: string, owner: object) => void;
 }
 
 const _protocolCall = new AsyncLocalStorage<ProtocolCallContext>();
@@ -419,6 +465,22 @@ export function notePostReadyDiscovery(fields: {
 export function noteSerialSingleTargetHint(fires: boolean): void {
   const context = _protocolCall.getStore();
   if (context !== undefined) context.serialSingleTargetHint = fires;
+}
+
+/**
+ * Publish that the task this task-pack call belongs to was first requested with `surfaceRoles`
+ * — see `ProtocolCallContext.surfaceRolesPassed`. Only ever publishes `true`: a call that passed
+ * none is read from its own arguments.
+ */
+export function noteSurfaceRolesPassed(): void {
+  const context = _protocolCall.getStore();
+  if (context !== undefined) context.surfaceRolesPassed = true;
+}
+
+/** Publish the root of a read/search call that declared `task.epoch:"new"` — see `ProtocolCallContext.epochNewRoot`. */
+export function noteEpochNewRoot(root: string): void {
+  const context = _protocolCall.getStore();
+  if (context !== undefined && root !== "") context.epochNewRoot = root;
 }
 
 /** Name this response's `Kind` outright. Wins over every derivation below. */
@@ -514,6 +576,12 @@ export function noteContinuationTaskHandle(handle: string): void {
   if (context !== undefined && handle !== "") context.continuationTaskHandle = handle;
 }
 
+/** Publish a task handle this call presented and was refused for — see `ProtocolCallContext.refusedTaskHandle`. */
+export function noteRefusedTaskHandle(handle: string): void {
+  const context = _protocolCall.getStore();
+  if (context !== undefined && handle !== "") context.refusedTaskHandle = handle;
+}
+
 function semanticTraceRecordOf(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -558,8 +626,12 @@ function observeSemanticFrontierWire(
   marks: SemanticFrontierWithholdingMarks,
 ): SemanticFrontierWireObservation {
   try {
-    const body = semanticTraceRecordOf(JSON.parse(text));
-    if (body === undefined) return { wire_observed: false, wire_kind: null, decision_kind: null };
+    const parsed = semanticTraceRecordOf(JSON.parse(text));
+    if (parsed === undefined) return { wire_observed: false, wire_kind: null, decision_kind: null };
+    // TL_EFF_EVIDENCE_PATH_GROUPS: the witness ids below hash each row's path,
+    // handle and range, which the producer registered over whole rows; a
+    // grouped reply is read back into whole rows first.
+    const body = expandEvidencePathGroups(parsed);
     const evidence = Array.isArray(body["evidence"]) ? body["evidence"] : [];
     let evidenceBodyBytes = 0;
     let evidencePriorBytes = 0;
@@ -708,7 +780,7 @@ const SEARCH_MATCH_ACTIONS: ReadonlySet<string> = new Set([
 // `finalizeProtocolResponse` below, so an import back would be circular).
 // ---------------------------------------------------------------------------
 export const SERIAL_SINGLE_TARGET_HINT_TEXT =
-  "3rd+ consecutive single-target tl_read_file or tl_search_files find call this session — fold the remaining ranges into ONE targets:[...] call (tl_read_file) or queries:[...] call (tl_search_files, <=5, OR-matched) instead of serial single-target calls";
+  "3rd+ consecutive single-target tl_read_file or tl_search_files find call this session — fold the remaining ranges into ONE targets:[...] call (tl_read_file) or queries:[...] call (tl_search_files, <=10, OR-matched) instead of serial single-target calls";
 
 /**
  * Shared substring both this hint and server.ts's `READ_BATCH_HINT_TEXT`
@@ -751,6 +823,39 @@ function applySerialSingleTargetHint(
       ? `${existing}; ${SERIAL_SINGLE_TARGET_HINT_TEXT}`
       : SERIAL_SINGLE_TARGET_HINT_TEXT,
   };
+}
+
+/**
+ * 2026-10-20 (decision run 6t-8): the `Kind`s whose projector keeps a `hint`
+ * the epoch-repeat advisory can ride: `KEPT_ON_TEXT`, a find's `matches.hint`
+ * (`FIND_FIELDS`) and `REFERENCES_FIELDS`. A `symbols` or `diff`
+ * search.matches drops it in projection, as it drops any prose its form does
+ * not keep.
+ */
+const EPOCH_REPEAT_HINT_KINDS: ReadonlySet<Kind> = new Set([
+  "read.text", "search.matches", "search.references",
+]);
+
+/**
+ * The epoch-repeat advisory (state/session.ts, `pendingEpochRepeatAdvisory`)
+ * rides the reply of the call that earned it. A task pack has taken it
+ * already, into `advisory` with the superseded-handles advisory
+ * (server.ts's `recordTaskPackExecution`), so a pack is left alone. The kinds
+ * above carry it in their `hint`. Any other reply (a receipt, a refusal, a
+ * batch, a map, a tree) has no `hint` its projector always keeps, so the
+ * advisory ends with the call rather than riding a later reply it does not
+ * describe.
+ */
+function applyEpochRepeatAdvisory(
+  context: ProtocolCallContext,
+  kind: Kind,
+  body: Record<string, unknown>,
+): Record<string, unknown> {
+  if (context.epochNewRoot === undefined || kind === "read.task_pack") return body;
+  const advisory = takeEpochRepeatAdvisory(context.epochNewRoot);
+  if (advisory === undefined || !EPOCH_REPEAT_HINT_KINDS.has(kind)) return body;
+  const existing = typeof body["hint"] === "string" && body["hint"] !== "" ? body["hint"] : undefined;
+  return { ...body, hint: existing !== undefined ? `${existing}; ${advisory}` : advisory };
 }
 
 /**
@@ -1080,6 +1185,7 @@ export function finalizeProtocolResponse(
   if (batchHintsEnabled()) {
     body = applySerialSingleTargetHint(context, kind, body);
   }
+  body = applyEpochRepeatAdvisory(context, kind, body);
   // §4.2.1(1) SE-STABLE, STRUCTURAL. The three side-effect kinds are
   // refusal-conversion-FORBIDDEN. The enforcement lives in `kindForCall`'s
   // WRITE_TOOLS branch: a recognized side-effect kind returns before the
@@ -1397,7 +1503,8 @@ function recordMintedRangedContinuationWindows(tool: string, args: Record<string
   if (tool !== "tl_read_file") return;
   const context = protocolCallContext();
   const workspace = context?.workspace ?? context?.codecTraceWorkspace;
-  if (typeof workspace !== "string" || workspace === "") return;
+  if (context?.refusalRecovery === true || context?.sizePreview === true
+    || typeof workspace !== "string" || workspace === "") return;
 
   const recordOne = (path: string | undefined, handle: string | undefined, range: string): void => {
     if (range === "") return;
@@ -1475,11 +1582,9 @@ function leanContinuationForVsCode(tool: string, args: Record<string, unknown>):
   if (resolveClientProfile(context?.clientId).id !== "vscode") return args;
 
   const out = { ...args };
-  const workspace = context?.workspace ?? context?.codecTraceWorkspace;
-  if (out["cwd"] !== undefined && typeof workspace === "string" && out["cwd"] === workspace) {
-    delete out["cwd"];
-  }
-
+  // Keep workspace identity here, including an explicit subtree `cwd`. The
+  // final response projector has the pinned root and removes only that exact
+  // redundant value after the call's workspace is known.
   const task = recordOf(out["task"]);
   if (task?.["handle"] !== undefined && !continuationNeedsTaskHandle(tool, out, task)) {
     const restTask = { ...task };
@@ -1527,11 +1632,10 @@ function attributedContinuationArguments(tool: string, args: Record<string, unkn
 
   const attributed = { ...args };
   inheritCallerResponseBudget(tool, attributed, inbound, context);
-  const resolvedCwd = context.continuationWorkspace ?? context.workspace;
-  if (attributed["cwd"] === undefined) {
-    if (typeof resolvedCwd === "string" && resolvedCwd !== "") attributed["cwd"] = resolvedCwd;
-    else if (typeof inbound?.["cwd"] === "string") attributed["cwd"] = inbound["cwd"];
-  }
+  const resolvedCwd = context.continuationWorkspace ?? context.workspace
+    ?? (typeof inbound?.["cwd"] === "string" ? inbound["cwd"] : undefined);
+  if (attributed["cwd"] === undefined && typeof resolvedCwd === "string" && resolvedCwd !== "")
+    attributed["cwd"] = resolvedCwd;
   // Empty lane is the canonical default and must stay absent on the wire;
   // echoing lane:"" reintroduces the absent-vs-empty duality in continuations.
   if (
@@ -1548,7 +1652,9 @@ function attributedContinuationArguments(tool: string, args: Record<string, unkn
     : typeof inbound?.["task_handle"] === "string"
       ? inbound["task_handle"]
       : context.continuationTaskHandle;
-  if (inboundHandle !== undefined) {
+  // A handle this call was refused for is never inherited: the refusal's own
+  // `next` leaves it out on purpose (see `ProtocolCallContext.refusedTaskHandle`).
+  if (inboundHandle !== undefined && inboundHandle !== context.refusedTaskHandle) {
     const task = recordOf(attributed["task"]);
     const explicitLegacyHandle = typeof attributed["task_handle"] === "string";
     // `taskEpoch` is the legacy spelling of the same producer declaration.

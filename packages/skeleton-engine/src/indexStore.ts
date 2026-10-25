@@ -14,7 +14,7 @@ import { createRequire } from "node:module";
 
 import type { ChunkKind, IndexedChunkV1, SymbolKind } from "./chunker.js";
 import { extractChunks } from "./chunker.js";
-import { enumerateFiles, extractSymbolsRegex, languageForPath, languageForPathWithContent } from "./graph.js";
+import { enumerateFiles, extractSymbolsRegex, languageForPath, languageForPathWithContent, type ExtractedSymbol } from "./graph.js";
 import { createIgnoreMatcher } from "./ignore.js";
 import { hashContent, buildDirectoryDigests } from "./merkle.js";
 import { writeGraphIfStale } from "./graphBuilder.js";
@@ -33,8 +33,8 @@ const PKG_VERSION: string = (_require("../package.json") as { version: string })
 
 // Bump this whenever a change to the regex-based extraction pipeline
 // (extractSymbolsRegex's LANG_PATTERNS / comment-and-string filtering in
-// graph.ts, or symbolKindFromSignature's kind derivation below) should
-// invalidate every cached per-file symbol entry, independent of whether
+// graph.ts, symbolKindFromSignature's kind derivation below, or chunker.ts)
+// should invalidate every cached per-file entry, independent of whether
 // PKG_VERSION itself has moved. Without this, a workspace whose files
 // haven't changed keeps serving symbols extracted by the OLD logic
 // indefinitely (see "Discard cache if engineVersion changed" below) — a
@@ -48,7 +48,12 @@ const PKG_VERSION: string = (_require("../package.json") as { version: string })
 // preceding blank line (see extractSymbolsRegex's inline comment in
 // graph.ts) — every cached symbol entry produced by the old logic must
 // be invalidated.
-const SYMBOL_EXTRACTION_REVISION = "2";
+// Bumped 2 -> 3 (2026-10-12): chunk extraction now uses exact UTF-8 offsets,
+// CR/LF widths and EOF bounds. Previously cached chunks must be rebuilt even
+// when the source bytes and file stats are unchanged.
+// Bumped 3 -> 4: chunk ownership distinguishes same-name declarations, and
+// symbol positions now count lone CR separators consistently with chunks.
+const SYMBOL_EXTRACTION_REVISION = "4";
 
 // The actual cache-key value: PKG_VERSION plus the extraction-pipeline
 // revision above, composed once so the discard-check and the
@@ -640,7 +645,7 @@ function symbolKindFromSignature(signature: string, name: string): SymbolKind {
 export function validateCachedSymbols(file: IndexedFileV1, content: string): boolean {
   if (file.symbols.length === 0) return true;
 
-  const lines = content.split(/\r?\n/);
+  const lines = content.split(/\r\n|\r|\n/);
 
   for (const sym of file.symbols) {
     const lo = Math.max(0, sym.lineStart - 2);
@@ -964,7 +969,7 @@ export async function loadOrBuildSourceIndex(
         continue;
       } else {
         // Symbol-line mismatch despite matching mtime/size/content — cache is corrupted.
-        const rawLines = raw.split(/\r?\n/);
+        const rawLines = raw.split(/\r\n|\r|\n/);
         const failingSym = cached.symbols.find((sym) => {
           const lo = Math.max(0, sym.lineStart - 2);
           const hi = Math.min(rawLines.length, sym.lineEnd + 2);
@@ -1014,7 +1019,7 @@ export async function loadOrBuildSourceIndex(
       } else {
         // Symbol-line mismatch — find the first failing symbol name for the reason.
         // A symbol "fails" when its name is NOT found in its claimed line range.
-        const rawLines = raw.split(/\r?\n/);
+        const rawLines = raw.split(/\r\n|\r|\n/);
         const failingSym = cached.symbols.find((sym) => {
           const lo = Math.max(0, sym.lineStart - 2);
           const hi = Math.min(rawLines.length, sym.lineEnd + 2);
@@ -1062,7 +1067,7 @@ export async function loadOrBuildSourceIndex(
     // assembly below is now wrapped in one try/catch. Pre-V11-09 only
     // extractSymbolsRegex had its own internal guard (defaulting to an
     // empty symbol list on a throw) — extractChunks and the
-    // symbolKindFromSignature/chunkIdsBySymbolName assembly that follows it
+    // symbolKindFromSignature/chunk ownership assembly that follows it
     // had NONE, so a single file whose content made either of them throw
     // aborted the ENTIRE workspace build, not just that file. See
     // IndexedFileParseStatus's doc comment for the isolated-partial
@@ -1076,29 +1081,23 @@ export async function loadOrBuildSourceIndex(
         throw new Error(`__testHooks.forceExtractionCrash(${f.path})`);
       }
 
+      // Capture ownership at emission: names/range containment cannot separate
+      // nested declarations that share a name. This remains linear in chunks.
+      const chunkIdsBySymbol = new Map<ExtractedSymbol, string[]>();
       chunks = extractChunks({
         path: f.path,
         raw,
         language,
         symbols: extractedSymbols,
+        onSymbolChunks: (symbol, ownedChunks) => {
+          chunkIdsBySymbol.set(symbol, ownedChunks.map(chunk => chunk.id));
+        },
       });
 
       // Build IndexedSymbolV1[]
-      // One pass over chunks keyed by base symbol name (the slice suffix is
-      // `#<i>`), instead of a per-symbol chunks.filter scan — that pairing was
-      // O(symbols × chunks) per file.
-      const chunkIdsBySymbolName = new Map<string, string[]>();
-      for (const c of chunks) {
-        if (c.symbolName === undefined) continue;
-        const hashIdx = c.symbolName.indexOf("#");
-        const base = hashIdx === -1 ? c.symbolName : c.symbolName.slice(0, hashIdx);
-        const ids = chunkIdsBySymbolName.get(base);
-        if (ids) ids.push(c.id);
-        else chunkIdsBySymbolName.set(base, [c.id]);
-      }
       symbols = extractedSymbols.map((sym) => {
         const kind = symbolKindFromSignature(sym.signature, sym.name);
-        const chunkIds = chunkIdsBySymbolName.get(sym.name) ?? [];
+        const chunkIds = chunkIdsBySymbol.get(sym) ?? [];
         return {
           name: sym.name,
           kind,

@@ -50,8 +50,8 @@ describe("tl-agents CLI argument parsing", () => {
     expect((caught as Error).message).toContain("compact");
   });
 
-  it("advertises exactly full, medium, compact as valid profiles", () => {
-    expect(VALID_PROFILES).toEqual(["full", "medium", "compact"]);
+  it("advertises the opt-in portable profile alongside the existing profiles", () => {
+    expect(VALID_PROFILES).toEqual(["full", "medium", "compact", "portable"]);
   });
 
   it("bare flags before the command still default to the update command", () => {

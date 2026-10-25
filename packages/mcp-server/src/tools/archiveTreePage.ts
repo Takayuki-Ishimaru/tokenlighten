@@ -194,8 +194,11 @@ export function admitArchiveTreeCursor(workspace: string, request: ArchiveTreeRe
         code: "invalid-input",
         field: changed,
         error: `archive tree cursor continuation cannot change '${changed}'`,
-        detail: "a tree cursor continuation accepts only budget overrides; re-issue the original tree call to list another archive or prefix",
+        detail: "a tree cursor continuation accepts only budget overrides; next lists the archive and prefix this call asked for from its first member (resuming the cursor needs the scope of the call that returned it)",
         retry: "call",
+        // As the workspace tree's scope-change refusal (exploreTree.ts): the
+        // call that serves what this one asked for, without the cursor.
+        next: restartCall(request, normalizedPrefix),
       },
     };
   }

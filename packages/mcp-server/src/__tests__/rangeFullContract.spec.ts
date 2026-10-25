@@ -35,15 +35,16 @@
  * configs).
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { killServerGroup } from "./helpers/killServerGroup.js";
+import { TSX_NODE_ARGS } from "./helpers/tsxNode.js";
+import { pooledSpawn } from "./helpers/serverPool.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const TSX_CLI = path.resolve(HERE, "../../../../node_modules/tsx/dist/cli.mjs");
 const BIN_TS = path.resolve(HERE, "../bin.ts");
 
 const tmpDirs: string[] = [];
@@ -81,9 +82,9 @@ const CONFIG_ENV: Record<string, NodeJS.ProcessEnv> = {
 
 function startServer(cwd: string, configEnv: NodeJS.ProcessEnv): ServerHandle {
   const env: NodeJS.ProcessEnv = { ...process.env, TOKENLIGHTEN_ALLOWED_PARENTS: os.homedir(), ...configEnv };
-  const child: ChildProcess = spawn(
+  const child: ChildProcess = pooledSpawn(
     process.execPath,
-    [TSX_CLI, "--liftoff-only", BIN_TS, cwd, "--allow-write"],
+    [...TSX_NODE_ARGS, BIN_TS, cwd, "--allow-write"],
     { cwd, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", env },
   );
   let stdout = "";
@@ -529,9 +530,11 @@ for (const [configName, configEnv] of Object.entries(CONFIG_ENV)) {
         await server.initialize();
         const auto1 = await server.call("tl_read_file", { targets: [{ path: "src/proj.ts", range: "1-13" }], cwd: ws });
         expect(auto1.body["kind"]).toBe("read.text");
-        const auto2 = await server.call("tl_read_file", { targets: [{ path: "src/proj.ts", range: "1-13" }], cwd: ws });
-        expect(auto2.body["kind"], "precondition: a plain repeat really is held").toBe("read.receipt");
-
+        // 2026-10-20 (decision run 6t-7, v016el): a plain repeat used to come
+        // here as the precondition ("really is held"); a default-policy read
+        // whose code is held is now served the comment block it never
+        // received, so the projection change is checked straight after the
+        // elided serve, and the plain repeat once every line is held.
         const full = await server.call("tl_read_file", {
           targets: [{ path: "src/proj.ts", range: "1-13" }], content: "full", cwd: ws,
         });
@@ -539,6 +542,8 @@ for (const [configName, configEnv] of Object.entries(CONFIG_ENV)) {
           full.text,
           `content:"full" must re-serve the UNELIDED bytes, never answer from the elided-era receipt: ${full.text.slice(0, 400)}`,
         ).toContain("projection-change-marker-line-one");
+        const auto2 = await server.call("tl_read_file", { targets: [{ path: "src/proj.ts", range: "1-13" }], cwd: ws });
+        expect(auto2.body["kind"], "a plain repeat of a window held whole is the receipt").toBe("read.receipt");
       } finally {
         server.kill();
       }

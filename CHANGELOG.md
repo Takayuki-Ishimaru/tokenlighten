@@ -2,6 +2,73 @@
 
 User-facing release highlights for TokenLighten.
 
+## 0.16.0
+
+- Added optional typed symbol resolution and local multilingual semantic
+  search, configurable from the CLI and VS Code. Both are off by default;
+  model weights are downloaded explicitly. Compound request composition is
+  on by default.
+- Improved named-member discovery, multi-requirement requests, protected-file
+  handling, related declarations and artifact-consumer context.
+- Follow-up reads deliver unserved ranges; repeated reads acknowledge only
+  content actually delivered. Mixed handle/path batches and per-target
+  ranges are supported.
+- Required follow-up reads can reuse exact source bytes already delivered in
+  the same task, including through narrower ranges or recovered handles.
+  Changed files and new bytes are served; `task.force_serve:true` remains
+  available to request a resend.
+- Partially overlapping reads reuse delivered source before budget trimming.
+  Read/search follow-ups can recover uniquely identifiable long shortened
+  task handles; edits retain strict authentication.
+- Long bounded read continuations use a short reference to the query and
+  selected ranges stored in the local server, reducing repeated arguments.
+- Failed-edit diagnostics preserve the failed item and nearby source for a
+  corrected retry. Copilot CLI task packs and batched reads use a smaller
+  default response limit, with continuation for larger requests.
+- Large-type summaries can return a structure map. Compatible discovery
+  follow-ups can complete within one bounded response; smaller required
+  windows can fit while larger windows remain queued for continuation.
+- Local semantic search preserves long source lines and separate relevant
+  regions of the same file. Bounded regions may expand to their containing
+  function; model input limits are checked without silent truncation.
+- Claude Code, GitHub Copilot CLI and Codex CLI use compact tool descriptions
+  by default. Claude Code and Codex CLI receive line-numbered answer content;
+  for Copilot CLI, an answer body that is an exact contiguous source slice
+  is sent without line-number prefixes (its line range is given with it) and
+  other answer bodies stay numbered. Edit/search definitions omit task
+  controls that apply only to reads.
+- Text search accepts ten literal queries by default and returns executable
+  restart calls when continuation scope changes.
+- Edit replies avoid resending supplied replacement text and previously
+  delivered verification entries. Ready task packs omit an identical
+  duplicate verification command. Go module commands and working directories
+  agree before and after edits. Native and Python verification guidance
+  reflects available compilers and interpreter requirements. Verification
+  instructions explicitly name the command and working directory, and
+  avoid retrieving the supplied kit again while preserving required reads.
+  Managed guides direct clients to repair unfinished requested work after
+  related test failures and report unrelated or pre-existing failures.
+- For Go returned-value edits, the first response can include bounded literal
+  call, later-assignment and return lines for review when their source
+  relationship is established and the context fits.
+- New Copilot CLI registrations and snippets set `deferTools: "never"` so
+  TokenLighten's three tools remain loaded. Refreshing a managed entry
+  preserves an existing explicit `"auto"` or `"never"` setting.
+- CLI workspace refresh preserves existing per-client write permission;
+  explicit permission flags override it.
+- VS Code can offer to reset differing user settings after an update,
+  preserving workspace and folder settings.
+- Updated runtime dependencies to patched releases and refreshed bundled
+  dependency notices. Platform archives include Node.js 24.22.1.
+
+Updated indicative savings describe the v0.16.0 Sonnet comparison, its
+sample limits, exclusions and conservative estimate. See
+[Indicative savings](README.md#indicative-savings-v0160) for details.
+
+Upgrade the archive or VSIX, refresh workspace setup and reconnect your
+client. See the [v0.16.0 release notes](release-docs/github-release-v0.16.0.md)
+and [Local analysis engines](release-docs/local-analysis.md).
+
 ## 0.15.3
 
 - Compound return-value and computation-order questions retain both

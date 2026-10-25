@@ -21,7 +21,6 @@
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { createRequire } from "node:module";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -53,6 +52,7 @@ vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => {
 });
 
 import { runTransport } from "../mcp/transport/index.js";
+import { TSX_NODE_ARGS } from "./helpers/tsxNode.js";
 
 let stderrLines: string[];
 
@@ -135,8 +135,6 @@ describe("the dead SDK v1 leg stays deleted", () => {
 // B. The real server on the default era, spawned
 // ---------------------------------------------------------------------------
 
-const nodeRequire = createRequire(import.meta.url);
-const TSX_CLI = nodeRequire.resolve("tsx/cli");
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BIN_TS = path.resolve(HERE, "..", "bin.ts");
 const SPAWN_TIMEOUT_MS = 90_000;
@@ -160,7 +158,7 @@ interface Spawned {
 }
 
 function spawnServer(workspace: string): Spawned {
-  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, "--liftoff-only", BIN_TS, workspace], {
+  const child: ChildProcess = spawn(process.execPath, [...TSX_NODE_ARGS, BIN_TS, workspace], {
     cwd: workspace,
     stdio: ["pipe", "pipe", "pipe"],
     detached: process.platform !== "win32",

@@ -52,10 +52,11 @@ import {
   sfStructuralConcernsEnabled,
 } from "../../util/flags.js";
 import { fileNamesInPathSpans, isEnumLikeQuery, stripPathSpans } from "../../util/queryShape.js";
+import { packageMemberPairs } from "../../util/memberReferences.js";
 // BLOCKER 61 (AC1, review round 12): `features/task-pack/requestItems.ts` is
 // pure and imports NOTHING (its own module header states the contract), so this
 // one clause-shape import introduces no cycle into the locator.
-import { stripLeadVerbTokens, stripValueOnlyLeadClauses } from "../task-pack/requestItems.js";
+import { stripDelegationActorSpans, stripLeadVerbTokens, stripValueOnlyLeadClauses } from "../task-pack/requestItems.js";
 import { extractCjkTokens } from "../../util/cjkSpans.js";
 import { tokenizeForEpoch } from "../../state/session.js";
 import { isNativeExtPath, widenNativeRange } from "../../util/nativeSymbolRange.js";
@@ -69,6 +70,7 @@ import { isMarkdownPath, parseMarkdownHeadings } from "../../util/markdownSectio
 import { trace } from "../../util/trace.js";
 import { applyHybridRetrieval } from "../retrieval/index.js";
 import { applyCompoundRetrieval } from "../compound/index.js";
+import { composeEngineDiscovery } from "../engines/discovery.js";
 
 // ---------------------------------------------------------------------------
 // Constants (exported for budget tests)
@@ -1212,6 +1214,10 @@ function computeRootSuggestion(
   if (scope !== undefined) return undefined;
   const strong = extractIdentifiers(query).filter(isStrongIdentifierToken);
   if (strong.length === 0) return undefined;
+  // Enum values and constant keys can occur in several sibling consumers.
+  // A value-only match does not identify a project that owns the task, so
+  // retain the caller workspace instead of moving cwd to one consumer.
+  if (strong.every((token) => /^[A-Z][A-Z0-9_]{3,}$/.test(token))) return undefined;
 
   const inRoot = (c: Candidate): boolean =>
     dominantRoot === null || rootByCandidate.get(c) === dominantRoot;
@@ -2641,6 +2647,11 @@ function selectRelatedCandidates(raw: Candidate[], max: number): Candidate[] {
 // ---------------------------------------------------------------------------
 
 export async function locateTaskContext(workspace: string, input: LocateInput): Promise<LocateOutput> {
+  const query = stripDelegationActorSpans(input.query);
+  return composeEngineDiscovery(workspace, query === input.query ? input : { ...input, query }, locateTaskContextBase);
+}
+
+async function locateTaskContextBase(workspace: string, input: LocateInput): Promise<LocateOutput> {
   // V10-06 (beta.1): heavy-provider invocation signal, observability only —
   // no-ops unless TL_TRACE=1 (see util/trace.ts's isTraceEnabled). This is
   // the layered candidate-retrieval entry V10-04/V10-06 call the "heavy
@@ -2770,6 +2781,44 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
         kind: "symbol",
         score: applyPenalties(1.3, classLoc.path, scope, queryContext),
         why: "class-method",
+      });
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Layer 1c: package-qualified Pkg.Member resolution (`meter.Sum`)
+  // -------------------------------------------------------------------------
+  // A lowercase owner before a capitalized member names a PACKAGE or module,
+  // not a type, so Layer 1b's class lookup never fires for it, and the bare
+  // member alone cannot tell `meter.Sum` from a `stats.Sum` (gauge fixture,
+  // 2026-10-17: the stats file's prose won on text overlap). Anchor on the
+  // member's declarations that live under the owner (see
+  // `declaredUnderPackageOwner`); a same-named member elsewhere stays an
+  // ordinary Layer 2 candidate.
+  for (const { owner, member } of packageMemberPairs(stripPathSpans("", input.query))) {
+    const memberResult = await searchSymbols(
+      {
+        query: member,
+        ...(input.lang ? { lang: input.lang } : {}),
+        ...(scope ? { path: scope } : {}),
+        limit: 10,
+      },
+      workspace,
+    );
+    const owned = memberResult.locations.filter((loc) =>
+      unqualifiedMemberName(loc.symbol) === member
+      && !isExcluded(loc.path, scope)
+      && declaredUnderPackageOwner(workspace, loc.path, owner)
+    );
+    for (const loc of owned.slice(0, 2)) {
+      if (candidates.some((c) => c.path === loc.path && c.why === "package-member")) continue;
+      candidates.push({
+        path: loc.path,
+        line: loc.line,
+        symbol: member,
+        kind: "symbol",
+        score: applyPenalties(1.6, loc.path, scope, queryContext),
+        why: "package-member",
       });
     }
   }
@@ -3521,6 +3570,14 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
     top.kind === "text" &&
     exactTextMatchedOccurrences.size === 1;
 
+  // Layer 1c: the query qualified the member by its package and exactly one
+  // declaration of it lives under that package — the certainty
+  // `uniqueExactSymbol` grants a caller-typed symbol. A same-named member of
+  // another package is no rival for it.
+  const uniquePackageMember =
+    top.why === "package-member" &&
+    filteredCandidates.filter((c) => c.why === "package-member" && c.symbol === top.symbol).length === 1;
+
   const largeMargin =
     second === undefined ||
     top.score - second.score >= 0.8;
@@ -3549,7 +3606,7 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
     coverageDominant = covers[0]! >= 2 && covers.slice(1).every((n) => n < covers[0]!);
   }
 
-  const shouldHit = uniqueExactSymbol || uniqueExactText || (largeMargin && top.score >= 0.8) ||
+  const shouldHit = uniqueExactSymbol || uniqueExactText || uniquePackageMember || (largeMargin && top.score >= 0.8) ||
     distinctivePrimary !== null || (coverageDominant && top.score >= 0.8);
 
   if (!shouldHit) {
@@ -5423,6 +5480,30 @@ export function extractClassMethodPairs(query: string): Array<{ className: strin
     out.push({ className: m[1]!, methodName: m[2]! });
   }
   return out;
+}
+
+/** `Totals.Add` / `EKF::update` -> `Add` / `update`; a bare name is returned as is. */
+function unqualifiedMemberName(symbol: string): string {
+  return symbol.split(/::|\.|#/).at(-1) ?? symbol;
+}
+
+/**
+ * Layer 1c: `relPath` is declared under the package or module `owner`: its
+ * directory is named `owner` (Go's package directory, a Python or TS
+ * package), its file stem is (`meter.py`, `meter.ts`), or a Go file's own
+ * `package owner` clause says so (a directory named differently).
+ */
+function declaredUnderPackageOwner(workspace: string, relPath: string, owner: string): boolean {
+  const posix = relPath.replace(/\\/g, "/");
+  if (path.posix.basename(path.posix.dirname(posix)) === owner) return true;
+  if (path.posix.basename(posix).replace(/\.[^.]+$/, "") === owner) return true;
+  if (!posix.endsWith(".go")) return false;
+  try {
+    const decoded = decodeTextBuffer(fs.readFileSync(path.join(workspace, relPath)));
+    return decoded !== null && new RegExp(`^package\\s+${owner}\\b`, "m").test(decoded.slice(0, 4096));
+  } catch {
+    return false;
+  }
 }
 
 /**

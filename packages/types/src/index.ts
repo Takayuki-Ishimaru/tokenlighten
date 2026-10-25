@@ -18,6 +18,7 @@ export type {
   ConcernEvidenceSurface,
   TaskChangeObligationKind,
   TaskChangeObligation,
+  WireTaskChangeObligation,
   TaskChangeContract,
   TaskVerifyObligation,
   TaskWiringEvidence,
@@ -133,6 +134,7 @@ export type {
   Evidence,
   FreshEvidence,
   PriorEvidence,
+  GroupedEvidence,
   // A.5.15 + A.7.1 refusal
   Refusal,
   RetryTransition,
@@ -220,6 +222,7 @@ export type {
   CompileFact,
   LinkSetEntry,
   MockHeaderEntry,
+  SyntaxCheck,
   HarnessInfo,
   ToolchainInfo,
   // DESIGN-v0.15 §5/§6.1 — fetch-request continuation state (R2 read, R3 search)
@@ -228,6 +231,10 @@ export type {
   ReadRequestTargetState,
   ReadRequestPage,
   ReadRequestState,
+  ReadCallContinuationState,
+  ReadCallCursorAliasRecord,
+  ReadCallExecutionClaim,
+  ReadCallDispatchBinding,
   SearchMatchRecord,
   SearchRequestPage,
   SearchRequestState,
@@ -251,6 +258,8 @@ export type {
 } from "./agents.js";
 
 export type { TLConfig } from "./config.js";
+export type { EngineConfiguration, LanguageServerCommand } from "./engines.js";
+export { MULTILINGUAL_E5_MODEL, E5_MIT_NOTICE } from "./modelCatalog.js";
 
 export type {
   InstallSource,

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { SourceIndexManifestV1, IndexedFileV1 } from "../indexStore.js";
+import type { IndexedSymbolV1, SourceIndexManifestV1, IndexedFileV1 } from "../indexStore.js";
 import { buildTlGraphFromManifest, writeGraphIfStale, getTlGraphPath, DEFAULT_GRAPH_INDEX_MAX_BYTES } from "../graphBuilder.js";
 
 // ---------------------------------------------------------------------------
@@ -371,8 +371,8 @@ describe("writeGraphIfStale oversized staleness probe", () => {
 // ---------------------------------------------------------------------------
 describe("writeGraphIfStale — item D: skip the doomed stringify+write for an oversized graph", () => {
   // A single symbol whose OWN NAME is already bigger than the whole cap:
-  // estimateGraphMinBytes' lower-bound sum crosses DEFAULT_GRAPH_INDEX_MAX_BYTES
-  // from this one field, so only two small files are needed to exercise the
+  // The indexed lower-bound sum crosses DEFAULT_GRAPH_INDEX_MAX_BYTES from
+  // this one field, so only two small files are needed to exercise the
   // gate (a symbol only enters `graph.symbols` once it has >=1 reference —
   // see buildTlGraphFromManifest's own `if (!refs...) continue` filter).
   function makeOversizedGraphManifest(): SourceIndexManifestV1 {
@@ -391,7 +391,7 @@ describe("writeGraphIfStale — item D: skip the doomed stringify+write for an o
     try {
       const result = await writeGraphIfStale(tmpDir, makeOversizedGraphManifest());
       expect(result.written).toBe(false);
-      expect(result.symbolCount).toBe(1); // the graph WAS built (cheap, no I/O) — just not stringified/written
+      expect(result.symbolCount).toBe(1); // exact summary count without graph assembly/stringification
       expect(spy).not.toHaveBeenCalled();
     } finally {
       spy.mockRestore();
@@ -415,12 +415,68 @@ describe("writeGraphIfStale — item D: skip the doomed stringify+write for an o
     expect(await fs.readFile(graphPath, "utf8")).toBe(existing);
   });
 
+  it("admits by a linear lower bound before reading definition lines or expanding high-fanout references", async () => {
+    const symbolCount = 160;
+    const fanout = 160;
+    const files: Record<string, IndexedFileV1> = {};
+    for (let i = 0; i < symbolCount; i += 1) {
+      const symbol: IndexedSymbolV1 = { name: "Shared", kind: "function", signature: "sig", lineStart: 1, lineEnd: 1, chunkIds: [] };
+      if (i === 0) {
+        Object.defineProperty(symbol, "lineStart", {
+          get() { throw new Error("graph assembly reached before oversized admission"); },
+        });
+      }
+      const path = `defs/${String(i).padStart(3, "0")}.ts`;
+      files[path] = makeFile({ path, symbols: [symbol] });
+    }
+    for (let i = 0; i < fanout; i += 1) {
+      const path = `refs/${String(i).padStart(3, "0")}.ts`;
+      files[path] = makeFile({ path, outgoingSymbolRefs: { Shared: 1 } });
+    }
+
+    const result = await writeGraphIfStale(tmpDir, makeManifest(files), { graphIndexMaxBytes: 1 });
+    expect(result).toEqual({ written: false, symbolCount, fileCount: symbolCount + fanout });
+    await expect(fs.access(getTlGraphPath(tmpDir))).rejects.toThrow();
+  });
+
   it("mode:\"on\" bypasses the gate: the same oversized graph IS built, stringified, and written", async () => {
     const manifest = makeOversizedGraphManifest();
     const result = await writeGraphIfStale(tmpDir, manifest, { graphIndexMode: "on" });
     expect(result.written).toBe(true);
     const content = JSON.parse(await fs.readFile(getTlGraphPath(tmpDir), "utf8"));
     expect(content.symbols.length).toBe(1);
+  });
+
+  it("keeps duplicate definitions and excludes every locally defining file from references", async () => {
+    const symbol = (name: string, lineStart: number): IndexedSymbolV1 => ({
+      name, kind: "function", signature: "sig", lineStart, lineEnd: lineStart, chunkIds: [],
+    });
+    const manifest = makeManifest({
+      "a.ts": makeFile({ path: "a.ts", symbols: [symbol("Shared", 1), symbol("Shared", 2), symbol("Unused", 3)], outgoingSymbolRefs: { Shared: 1 } }),
+      "b.ts": makeFile({ path: "b.ts", symbols: [symbol("Shared", 1)], outgoingSymbolRefs: { Shared: 1 } }),
+      "c.ts": makeFile({ path: "c.ts", outgoingSymbolRefs: { Shared: 1, Unknown: 1 } }),
+      "d.ts": makeFile({ path: "d.ts", symbols: [symbol("Other", 1)], outgoingSymbolRefs: { Shared: 1, Other: 1 } }),
+      "e.ts": makeFile({ path: "e.ts", outgoingSymbolRefs: { Unknown: 1 } }),
+    });
+    expect(await writeGraphIfStale(tmpDir, manifest, { graphIndexMaxBytes: 1 }))
+      .toEqual({ written: false, symbolCount: 3, fileCount: 4 });
+    expect(await writeGraphIfStale(tmpDir, manifest, { graphIndexMode: "on", graphIndexMaxBytes: 1 }))
+      .toEqual({ written: true, symbolCount: 3, fileCount: 4 });
+    const graph = JSON.parse(await fs.readFile(getTlGraphPath(tmpDir), "utf8"));
+    expect(graph.symbols.map((entry: { name: string; definition: { path: string; line: number }; references: { path: string }[] }) => ({
+      name: entry.name, path: entry.definition.path, line: entry.definition.line,
+      refs: entry.references.map((reference) => reference.path),
+    }))).toEqual([
+      { name: "Shared", path: "a.ts", line: 1, refs: ["c.ts", "d.ts"] },
+      { name: "Shared", path: "a.ts", line: 2, refs: ["c.ts", "d.ts"] },
+      { name: "Shared", path: "b.ts", line: 1, refs: ["c.ts", "d.ts"] },
+    ]);
+    expect(graph.files).toEqual([
+      { path: "a.ts", imports: [], exports: ["Shared", "Shared", "Unused"] },
+      { path: "b.ts", imports: [], exports: ["Shared"] },
+      { path: "c.ts", imports: ["a.ts", "b.ts"], exports: [] },
+      { path: "d.ts", imports: ["a.ts", "b.ts"], exports: ["Other"] },
+    ]);
   });
 
   it("mode:\"off\" still applies the size gate (writing changes nothing the reader would ever surface in that mode either)", async () => {
@@ -446,8 +502,67 @@ describe("writeGraphIfStale — item D: skip the doomed stringify+write for an o
     });
     const result = await writeGraphIfStale(tmpDir, manifest);
     expect(result.written).toBe(true);
-    const content = JSON.parse(await fs.readFile(getTlGraphPath(tmpDir), "utf8"));
+    const serialized = await fs.readFile(getTlGraphPath(tmpDir), "utf8");
+    expect(serialized).toBe(JSON.stringify(buildTlGraphFromManifest(manifest)));
+    const content = JSON.parse(serialized);
     expect(content.symbols).toHaveLength(1);
     expect(content.symbols[0].name).toBe("Shared");
+  });
+
+  it("preserves Unicode and JSON escaping in the complete serialized graph", async () => {
+    const name = '火🔥"name';
+    const manifest = makeManifest({
+      "src/火🔥.ts": makeFile({
+        path: "src/火🔥.ts",
+        symbols: [{ name, kind: "function", signature: "sig", lineStart: 3, lineEnd: 3, chunkIds: [] }],
+      }),
+      "consumer/é.ts": makeFile({ path: "consumer/é.ts", outgoingSymbolRefs: { [name]: 1 } }),
+    }, "root-🔥");
+    const expected = JSON.stringify(buildTlGraphFromManifest(manifest));
+    const result = await writeGraphIfStale(tmpDir, manifest);
+    expect(result.written).toBe(true);
+    expect(await fs.readFile(getTlGraphPath(tmpDir), "utf8")).toBe(expected);
+  });
+
+  it("does not preflight-reject when the lower bound equals the cap, but rejects one byte below", async () => {
+    const equalBoundSymbol: IndexedSymbolV1 = { name: "S", kind: "function", signature: "sig", lineStart: 1, lineEnd: 1, chunkIds: [] };
+    Object.defineProperty(equalBoundSymbol, "lineStart", {
+      get() { throw new Error("equal lower bound must reach graph assembly"); },
+    });
+    const equalBound = makeManifest({
+      "a.ts": makeFile({ path: "a.ts", symbols: [equalBoundSymbol] }),
+      "b.ts": makeFile({ path: "b.ts", outgoingSymbolRefs: { S: 1 } }),
+    });
+    // rootHash 6 + export name 1 + two graph paths 8 + symbol name 1 +
+    // definition path 4 + referenced path 4 = 24 UTF-16 code units.
+    await expect(writeGraphIfStale(tmpDir, equalBound, { graphIndexMaxBytes: 24 }))
+      .rejects.toThrow("equal lower bound must reach graph assembly");
+
+    const nextTmpDir = join(tmpDir, "below-bound");
+    await fs.mkdir(nextTmpDir);
+    const belowBound = await writeGraphIfStale(nextTmpDir, makeManifest({
+      "a.ts": makeFile({ path: "a.ts", symbols: [{ name: "S", kind: "function", signature: "sig", lineStart: 1, lineEnd: 1, chunkIds: [] }] }),
+      "b.ts": makeFile({ path: "b.ts", outgoingSymbolRefs: { S: 1 } }),
+    }), { graphIndexMaxBytes: 23 });
+    expect(belowBound).toEqual({ written: false, symbolCount: 1, fileCount: 2 });
+    await expect(fs.access(getTlGraphPath(nextTmpDir))).rejects.toThrow();
+  });
+
+  it("preserves an existing graph when forceRebuild is oversized", async () => {
+    const graphPath = getTlGraphPath(tmpDir);
+    await fs.mkdir(join(tmpDir, ".tokenlighten", "index"), { recursive: true });
+    const existing = '{"version":1,"rootHash":"hash-old","symbols":[],"files":[]}';
+    await fs.writeFile(graphPath, existing, "utf8");
+    const files = {
+      "a.ts": makeFile({ path: "a.ts", symbols: [{ name: "Large", kind: "function", signature: "sig", lineStart: 1, lineEnd: 1, chunkIds: [] }] }),
+      "b.ts": makeFile({ path: "b.ts", outgoingSymbolRefs: { Large: 1 } }),
+    };
+
+    const result = await writeGraphIfStale(tmpDir, makeManifest(files, "hash-new"), {
+      forceRebuild: true,
+      graphIndexMaxBytes: 1,
+    });
+    expect(result).toEqual({ written: false, symbolCount: 1, fileCount: 2 });
+    expect(await fs.readFile(graphPath, "utf8")).toBe(existing);
   });
 });

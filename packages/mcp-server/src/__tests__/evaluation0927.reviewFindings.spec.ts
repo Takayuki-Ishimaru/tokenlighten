@@ -155,18 +155,41 @@ describe("item 4 — importSpecifiersNaming: TS/JS barrel re-exports", () => {
 // input, and the callers-direction/negated-instruction precision guards.
 // ---------------------------------------------------------------------------
 describe("item 8 — facet detector: linear time and precision guards", () => {
-  it("'where is ... called' scales linearly: a 40 KB adversarial repeat resolves in well under 50 ms", () => {
+  // Linear time is checked as a ratio, not against a wall-clock bound: each
+  // adversarial repeat is timed against 1/8 of itself, the two alternately,
+  // keeping the least of several runs of each. A stall (GC, other processes)
+  // inflates single samples, never the least of seven, and machine load
+  // slows both inputs alike. 8x the input costs ~8x the time when linear
+  // (measured 2026-10-20: 7.8x, 0.37 -> 2.8 ms "where is", 0.16 -> 1.2 ms
+  // "does exist"), up to ~3x more if one side's best run landed on an
+  // efficiency core, and 64x when quadratic; the backtracking the bounded
+  // patterns replaced was steeper still (44.4 s at 1,600 "where is" repeats,
+  // 3.4 s -> 21.9 s from 800 to 1,600 "does exist" repeats). The former
+  // 50 ms bound on one cold call (14.5 ms on an idle machine) failed at
+  // 60.7 ms while other suites ran.
+  const LINEAR_RATIO_LIMIT = 32;
+  function leastMsEach(inputs: readonly string[], runs = 7): number[] {
+    for (const q of inputs) extractFacetRequirements(q); // compiles the patterns
+    const least = inputs.map(() => Infinity);
+    for (let run = 0; run < runs; run++) {
+      inputs.forEach((q, i) => {
+        const t0 = performance.now();
+        extractFacetRequirements(q);
+        least[i] = Math.min(least[i]!, performance.now() - t0);
+      });
+    }
+    return least;
+  }
+  it("'where is ... called' scales linearly: the 14 KB adversarial repeat costs ~8x, not 64x, its 1/8 slice", () => {
     const q = "where is ".repeat(1600) + "fetchWithRetry?";
     expect(q.length).toBeGreaterThan(14000);
-    const t0 = performance.now();
-    extractFacetRequirements(q);
-    expect(performance.now() - t0).toBeLessThan(50);
+    const [small, large] = leastMsEach(["where is ".repeat(200) + "fetchWithRetry?", q]);
+    expect(large! / small!, `${small!.toFixed(3)} ms -> ${large!.toFixed(3)} ms`).toBeLessThan(LINEAR_RATIO_LIMIT);
   });
-  it("'does ... exist' scales linearly: an 8.8 KB adversarial repeat resolves in well under 50 ms", () => {
+  it("'does ... exist' scales linearly: the 8.8 KB adversarial repeat costs ~8x, not 64x, its 1/8 slice", () => {
     const q = "does exist ".repeat(800) + "fetchWithRetry?";
-    const t0 = performance.now();
-    extractFacetRequirements(q);
-    expect(performance.now() - t0).toBeLessThan(50);
+    const [small, large] = leastMsEach(["does exist ".repeat(100) + "fetchWithRetry?", q]);
+    expect(large! / small!, `${small!.toFixed(3)} ms -> ${large!.toFixed(3)} ms`).toBeLessThan(LINEAR_RATIO_LIMIT);
   });
   it("'is there a document...' still detects the documentation-existence guard (recall control, not weakened by the bounded rewrite)", () => {
     expect(extractFacetRequirements("Is there a document that shows the processing flow as a diagram?")).toEqual([]);

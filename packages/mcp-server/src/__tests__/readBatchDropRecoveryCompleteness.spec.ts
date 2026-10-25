@@ -40,8 +40,7 @@
 // as a regression control.
 
 import { afterAll, afterEach, describe, expect, it } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
-import { createRequire } from "node:module";
+import { type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -53,6 +52,9 @@ import { validateProtocolBody } from "../protocol/budget/validate.js";
 import { RANGE_CONTENT_FULL_MARKER } from "../protocol/budget/shedders/registry.js";
 import { shortTmpDir } from "./helpers/shortTmpDir.js";
 import { rmDirWithRetry, waitForExit } from "./helpers/rmDirWithRetry.js";
+import { TSX_NODE_ARGS } from "./helpers/tsxNode.js";
+import { pooledSpawn } from "./helpers/serverPool.js";
+import { killServerGroup } from "./helpers/killServerGroup.js";
 
 // ---------------------------------------------------------------------------
 // Direct ladder coverage (mirrors rangeFullBatchContinuation.spec.ts's own
@@ -340,8 +342,6 @@ describe("direct ladder: readBatch.ts rung 4 never names a phantom line past a f
 // Spawned-server harness (trimmed from rangedDeliveryCompleteness.spec.ts).
 // ---------------------------------------------------------------------------
 
-const nodeRequire = createRequire(import.meta.url);
-const TSX_CLI = nodeRequire.resolve("tsx/cli");
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BIN_TS = path.resolve(HERE, "..", "bin.ts");
 const HOME = process.env["HOME"] ?? process.env["USERPROFILE"] ?? os.homedir();
@@ -384,19 +384,16 @@ function writeFile(dir: string, rel: string, content: string): void {
 }
 
 function startServer(cwd: string, env: NodeJS.ProcessEnv): ServerHandle {
-  // Own process group (POSIX), so one group SIGKILL reaches the tsx wrapper
-  // AND the server it runs; killing the wrapper alone orphans it.
-  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, "--liftoff-only", BIN_TS, cwd], {
+  // Own process group (POSIX), so the group kill also reaches any child the
+  // server starts — killing only the direct child could orphan those.
+  const child: ChildProcess = pooledSpawn(process.execPath, [...TSX_NODE_ARGS, BIN_TS, cwd], {
     cwd,
     stdio: ["pipe", "pipe", "pipe"],
     env,
     detached: process.platform !== "win32",
   });
   const killGroup = (): void => {
-    try {
-      if (process.platform !== "win32" && child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
-      else child.kill("SIGKILL");
-    } catch { /* ok */ }
+    killServerGroup(child);
   };
 
   let stdoutBuf = "";

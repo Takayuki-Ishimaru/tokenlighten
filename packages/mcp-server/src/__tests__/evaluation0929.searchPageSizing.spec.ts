@@ -201,10 +201,15 @@ describe("large find result — effective ceiling and exact continuation", () =>
     buildLargeFixture(wsVscode);
     expect(expectedMatches).toBe(LARGE_FILES * LARGE_HITS_PER_FILE);
 
-    const serverDefault = startDevServer(wsDefault, "default");
+    // 2026-10-19: this fixture overflows both ceilings through every file's
+    // snippets; TL_EFF_FIND_SNIPPET_CAP (default ON) keeps them for ten of
+    // the 60 files only. Pinned off so both first pages still truncate and
+    // the ceilings they are compared on stay the ones under test.
+    const snippetCapOff = { extraEnv: { TL_EFF_FIND_SNIPPET_CAP: "0" } };
+    const serverDefault = startDevServer(wsDefault, "default", snippetCapOff);
     servers.push(serverDefault);
     await serverDefault.initialize();
-    const serverVscode = startDevServer(wsVscode, "vscode");
+    const serverVscode = startDevServer(wsVscode, "vscode", snippetCapOff);
     servers.push(serverVscode);
     await serverVscode.initialize();
 

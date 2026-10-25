@@ -8,6 +8,7 @@ scripts/bundle-cli.mjs
 scripts/generate-schema-stamp.mjs
 scripts/import-meta-url-shim.js
 scripts/test-bundle-cli-setup.mjs
+scripts/test-bundle-engines.mjs
 .tokenlighten/**
 .gitignore
 SHA256SUMS

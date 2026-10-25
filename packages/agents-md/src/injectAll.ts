@@ -327,7 +327,7 @@ export async function removeAll(config: RemoveAllConfig): Promise<RemoveAllResul
 }
 
 const RENDER_LOCALES: readonly Locale[] = ["en", "jp"];
-const RENDER_PROFILES: readonly GuideProfile[] = ["full", "medium", "compact"];
+const RENDER_PROFILES: readonly GuideProfile[] = ["full", "medium", "compact", "portable"];
 const RENDER_SURFACES: readonly ToolSurface[] = ["full", "code"];
 const RENDER_COPILOT_GUIDES: readonly CopilotGuideMode[] = ["agents-md", "standalone"];
 

@@ -361,7 +361,10 @@ const PATH_EXTENSION_SPAN_CAPTURE_RE = new RegExp(
  * restores the match without reintroducing "docs" as a free identifier.
  */
 export function fileNamesInPathSpans(text: string): string[] {
-  return [...text.matchAll(PATH_EXTENSION_SPAN_CAPTURE_RE)].map((match) => match[1]!);
+  return [...text.matchAll(/\S+/gu)].flatMap(([chunk]) => {
+    if (!chunk.includes("/") && !chunk.includes("\\")) return [];
+    return [...chunk.matchAll(PATH_EXTENSION_SPAN_CAPTURE_RE)].map((match) => match[1]!);
+  });
 }
 
 // Every anchored pattern below is guarded by this negative lookbehind: the
@@ -438,12 +441,20 @@ export function stripPathSpans(workspaceRoot: string, text: string): string {
     out = out.replace(new RegExp(`${escapeRegExpLiteral(root)}[^\\s"'\`]*`, "g"), " ");
   }
 
-  out = out.replace(WINDOWS_DRIVE_SPAN_RE, " ");
-  out = out.replace(PATH_EXTENSION_SPAN_RE, " ");
-  out = out.replace(POSIX_ABSOLUTE_SPAN_RE, " ");
-  out = out.replace(HOME_RELATIVE_SPAN_RE, " ");
-  out = out.replace(EXPLICIT_RELATIVE_SPAN_RE, " ");
-  out = out.replace(BARE_MULTI_SEGMENT_SPAN_RE, " ");
+  // Generic path patterns cannot cross whitespace. Skip separator-free
+  // chunks before running them: otherwise a long quoted replacement makes
+  // the unanchored patterns retry from every character of a non-path word.
+  // Keep the original regexes and whitespace so path interpretation stays
+  // identical, including punctuation and mixed-separator edge cases.
+  out = out.replace(/\S+/gu, (chunk) => {
+    if (!chunk.includes("/") && !chunk.includes("\\")) return chunk;
+    return chunk.replace(WINDOWS_DRIVE_SPAN_RE, " ")
+      .replace(PATH_EXTENSION_SPAN_RE, " ")
+      .replace(POSIX_ABSOLUTE_SPAN_RE, " ")
+      .replace(HOME_RELATIVE_SPAN_RE, " ")
+      .replace(EXPLICIT_RELATIVE_SPAN_RE, " ")
+      .replace(BARE_MULTI_SEGMENT_SPAN_RE, " ");
+  });
 
   const base = basename(root);
   if (base) {

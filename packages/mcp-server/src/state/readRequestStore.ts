@@ -1,4 +1,5 @@
 // ---------------------------------------------------------------------------
+
 // readRequestStore.ts — DESIGN-v0.15 §5 (R2): ONE READ REQUEST'S Q, D AND PAGES.
 //
 // NORMATIVE SOURCE: DESIGN-v0.15-exploration-continuation-reliability.md §3.1
@@ -43,6 +44,8 @@
 // existing single-file `mode=slice`/`ranges[]` serve path rather than through a
 // new multi-file assembler. Recorded as a Wave-1 deviation.
 // ---------------------------------------------------------------------------
+
+import { measureResponseBytes } from "../protocol/budget/measure.js";
 
 import { createHash, randomUUID } from "node:crypto";
 
@@ -510,13 +513,63 @@ export function resolveReadCursor(
  * ladder shed the page the chooser just fixed — still honest, because D is
  * recomputed from what actually shipped, but it costs a turn — while
  * OVER-reserving only makes a page one line shorter than it could be.
+ *
+ * The `cwd` it counts is the one the ladder MEASURES in the cursor call, which is
+ * the transport's root-cwd omission's input, not its output (server.ts `project`
+ * drops the root `cwd` from the call after the ladder has judged the reply): the
+ * call's own, else the workspace the canonical call inherits. A follower of a
+ * root-cwd-free `next` sends none, and a page fitted or a floor named without it
+ * is one workspace path short of what the ladder then judges (2026-10-24,
+ * readRequestContinuation.spec.ts's property test, case 15).
  */
 export const PAGE_ENVELOPE_RESERVE_BYTES = 540;
 
 export function pageEnvelopeReserve(path: string, cwd?: string): number {
   return PAGE_ENVELOPE_RESERVE_BYTES
-    + Buffer.byteLength(path, "utf8")
-    + (cwd === undefined ? 0 : Buffer.byteLength(cwd, "utf8"));
+    + measureResponseBytes(path)
+    + (cwd === undefined ? 0 : measureResponseBytes(cwd));
+}
+
+/**
+ * 2026-10-24 (read-page ceiling): bytes ONE window of a page costs beside its
+ * lines -- the `read.text` evidence row it becomes,
+ * `{"handle":"h0000000000","path":<path>,"range":"NNNNN-NNNNN","body":""},` --
+ * measured at the widest range the digits allow, so a page sized with it errs
+ * toward one window fewer, never toward a trim at the emit tail.
+ */
+export function pageRowOverhead(path: string): number {
+  return measureResponseBytes(
+    `{"handle":"h0000000000","path":${JSON.stringify(path)},"range":"99999-99999","body":""},`,
+  );
+}
+
+/** Extra bytes on the first projected evidence row for post-page disclosures. */
+export function pageReadMetadataOverhead(remaining: readonly string[], elided: readonly string[]): number {
+  let total = 0;
+  if (remaining.length > 0) total += measureResponseBytes(`,"remaining":${JSON.stringify(remaining)}`);
+  if (elided.length > 0) total += measureResponseBytes(`,"elided":${JSON.stringify(elided)}`);
+  return total;
+}
+
+/**
+ * 2026-10-24 (read-page ceiling): bytes ONE window of a `read.batch` page costs
+ * on the wire -- the entries it becomes, not the content it carries. A window
+ * is projected into one entry per run of code between its elided comment
+ * blocks, each
+ * `{"form":"handle","handle":"h0000000000","path":<path>,"range":"99999-99999",
+ * "truncated":false,"content":"","sha":"sha256:000000000000"},`
+ * (measured at the widest range the digits allow), the first also carrying the
+ * window's `elided` list, and its content is a JSON string (`wireLineCostBytes`).
+ * The batch loops used to count the raw content alone, which under-counts a
+ * window of many one-line runs by more than the content itself.
+ */
+export function batchWindowWireCost(path: string, content: string, elidedWindows: number): number {
+  let body = 0;
+  for (const line of content.split("\n")) body += wireLineCostBytes(line);
+  const entry = measureResponseBytes(
+    `{"form":"handle","handle":"h0000000000","path":${JSON.stringify(path)},"range":"99999-99999","truncated":false,"content":"","sha":"sha256:000000000000"},`,
+  );
+  return body + (elidedWindows + 1) * entry + elidedWindows * 14;
 }
 
 /**
@@ -540,7 +593,7 @@ export function pageEnvelopeReserve(path: string, cwd?: string): number {
  * separator per page, in the safe direction.)
  */
 export function wireLineCostBytes(text: string): number {
-  return Buffer.byteLength(JSON.stringify(text), "utf8");
+  return measureResponseBytes(JSON.stringify(text));
 }
 
 /** The wire cost of a whole window of `lines`, using `wireLineCostBytes`. */
@@ -577,6 +630,17 @@ export function choosePage(
   fileLines: (path: string) => string[] | undefined,
   budgetBytes: number,
   cwd?: string,
+  /**
+   * 2026-10-24 (read-page ceiling): what ONE window of the page costs on the wire
+   * beside its lines -- the row the projector writes for it (`handle`, `path`,
+   * `range`, `body` keys and quotes: `pageRowOverhead`). 0 (every call that does
+   * not pass it) is the sizing this function always had, which charged the
+   * lines and the envelope and nothing per window: exact for the one or two
+   * windows of an ordinary page, and 10 KB short for the sixty small code
+   * windows a comment-dense file's remainder is -- pages that then reached the
+   * emit tail 70% over their budget and were trimmed there, row by row.
+   */
+  rowOverheadBytes = 0,
 ): PageChoice {
   const target = state.targets.find((entry) => entry.remaining.length > 0);
   if (target === undefined) return { ok: false, reason: "complete" };
@@ -594,8 +658,9 @@ export function choosePage(
     for (let line = window.start; line <= window.end; line += 1) {
       const text = lines[line - 1];
       if (text === undefined) break;
-      // MEASURED THE WAY THE WIRE MEASURES IT — see `wireLineCostBytes`.
-      const cost = wireLineCostBytes(text);
+      // MEASURED THE WAY THE WIRE MEASURES IT — see `wireLineCostBytes`. The
+      // first line of a window also pays the window's own row.
+      const cost = wireLineCostBytes(text) + (spanStart === undefined ? rowOverheadBytes : 0);
       if (firstLineBytes === undefined) firstLineBytes = cost;
       if (used + cost > room) {
         if (spanStart !== undefined) windows.push({ start: spanStart, end: spanEnd });

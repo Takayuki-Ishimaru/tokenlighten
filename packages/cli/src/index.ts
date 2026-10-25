@@ -28,6 +28,7 @@ import { runSetup } from "./commands/setup.js";
 import { runWorkspace } from "./commands/workspace.js";
 import { runLogs } from "./commands/logs.js";
 import { runClients } from "./commands/clients.js";
+import { runEngines, runModels } from "./commands/engines.js";
 
 // Resolve a path's real (symlink-free) location, tolerating paths that
 // don't exist on disk (falls back to a lexical resolve instead of throwing,
@@ -69,6 +70,12 @@ async function main(): Promise<void> {
   const filteredRest = rest.filter((a) => a !== "--no-prereq-check");
 
   switch (command) {
+    case "engines":
+      await runEngines(filteredRest);
+      break;
+    case "models":
+      await runModels(filteredRest);
+      break;
     case undefined:
     case "--help":
     case "-h":

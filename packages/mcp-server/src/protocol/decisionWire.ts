@@ -37,10 +37,13 @@ import type {
 } from "@tokenlighten/types";
 import type { TaskExecutionContract, TaskCapabilityGap } from "@tokenlighten/types";
 import type { TaskPackResult } from "../features/task-pack/model.js";
+import {enumStyleReviewOrigin} from "../enumStyleReview.js";
+import {goReviewOrigin} from "../goReturnedLocalReview.js";
+import {javaLoopGuardOrigin} from "../javaLoopGuardReview.js";
 
 import { emittableToolCall } from "./refusal.js";
 import { decisionGradeLiteralAbsenceSubject, discoveryBundleAdvisory, discoveryBundleNext, unservedAddressableRepack, semanticFrontierNextAllowed, sanitizeSemanticFrontierNext, isSemanticFrontierDemotionEligible, sfAwaitInputCandidatePathsFor, parseLedgerMissingRow, isSupportingEvidenceWhy } from "../features/task-pack/canonicalDecision.js";
-import { semanticFrontierGuardEnabled, sfDemoteEnabled } from "../util/flags.js";
+import { effStructureMapEnabled, semanticFrontierGuardEnabled, sfDemoteEnabled } from "../util/flags.js";
 import { ELISION_MARKER_RE } from "../util/formatCompress.js";
 import { isSemanticFrontierContinuationOptional } from "../features/task-pack/semanticFrontier.js";
 import { noteSemanticFrontierDecisionSuppression, noteSemanticFrontierEvidenceSuppression, noteSemanticFrontierWithholding, semanticFrontierEvidenceWitnessId } from "./semanticFrontierTraceContext.js";
@@ -76,6 +79,15 @@ export const SANCTIONED_ZOOM_CAP = 4;
  * meaning, and a caller that passed `surfaceRoles` learns from the ABSENCE of
  * `role` that the selector did not bind.
  *
+ * 2026-10-23 (codex-copilot-proxy wire compaction): this projector is
+ * unchanged — it copies the surface's `role` verbatim, `"unknown"` included,
+ * because the readers upstream of the wire (the ladder's rung 5, the act floor,
+ * `omitCoveredFrontierIndex`) rank and compare rows by it. What a CALL that
+ * passed no `surfaceRoles` receives is decided at the end of the funnel:
+ * protocol/wireCompaction.ts leaves `"unknown"` off such a reply's rows
+ * (TL_EFF_REPLY_COMPACT), and a call that passed `surfaceRoles` keeps it, so
+ * the readback above is that caller's, untouched.
+ *
  * THE FIELD ADJUDICATION (C2-3, replacing C2-2's declared passthrough).
  *
  * A.5.1 lists `evidence: Evidence[]` and nothing else, and A.2.7 gives
@@ -99,7 +111,12 @@ export const SANCTIONED_ZOOM_CAP = 4;
  *                  wire; deleting it here would contradict A.8.
  *   `likely_edits` the per-surface edit targets. `decision.act.edit.frontier`
  *                  names WHICH files are writable; this names WHERE in them,
- *                  and nothing else on the v1 wire does.
+ *                  and nothing else on the v1 wire does. (2026-10-23: the
+ *                  generic pair — an inspect-slice and a handle-scoped-edit
+ *                  hint on the row's own handle — ships as its kinds,
+ *                  protocol/wireCompaction.ts; this projector still emits the
+ *                  hints whole, since the pack builder reads their confidence
+ *                  upstream of the wire.)
  *
  * DELETED — every other surface field. Named, with the rule that kills each:
  *   `content_completeness`  Rule T: per-source truncation IS `remaining`. Two
@@ -295,7 +312,8 @@ function guardEvidenceOriginality(
 function splitAppendedWindows(
   code: string,
   recorded: unknown,
-): { head: string; windows: Array<{ range: string; body: string }> } | undefined {
+  range?: string,
+): { head: string; headRange?: string; windows: Array<{ range: string; body: string }> } | undefined {
   if (!Array.isArray(recorded) || recorded.length === 0) return undefined;
   const found: Array<{ at: number; end: number; range: string }> = [];
   let from = 0;
@@ -322,7 +340,116 @@ function splitAppendedWindows(
     const end = ELISION_MARKER_RE.test(body) ? Number(bounds[2]) : Math.min(Number(bounds[2]), start + kept - 1);
     windows.push({ range: `${start}-${end}`, body });
   });
-  return { head: code.slice(0, found[0]!.at), windows };
+  const head = code.slice(0, found[0]!.at);
+  // v0.16 6t-7 T03 (TL_EFF_STRUCTURE_MAP, util/flags.ts): the head names the
+  // lines it holds, as each window does. The surface's `range` spans the
+  // windows too (the served ledger books `range` minus `remaining_ranges`), so
+  // stamping it on the head row claimed every line between them. A head with
+  // an elision marker keeps the declared range, whose exact segments
+  // sourceFidelity.ts rebuilds from the rendering. Flag off, every head keeps
+  // the declared range, as before.
+  const headBounds = range === undefined || !effStructureMapEnabled() ? null : /^(\d+)-(\d+)$/.exec(range);
+  const headKept = evidenceBodyLogicalLineCount(head);
+  const headRange = headBounds !== null && headKept > 0 && !ELISION_MARKER_RE.test(head)
+    ? `${headBounds[1]}-${Math.min(Number(headBounds[2]), Number(headBounds[1]) + headKept - 1)}`
+    : undefined;
+  return { head, ...(headRange !== undefined ? { headRange } : {}), windows };
+}
+
+// ---------------------------------------------------------------------------
+// Where the Go returned-local review rides (2026-10-22, codex-copilot-proxy r18
+// T07).
+//
+// The review is a source-order fact about one write target. `projectEvidence`
+// appends it to the row's `why`, a provenance field the agent guide never
+// mentions; the decision's `frontier` is the field the guide sends an agent to
+// for the files it may write. When the reply that ships is an `act.edit` whose
+// frontier names the review's file, the fact moves onto that frontier entry
+// (`relocateGoReviewsToFrontier`), where the agent chooses its edit, and the row
+// keeps the `why` it would have had without the review. Every other reply keeps
+// the text in `why`, byte for byte. `projectEvidence`'s own output does not
+// change: the row only remembers, off the wire, what the move needs.
+// ---------------------------------------------------------------------------
+const GO_REVIEW_RELOCATION = Symbol("tl.goReviewRelocation");
+type GoReviewRelocation = Readonly<{ path: string; text: string; whyWithoutReview: unknown }>;
+
+function markGoReviewRelocation(row: Evidence, relocation: GoReviewRelocation): void {
+  Object.defineProperty(row, GO_REVIEW_RELOCATION, {
+    value: Object.freeze(relocation), enumerable: false, configurable: true, writable: true,
+  });
+}
+
+/** Whether any remaining range is not a plain `N-M` span or overlaps `window` (a `N-M` span): the body then is not all of it. */
+function remainingTouchesWindow(remaining: readonly string[], window: string): boolean {
+  const own = /^(\d+)-(\d+)$/u.exec(window);
+  if (own === null) return remaining.length > 0;
+  const [start, end] = [Number(own[1]), Number(own[2])];
+  return remaining.some(range => {
+    const rest = /^(\d+)-(\d+)$/u.exec(range.trim());
+    return rest === null || (Number(rest[1]) <= end && Number(rest[2]) >= start);
+  });
+}
+
+/**
+ * Moves each projected row's Go returned-local review onto the `act.edit`
+ * frontier entry of the same path: `entry.review` takes the text and the row's
+ * `why` returns to its pre-review value (the key is dropped when the review
+ * created it). A second row of that path carrying the same text is restored
+ * too, so the fact rides the wire once; a row with another text keeps its
+ * `why`. Does nothing unless `decision` is an `act.edit` with a frontier entry
+ * for that path, so the call is safe on any decision and on a second pass. Java
+ * loop-guard and enum-style reviews stay in `why`.
+ *
+ * Fail-open (2026-10-22, review of the r18 T07 change): the move never throws
+ * and never loses the fact. An entry that cannot take a key is skipped, and a
+ * row whose move fails keeps its `why` exactly as projected, with the entry's
+ * key undone.
+ */
+export function relocateGoReviewsToFrontier(decision: TaskDecision | undefined, evidence: readonly Evidence[]): void {
+  try {
+    if (decision === undefined || decision.kind !== "act.edit" || decision.frontier === undefined) return;
+    for (const row of evidence) {
+      try {
+        moveGoReview(decision.frontier, row);
+      } catch {
+        // The review stays in this row's `why`, as projected.
+      }
+    }
+  } catch {
+    // Likewise: nothing moved is the old behavior.
+  }
+}
+
+function moveGoReview(frontier: readonly FrontierEntry[], row: Evidence): void {
+  const relocation = (row as { [GO_REVIEW_RELOCATION]?: GoReviewRelocation })[GO_REVIEW_RELOCATION];
+  if (relocation === undefined) return;
+  const entry = frontier.find((candidate) => candidate.path === relocation.path);
+  if (entry === undefined) return;
+  let placed = false;
+  if (entry.review === undefined) {
+    if (!Object.isExtensible(entry)) return;
+    entry.review = relocation.text;
+    placed = true;
+  } else if (entry.review !== relocation.text) {
+    return;
+  }
+  const record = row as unknown as Record<string, unknown>;
+  try {
+    if (relocation.whyWithoutReview === undefined) delete record["why"];
+    else record["why"] = relocation.whyWithoutReview;
+  } catch (error) {
+    if (placed) {
+      try { delete entry.review; } catch { /* the entry keeps a fact the row also keeps */ }
+    }
+    throw error;
+  }
+  try {
+    Object.defineProperty(row, GO_REVIEW_RELOCATION, {
+      value: undefined, enumerable: false, configurable: true, writable: true,
+    });
+  } catch {
+    // Already moved; a second pass finds the same text on the entry and restores the same `why`.
+  }
 }
 
 export function projectEvidence(surfaces: unknown, priorForBodyless?: string): Evidence[] {
@@ -407,18 +534,38 @@ export function projectEvidence(surfaces: unknown, priorForBodyless?: string): E
     // below is untouched). `undefined` means "nothing to correct" so every
     // OTHER row's projection stays byte-identical to before this guard existed.
     const appended = !demotable && typeof record["code"] === "string"
-      ? splitAppendedWindows(record["code"], record["appended_windows"])
+      ? splitAppendedWindows(record["code"], record["appended_windows"], typeof record["range"] === "string" ? record["range"] : undefined)
       : undefined;
     const originalityGuard = !demotable && typeof record["code"] === "string"
       ? guardEvidenceOriginality(appended?.head ?? record["code"], typeof record["range"] === "string" ? record["range"] : undefined)
       : undefined;
+    // Prose derived from a complete callable survives only with that exact
+    // fresh body after the last originality guard.
+    const deliveredBody = originalityGuard === undefined ? appended?.head ?? record["code"] : originalityGuard.body;
+    // The first origin is the Go review: keep it, and this row's `why` without it, for
+    // `relocateGoReviewsToFrontier` (the later origins always stay in `why`).
+    let goReview: Pick<GoReviewRelocation, "path" | "text"> | undefined;
+    let whyWithoutGoReview: unknown = carried["why"];
+    for (const [index, origin] of [goReviewOrigin(surface), javaLoopGuardOrigin(surface), enumStyleReviewOrigin(surface)].entries()) {
+      // The Go review is about one function whole in its window, so what remains of the FILE does not matter (a
+      // remaining range that touches the window does); the other origins need the surface to have nothing remaining.
+      if (origin !== undefined && deliveredBody === origin.body && originalityGuard?.prior === undefined
+        && record["path"] === origin.path && record["range"] === origin.range
+        && record["content_completeness"] !== "partial"
+        && (index === 0 ? !remainingTouchesWindow(remaining, origin.range) : remaining.length === 0)
+        && (!Array.isArray(record["appended_windows"]) || record["appended_windows"].length === 0)) {
+        carried["why"] = typeof carried["why"] === "string" ? carried["why"] + "; " + origin.text : origin.text;
+        if (index === 0) goReview = { path: origin.path, text: origin.text };
+        else whyWithoutGoReview = typeof whyWithoutGoReview === "string" ? whyWithoutGoReview + "; " + origin.text : origin.text;
+      }
+    }
     const projected: Evidence = {
       handle,
       // §3.3's addressing triple, plus [R4-2] / A.9.2 row 22: `role` SURVIVES
       // the collapse, and is never defaulted to "unknown" — absence tells a
       // caller that passed `surfaceRoles` that the selector did not bind.
       ...(typeof record["path"] === "string" ? { path: record["path"] } : {}),
-      ...(typeof record["range"] === "string" ? { range: record["range"] } : {}),
+      ...(typeof record["range"] === "string" ? { range: appended?.headRange ?? record["range"] } : {}),
       // A demoted row is bodyless BY DEFINITION (§3.5.1's supporting tier):
       // no `body`, no `prior` — just enough to stay addressable via `handle`
       // + `remaining` in a follow-up call.
@@ -453,6 +600,7 @@ export function projectEvidence(surfaces: unknown, priorForBodyless?: string): E
       ...(typeof record["role"] === "string" ? { role: record["role"] as SurfaceRole } : {}),
       ...carried,
     };
+    if (goReview !== undefined) markGoReviewRelocation(projected, { ...goReview, whyWithoutReview: whyWithoutGoReview });
     if (suppressRemaining) noteSemanticFrontierEvidenceSuppression(projected as unknown as Record<string, unknown>);
     // FX-R3d (D10): carry the PRODUCER's own record of who withheld this
     // row's body forward to the funnel exit, keyed by the projected row's own
@@ -1795,6 +1943,40 @@ interface SemanticFrontierNextCandidate {
   readonly suppressionReason: string;
 }
 
+/** Keep a server-authored discovery read inside the task that still owes it. */
+export function withDiscoveryReplay(
+  result: Record<string, unknown>,
+  call: ToolCall | undefined,
+): ToolCall | undefined {
+  const qref = result["qref"];
+  if (typeof qref !== "string" || qref.length === 0 || call?.tool !== "tl_read_file") return call;
+  const args = call.arguments;
+  if (args["query"] !== undefined || args["qref"] !== undefined || args["cursor"] !== undefined
+    || args["mode"] !== undefined || args["taskEpoch"] !== undefined) return call;
+  const task = args["task"];
+  if (task !== undefined && (task === null || typeof task !== "object" || Array.isArray(task))) return call;
+  const control = task as Record<string, ToolCall["arguments"][string]> | undefined;
+  if (control?.["epoch"] !== undefined || control?.["pull"] !== undefined
+    || control?.["force_serve"] !== undefined) return call;
+  const address = (value: unknown): boolean => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+    const row = value as Record<string, unknown>;
+    return typeof row["path"] === "string" && row["path"].length > 0
+      || typeof row["handle"] === "string" && row["handle"].length > 0;
+  };
+  if (!address(args) && !(Array.isArray(args["targets"]) && args["targets"].length > 0
+    && args["targets"].every(address))) return call;
+  const binding = result["profile_binding"];
+  const requested = binding !== null && typeof binding === "object" && !Array.isArray(binding)
+    ? (binding as Record<string, unknown>)["requested"] : undefined;
+  // A refined generic binding still belongs to the caller's original generic
+  // task. Re-inference on the same replay must not mint a different identity.
+  const profile = typeof requested === "string" && requested !== "auto" ? requested : result["profile"];
+  const taskControl = typeof profile === "string" && profile.length > 0 && control?.["profile"] === undefined
+    ? {...control, profile} : control;
+  return {...call, arguments: {...args, qref, ...(taskControl !== undefined ? {task: taskControl} : {})}};
+}
+
 function sameToolCall(left: ToolCall | undefined, right: ToolCall | undefined): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
@@ -1840,13 +2022,17 @@ function projectSemanticFrontierNext(
   const allowed = semanticFrontierNextAllowed({
     surfaces: Array.isArray(result["surfaces"]) ? result["surfaces"] as TaskPackResult["surfaces"] : [],
   }, guardEnabled);
+  const replay = (call: ToolCall | undefined): ToolCall | undefined => withDiscoveryReplay(result, call);
   const guarded = (raw: ToolCall | undefined): ToolCall | undefined =>
-    !guardEnabled ? raw : allowed ? sanitizeSemanticFrontierNext(taskResult, raw, true) : undefined;
+    replay(!guardEnabled ? raw : allowed ? sanitizeSemanticFrontierNext(taskResult, raw, true) : undefined);
+  // The literal cohort read is the exact witness slice itself (see
+  // `literalCohortContinuation`): a qref would turn it back into a re-pack of
+  // the same generic pack, the loop it exists to break. It is never replayed.
   const rawLiteral = sanitizeSemanticFrontierNext(taskResult, literalCohortContinuation(result, contract), false);
-  const rawBundle = discoveryBundleNext(taskResult, false);
-  const rawContract = sanitizeSemanticFrontierNext(taskResult, discoverNext(contract, result), false);
-  const rawGap = sanitizeSemanticFrontierNext(taskResult, gapNamedNext(contract), false);
-  const rawUnserved = sanitizeSemanticFrontierNext(taskResult, unservedAddressableRepack(taskResult), false);
+  const rawBundle = replay(discoveryBundleNext(taskResult, false));
+  const rawContract = replay(sanitizeSemanticFrontierNext(taskResult, discoverNext(contract, result), false));
+  const rawGap = replay(sanitizeSemanticFrontierNext(taskResult, gapNamedNext(contract), false));
+  const rawUnserved = replay(sanitizeSemanticFrontierNext(taskResult, unservedAddressableRepack(taskResult), false));
   // D8 (FX-R3c, DC2) NOTE: §10.0 names `selectCanonicalNext` the single arbiter
   // of `decision.next`, but `rawBundle` still outranks `rawContract` here, so
   // on a CANDIDATE-LIST pack the wire keeps offering the discovery bundle even
@@ -1857,10 +2043,14 @@ function projectSemanticFrontierNext(
   // replay fell through to), and a ranking change with no failing case behind
   // it is a lever, not a fix. Left as an open item with the evidence attached.
   const candidates: SemanticFrontierNextCandidate[] = [
-    { raw: rawLiteral, guarded: guarded(rawLiteral), suppressionReason: "continuation-target" },
+    {
+      raw: rawLiteral,
+      guarded: !guardEnabled ? rawLiteral : allowed ? sanitizeSemanticFrontierNext(taskResult, rawLiteral, true) : undefined,
+      suppressionReason: "continuation-target",
+    },
     {
       raw: rawBundle,
-      guarded: !guardEnabled ? rawBundle : allowed ? discoveryBundleNext(taskResult, true) : undefined,
+      guarded: replay(!guardEnabled ? rawBundle : allowed ? discoveryBundleNext(taskResult, true) : undefined),
       suppressionReason: "discovery-bundle",
     },
     { raw: rawContract, guarded: guarded(rawContract), suppressionReason: "continuation-target" },
@@ -1939,7 +2129,7 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
   // R1: the same rule for the restoring fallback the degrade arms use — a zoom
   // of a window this lane already re-read is a round trip charged for no bytes,
   // which is the condition `servedEvidenceZoom`'s own contract already forbids.
-  const restoringZoom = (): ToolCall | undefined => firstUnconsumed(consumed, servedEvidenceZoom(evidence));
+  const restoringZoom = (): ToolCall | undefined => firstUnconsumed(consumed, withDiscoveryReplay(result, servedEvidenceZoom(evidence)));
 
   if (canonicalKind === "terminal-closed") return { kind: "done" };
 

@@ -11,16 +11,6 @@
       "returned": 12,
       "excluded": 0,
       "errors": 0
-    },
-    "excluded_by_reason": {
-      "ignored": 0,
-      "gitignored": 0,
-      "tokenlighten_ignored": 0,
-      "oversize": 0,
-      "symlinks": 0,
-      "non_text": 0,
-      "secrets": 0,
-      "source_only_excluded": 0
     }
   }
 }

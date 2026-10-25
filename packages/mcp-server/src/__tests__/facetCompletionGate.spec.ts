@@ -85,11 +85,11 @@ function buildWorkspace(root: string): void {
   for (let i = 0; i < 8; i++) write(root, `src/misc/m${i}.ts`, `export function misc${i}(x: number): number {\n  return x + ${i};\n}\n`);
 }
 
-async function runChain(config: ConfigName, query: string): Promise<ChainResult> {
+async function runChain(config: ConfigName, query: string, extraEnv: Readonly<Record<string, string>> = {}): Promise<ChainResult> {
   const ws = fs.realpathSync(shortTmpDir(HOME, `.tl-fixg-${config}-`));
   tmpDirs.push(ws);
   buildWorkspace(ws);
-  const server = startDevServer(ws, config);
+  const server = startDevServer(ws, config, { extraEnv });
   servers.push(server);
   await server.initialize();
   try {
@@ -152,15 +152,24 @@ describe.each(CONFIG_NAMES)("facet completion gate — honesty controls [%s]", (
     );
   }, 120_000);
 
-  it("a closure beyond one pack's budget: discover with exact ranged targets, act.answer only after every constant body is served", async () => {
-    const chain = await runChain(config, "Which values does resolveLevel read by default?");
+  it("a closure beyond one pack's budget (TL_EFF_AUTOFOLLOW=0): discover with exact ranged targets, act.answer only after every constant body is served", async () => {
+    const chain = await runChain(config, "Which values does resolveLevel read by default?", { TL_EFF_AUTOFOLLOW: "0" });
     const first = decisionOf(chain.hops[0]!.response);
     expect(first.kind).toBe("discover");
     expect((first.gaps ?? []).some((g: any) => (g.refs ?? []).includes("request-item:facet-1:value"))).toBe(true);
     expect(first.next?.tool).toBe("tl_read_file");
-    for (const target of first.next.arguments.targets) {
-      expect(target.path).toBe("src/levels.ts");
-      expect(target.range).toMatch(/^\d+-\d+$/u);
+    // v0.16.0 (release note: "Clients follow a short reference instead of
+    // repeating the full arguments"): the discover's `next` is a `{cursor}`
+    // reference, not its `targets`. This chain ran it as written (hop 1), so
+    // what it asked for is what that reply served: only src/levels.ts, every
+    // row an exact `N-M` window.
+    const followed = chain.hops[1]!;
+    expect(followed.call, "the chain must run the discover's next verbatim").toEqual(first.next);
+    const servedRows: any[] = followed.response?.evidence ?? [];
+    expect(servedRows.length, JSON.stringify(followed.response).slice(0, 400)).toBeGreaterThan(0);
+    for (const row of servedRows) {
+      expect(row.path).toBe("src/levels.ts");
+      expect(row.range).toMatch(/^\d+-\d+$/u);
     }
     let certifiedAt = -1;
     chain.hops.forEach((hop, index) => {
@@ -171,6 +180,34 @@ describe.each(CONFIG_NAMES)("facet completion gate — honesty controls [%s]", (
       if (certifiedAt < 0) certifiedAt = index;
     });
     expect(certifiedAt).toBeGreaterThan(0);
+    expect(chain.capped).toBe(false);
+    expectNoBareSearchNext(chain);
+  }, 180_000);
+
+  // The default chains the discover's ranged window reads server-side
+  // (TL_EFF_AUTOFOLLOW, 2026-10-19, after decision run 6t-6), so the first
+  // reply may already be the act.answer: then it says which discover pack's
+  // next ran (`auto_followed`, with that pack's facet gap), and it carries
+  // every constant's declaration itself. Either way nothing certifies before
+  // every constant body is on the wire.
+  it("a closure beyond one pack's budget (default): act.answer only after every constant body is served, the discover's gap on auto_followed when the server ran its next", async () => {
+    const chain = await runChain(config, "Which values does resolveLevel read by default?");
+    const head = chain.hops[0]!.response;
+    if (decisionOf(head).kind === "act.answer") {
+      const followed = head?.auto_followed ?? {};
+      expect(followed.hops, JSON.stringify(followed).slice(0, 300)).toBeGreaterThanOrEqual(2);
+      expect((followed.gaps ?? []).some((g: any) => (g.refs ?? []).includes("request-item:facet-1:value"))).toBe(true);
+    } else {
+      expect(decisionOf(head).kind).toBe("discover");
+    }
+    let certifiedAt = -1;
+    chain.hops.forEach((hop, index) => {
+      if (decisionOf(hop.response).kind !== "act.answer") return;
+      const served = bodiesUpTo(chain, index);
+      for (const name of HEAVY_NAMES) expect(served).toContain(`export const ${name} = {`);
+      if (certifiedAt < 0) certifiedAt = index;
+    });
+    expect(certifiedAt).toBeGreaterThanOrEqual(0);
     expect(chain.capped).toBe(false);
     expectNoBareSearchNext(chain);
   }, 180_000);

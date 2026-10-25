@@ -67,11 +67,24 @@
 //     `requestFacets.heldout5.spec.ts` (a regression guard just under that
 //     result). Expect roughly that on unseen phrasing: long multi-sentence
 //     prompts that ask indirectly are the main remaining miss.
+//   - Sets #8 and #9 (2026-10-24, the structure-map ENTRY vocabulary: the ORDER OF
+//     CALLS, see `isCallOrderClause`) — #8 (172 items, entryHeldout1.ts) was
+//     scored first against the pre-change extractor (flow recall 0.35) and
+//     shaped the rules, so it is a development set (flow recall 0.90, precision
+//     0.97); #9 (107 items, entryHeldout2.ts) was written after the rules were
+//     final and scored once (flow recall 0.27 -> 0.84, precision 0.78 -> 0.90),
+//     then exposed one gap ("the exact order …") that is fixed; its 29-item
+//     appendix is the blind check of that fix. See requestFacets.heldout8.spec.ts
+//     and requestFacets.heldout9.spec.ts.
 // No development set above should be reported as "held-out" once it has
 // shaped an edit; measure a future change on a new unseen set.
 
+import { effFlowOrderVocabEnabled } from "../../util/flags.js";
+import { maskStructureMapAnswerWording } from "./structureMap.js";
 import { isProseAcronym } from "./concernRecovery.js";
 import { stripPathSpans } from "../../util/queryShape.js";
+import { maskCitationFormatFields } from "../../util/citationFormat.js";
+import { maskEvaluationInputRecords } from "../../util/evaluationInputs.js";
 import { languageForPath } from "../../util/languages.js";
 import { JA_GLOSSARY } from "../retrieval/jaGlossary.js";
 
@@ -1050,8 +1063,24 @@ const FLOW_STEP_BY_STEP_EN_RE = /\bstep[\s-]by[\s-]step\b|\bone\s+step\s+at\s+a\
 // deliberately carved OUT of CONDITION_JA_WHICH_RE below so it lands here
 // instead, never both); 段階的に ("in stages") is its own bare adverb, the JA
 // mirror of "step by step".
-const FLOW_JA_RE =
-  /処理経路|処理の流れ|処理フロー|呼び出し経路|呼び出しの流れ|呼び出し関係|一連の処理|ライフサイクル|シーケンス|実行フロー|データフロー|リクエストパス|までの流れ|実行順序|処理順序|呼び出し順序|制御フロー|一歩ずつ|順番に|順に|ステップバイステップ|実行順|処理順|どの順|どういう順|どう変換される|どのタイミングで|段階的に/;
+// 2026-10-24 (structure-map entry vocabulary): the ORDER OF CALLS in JA — a call
+// or execution word, optionally の, then 順番/順序/順 (see the block after
+// FLOW_PROCEDURE_JA_RE). Two shapes, both ANCHORED to the call word: the
+// compound NOUN (呼び出し順 / 呼び出しの順番 / 実行の順序 / 処理の順番 / コール順 /
+// 起動順 / 初期化順 / 適用順 / 発火順 …) and the attributive VERB (呼ぶ順番 / 呼び出す
+// 順序 / 呼ばれる順 / 叩く順番 / 実行する順番 / 実行される順序 / 走る順序 / 起動される順 …).
+// None can name a queue position or a sort order: 順番待ち / 順番号 / 順位 / 順付け
+// are guarded off the suffix (a 実行する順番待ち is a queue, not a sequence of calls),
+// and 順 never stands for the first character of 順番/順序. 評価順 is deliberately
+// absent: it is a ranking ("sorted by rating"), not an evaluation order. They live
+// in FLOW_JA_RE so that, like 実行順序, they are facet descriptors (isFacetDescriptorTerm)
+// and name no point of a flow (isNonPointWord).
+const FLOW_JA_ORDER_SUFFIX = "(?:順番|順序|順(?![番序]))(?!待ち|番号|位|付け|づけ)";
+const FLOW_JA_CALL_NOUN = "(?:呼び出し|呼出し?|コール|実行|処理|起動|発火|適用|初期化)";
+const FLOW_JA_CALL_VERB_ATTRIBUTIVE =
+  "(?:呼び出す|呼びだす|呼び出される|呼ぶ|呼ばれる|叩く|叩かれる|コールする|コールされる|実行する|実行される|処理する|処理される|走る|動く|起動する|起動される|発火する|適用する|適用される|初期化する|初期化される|立ち上げる|立ち上がる)";
+const FLOW_JA_RE = /処理経路|処理の流れ|処理フロー|呼び出し経路|呼び出しの流れ|呼び出し関係|一連の処理|ライフサイクル|シーケンス|実行フロー|データフロー|リクエストパス|までの流れ|実行順序|処理順序|呼び出し順序|制御フロー|一歩ずつ|順番に|順に|ステップバイステップ|実行順|処理順|どの順|どういう順|どう変換される|どのタイミングで|段階的に/;
+const FLOW_JA_CALL_ORDER_RE = new RegExp(`(?:${FLOW_JA_CALL_NOUN}|${FLOW_JA_CALL_VERB_ATTRIBUTIVE})(?:の)?${FLOW_JA_ORDER_SUFFIX}`);
 // held-out3 c-ja-10/c-ja-26: 追跡して/を追跡 ("to trace") as a verb is the JA
 // mirror of the bare EN "trace" trigger above, guarded the same way against
 // its noun uses (see FLOW_NEGATIVE_GUARDS's 追跡番号/追跡ID/追跡コード entry).
@@ -1061,6 +1090,177 @@ const FLOW_JA_RE =
 // this specific "tell me" shape.
 const FLOW_TRACE_VERB_JA_RE = /追跡して|を追跡/;
 const FLOW_PROCEDURE_JA_RE = /手順(?:を教えて|を段階的に)/;
+
+// ---------------------------------------------------------------------------
+// 2026-10-24 (structure-map entry vocabulary; generality audit §3.3.3 of
+// bench/workflows/experiments/2026-10-21-codex-copilot-proxy/drafts/
+// fable-analysis-r16): THE ORDER OF CALLS.
+//
+// The structure map (structureMap.ts) is served only to a request that asks for
+// a short answer AND names a flow. Of 16 natural paraphrases of "…and the order
+// it calls payment / inventory / shipping in" — 8 EN, 8 JA — one EN and no JA
+// paraphrase carried a flow this module knew: "in what order", "order of …",
+// "execution order" and 順番に/順に/どの順 were the only order phrasings, so
+// "the order it calls …", "what order does it call …", "in which order it
+// calls …", "the sequence of … calls", "when … get called", "which … runs
+// first", 「呼ぶ順番」「呼び出す順番」「呼び出し順」 and 「最初に実行される」 were no
+// flow at all. This block adds the order of calls as it is written about calls.
+//
+// Every entry is ANCHORED to a call or execution verb or noun — never to the
+// bare word "order" / 順番, which names a purchase order, a sort order or a
+// queue position ("in order to", "order by", "ordered list", "orders table",
+// "注文の順番", "順番待ち") at least as often as a sequence of calls:
+//   - a COMPOUND NOUN carries its own call noun: "call order", "calling order",
+//     "invocation order", "run order", "evaluation order", "initialization /
+//     startup / shutdown / teardown / load order", "hook order", "middleware
+//     order", "call sequence", "invocation sequence" ("registration order" is
+//     left out: it names the order things were REGISTERED in, which a bug
+//     report about notification order contrasts with the order they run in);
+//   - the RELATIVE CLAUSE after "the order" names the call itself: "the order it
+//     calls payment in", "the order they run in", "the order its steps run in",
+//     "the order the hooks are called in" — and "the order service calls
+//     payment" (order as a modifier of a noun) matches none of them;
+//   - the interrogative forms name no call by themselves — "what order does it
+//     …", "in which order …", "the order in which …", "the sequence in which …"
+//     — so a call or execution verb or noun must sit in the SAME SENTENCE. The
+//     clause cut at every comma and "and" parts them otherwise ("…, and in which
+//     order." / "in which order do build, test and publish get invoked?"). "In
+//     which order are the columns defined?" and "Which order does it return?"
+//     carry no call verb and stay out; bare "which order" (no "in") is the
+//     purchase order as often as the sequence, so only "what order + auxiliary",
+//     "in which order" and "which order do I call them in?" (an auxiliary, a call
+//     word, the clause ending on "in") count;
+//   - an ORDINAL after a run/execute verb, led by which/what in the sentence:
+//     "which of payment / inventory / shipping runs first", "what gets called
+//     first", "which is executed next"; the active "calls" / "invokes" only
+//     behind do-support ("which does Mailer call first", "what does it run
+//     next"): "which function calls X first" asks for a CALLER;
+//   - the passive "get called" without do-support: "when payment / inventory /
+//     shipping get called" is a timing/sequence question. With do-support ("when
+//     does X get called") it asks for a call site (WHEN_CALLERS_VERB_RE) and
+//     stays callers;
+//   - "the sequence of A / B / C calls" / "…of hook invocations", "what happens
+//     first / next".
+// Change requests never reach this block (`isChangeClause` drops "Reorder the
+// calls …", "Implement X in the order …" first), and a bare "order" reaches
+// none of it. A fresh held-out pair measures it: requestFacets.heldout8.spec.ts
+// (development) and requestFacets.heldout9.spec.ts (blind).
+// ---------------------------------------------------------------------------
+/** The call / execution verbs and nouns a call-order phrasing is anchored to. "hit" is the T03 request's own verb ("叩く"); "apply" is the rule-engine one ("in what order are the rules applied"). */
+const FLOW_CALL_WORD_EN =
+  "(?:call(?:s|ed|ing)?|invok(?:e|es|ed|ing)|invocations?|run(?:s|ning)?|ran|execut(?:e|es|ed|ing)|fir(?:e|es|ed|ing)|trigger(?:s|ed|ing)?|hit(?:s|ting)?|happen(?:s|ed|ing)?|dispatch(?:es|ed|ing)?|appl(?:y|ies|ied|ying)|perform(?:s|ed|ing)?|evaluat(?:e|es|ed|ing)|initiali[sz](?:e|es|ed|ing)|kick(?:s|ed|ing)?\\s+off)";
+const FLOW_CALL_WORD_EN_RE = new RegExp(`\\b${FLOW_CALL_WORD_EN}\\b`, "i");
+/** "what order does / is / are / were …": the interrogative determiner followed by its auxiliary, so "what order status does it set" and "what order types does X support" (an order entity) never match. */
+const FLOW_WHAT_ORDER_EN_RE = /\bwhat\s+order\s+(?:does|do|did|will|would|should|can|could|is|are|was|were|has|have|gets?)\b/i;
+const FLOW_IN_WHICH_ORDER_EN_RE = /\bin\s+which\s+order\b/i;
+/** "which order do I call them in?" — bare "which order" is the purchase order as often as the sequence ("which order does it call refund for"), so it counts only with an auxiliary, a call word after it and the clause ENDING on "in". */
+const FLOW_WHICH_ORDER_IN_EN_RE = new RegExp(
+  `\\bwhich\\s+order\\s+(?:does|do|did|will|would|should|can|could|is|are|was|were)\\b[^.?!]{0,60}?\\b${FLOW_CALL_WORD_EN}\\b[^.?!]{0,40}?\\bin\\s*[?.!]*$`, "i");
+/** "the order in which …", "the exact order that …": one of a few adjectives may stand between "the" and "order". */
+const FLOW_ORDER_ADJECTIVE_EN = "(?:(?:exact|precise|actual|real|right|correct|usual|default|typical|normal|full|complete|whole|overall|specific)\\s+)?";
+const FLOW_THE_ORDER_RELATIVE_EN_RE = new RegExp(`\\bthe\\s+${FLOW_ORDER_ADJECTIVE_EN}order\\s+(?:in\\s+which|that|which)\\b`, "i");
+const FLOW_SEQUENCE_RELATIVE_EN_RE = /\bsequence\s+(?:in\s+which|that|which|it|they)\b/i;
+/** "the order it calls payment in", "the order they get called in" — a pronoun subject straight after "the order", then a call word within two words. */
+const FLOW_THE_ORDER_SUBJECT_EN_RE = new RegExp(
+  `\\bthe\\s+${FLOW_ORDER_ADJECTIVE_EN}order\\s+(?:it|they|we|you|he|she|each|everything)\\s+(?:\\w+\\s+){0,2}?${FLOW_CALL_WORD_EN}\\b`, "i");
+/** "the order its steps run in", "the order the hooks are called in" — a possessive / article + up to three words, then an EXECUTION verb (not the bare active "calls": "the order the customer called" is none). */
+const FLOW_THE_ORDER_NOUNS_EN_RE = new RegExp(
+  `\\bthe\\s+${FLOW_ORDER_ADJECTIVE_EN}order\\s+(?:its|their|these|those|the)\\s+(?:[\\w-]+\\s+){1,3}?(?:runs?|executes?|fires?|(?:are|get)\\s+(?:called|run|executed|invoked|fired|triggered))\\b`, "i");
+/** "call order", "invocation order", "hook order", "call sequence" … (never the camelCase identifier `callOrder`: it needs the space). A bare "boot sequence" / "startup sequence" is a NAMED procedure ("wire X into the boot sequence"), not a question about an order, so only "order" takes those nouns. */
+const FLOW_CALL_ORDER_NOUN_EN_RE =
+  /\b(?:(?:call(?:ing)?|invocation|run|evaluation|initiali[sz]ation|init|startup|boot|bootstrap|setup|shutdown|teardown|cleanup|destruction|load(?:ing)?|hook|middleware|callback)\s+order(?:ing)?|(?:call(?:ing)?|invocation|execution)\s+sequence)\b/i;
+/** "the sequence of payment / inventory / shipping calls", "the sequence of hook invocations" — up to six word/slash tokens between "of" and a call noun. "a sequence of steps" is none: it also opens a bug report ("steps to reproduce"). */
+const FLOW_SEQUENCE_OF_CALLS_EN_RE =
+  /\bsequence\s+of\s+(?:[\w/-]+\s+){0,6}?(?:calls?|invocations?|hooks|callbacks)\b/i;
+/** "runs first", "gets called first", "is executed next", "fires last" — the ordinal straight after an execution verb. "before" / "after" are not ordinals here: "which checks does X run before it stores an order" asks for the checks, not for an order of calls. */
+const FLOW_ORDINAL_EN_RE =
+  /\b(?:runs?|executes?|fires?|happens?|triggers?|(?:is|are|was|were|gets?|got)\s+(?:called|invoked|run|executed|fired|triggered))\s+(?:first|next|last|second|third)\b/i;
+const FLOW_WHICH_WHAT_EN_RE = /\b(?:which|what)\b/i;
+/**
+ * "which does Mailer call first, the renderer or the client?", "what does it run next?" — the ACTIVE call verb is an ordering question only behind
+ * do-support, where the subject performs the call; without it ("which function calls X first") the unknown is the CALLER.
+ */
+const FLOW_DO_SUPPORT_ORDINAL_EN_RE =
+  /\b(?:which|what)\b[^.?!]{0,50}?\b(?:does|do|did|will|would)\b[^.?!]{0,40}?\b(?:call|invoke|run|execute|hit|fire|trigger)\s+(?:first|next|last|second|third)\b/i;
+/** "when payment / inventory / shipping get called" — passive "get called" with no do-support. */
+const FLOW_WHEN_GET_CALLED_EN_RE =
+  /\bwhen\b(?!\s+(?:do|does|did)\b)[^.?!]{0,60}?(?:\bget|\b(?:each|every)\s+[A-Za-z_$][\w$]*\s+gets)\s+(?:called|invoked|executed|run|triggered|fired)\b/i;
+const FLOW_WHAT_HAPPENS_FIRST_EN_RE = /\bwhat\s+happens\s+(?:first|next|last|then|second|third)\b/i;
+
+// JA: the call / execution VERB (呼び出す / 呼ばれる / 叩く / 実行する / 実行される /
+// 処理する / 走る / 起動される / 適用される …) in the passive after 最初に / 先に /
+// 次に / 最後に — 「最初に実行される」「先に呼ばれる」「どちらが先に呼ばれる？」. The
+// order NOUN phrases (呼び出し順, 呼ぶ順番, 実行の順序, 処理する順番 …) are in FLOW_JA_RE
+// above, with the 順番待ち / 順位 guard: 順番 / 順序 / 順 never stands alone, since
+// 「注文の順番」「並び順」「登録順」「順番待ち」 are no sequence of calls. 後に is not an
+// ordinal here (「キャンセル後に呼び出される」 is "after a cancellation").
+const FLOW_FIRST_NEXT_JA_RE = /(?:最初|最後|先|次)に(?:呼び出され|呼ばれ|実行され|処理され|走|動|起動され|叩かれ|適用され|発火)/u;
+/** The active forms — 「どちらを先に呼んでいる？」「何を最初に実行する？」 — read as an ordering question only with an interrogative in the sentence (「先に実行してください」 is an instruction). */
+const FLOW_FIRST_NEXT_ACTIVE_JA_RE = /(?:最初|最後|先|次)に(?:呼ぶ|呼んで(?!ください|下さい|から|も)|呼び出す|呼び出して(?!ください|下さい|から|も)|実行する|実行して(?!ください|下さい|から|も)|叩く|叩いて(?!ください|下さい|から|も)|処理する|処理して(?!ください|下さい|から|も))/u;
+const FLOW_INTERROGATIVE_JA_RE = /どれ|どちら|どっち|何を|どの/u;
+/** JA call / execution words (stems), for the sentence-level anchor of どんな順 / どういう流れで. */
+const FLOW_CALL_WORD_JA_RE = /呼|叩|コール|実行|処理|走|動|起動|発火|適用|初期化|立ち上/u;
+/** 「どんな順番で呼ばれる」「どんな順序で実行」 — どの順 / どういう順 are bare in FLOW_JA_RE; どんな順 needs a call word in the sentence. */
+const FLOW_DONNA_JUN_JA_RE = /どんな順(?:番|序)?(?![番序]|でも|であっても|で来ても|であれ)/u;
+/** 「どういう流れで呼ぶのか」「どんな流れで実行される」 — the JA mirror of "in what sequence", anchored on a call word in the sentence. */
+const FLOW_DOU_NAGARE_JA_RE = /(?:どういう|どんな|どのような)流れで/u;
+
+/**
+ * What the SENTENCE a clause was cut from names, computed once per sentence (a
+ * clause is cut at every comma and "and", so a long sentence has many): whether
+ * it holds a call or execution word (EN / JA) and a which/what.
+ */
+interface SentenceCallCues {
+  readonly callEn: boolean;
+  readonly whichWhat: boolean;
+  readonly callJa: boolean;
+  readonly interrogativeJa: boolean;
+}
+
+/** The cues of `guardedSentence` (negative guards already applied). */
+function sentenceCallCues(guardedSentence: string): SentenceCallCues {
+  return {
+    callEn: FLOW_CALL_WORD_EN_RE.test(guardedSentence),
+    whichWhat: FLOW_WHICH_WHAT_EN_RE.test(guardedSentence),
+    callJa: FLOW_CALL_WORD_JA_RE.test(guardedSentence),
+    interrogativeJa: FLOW_INTERROGATIVE_JA_RE.test(guardedSentence),
+  };
+}
+
+/**
+ * True when `clause` asks for the ORDER of calls or executions in one of the
+ * ways the block above lists. `cues` are those of the sentence the clause was
+ * cut from: the interrogative forms ("what order does …", "in which order …",
+ * "the order in which …", 「どんな順番で」, 「どういう流れで」) name no call by
+ * themselves and take their call or execution word from it.
+ */
+function isCallOrderClause(clause: string, cues: SentenceCallCues): boolean {
+  if (!effFlowOrderVocabEnabled()) return false;
+  // These phrasings describe telephone routing or a constraint on a change,
+  // rather than asking for the execution sequence of software calls.
+  if (/\b(?:dials?(?:\s+in)?|dialled|dialed|dialing|phone\s+call|telephone)\b/i.test(clause)
+    || /\border(?:ing)?\s+(?:matter|matters)\b|\b(?:keep|preserve)\b[^.?!]{0,60}\bcall\s+order\b/i.test(clause)
+    || /(?:順(?:番|序)?の(?:問題)?ではなく|最初に呼ばれる[^。！？]*困る|順(?:番|序)?を(?:確認|検証|保証)するテストは(?:どこ|ある))/u.test(clause)) return false;
+  if (FLOW_JA_CALL_ORDER_RE.test(clause)) return true;
+  if (
+    FLOW_CALL_ORDER_NOUN_EN_RE.test(clause)
+    || FLOW_SEQUENCE_OF_CALLS_EN_RE.test(clause)
+    || FLOW_THE_ORDER_SUBJECT_EN_RE.test(clause)
+    || FLOW_THE_ORDER_NOUNS_EN_RE.test(clause)
+    || FLOW_WHEN_GET_CALLED_EN_RE.test(clause)
+    || FLOW_WHAT_HAPPENS_FIRST_EN_RE.test(clause)
+    || FLOW_FIRST_NEXT_JA_RE.test(clause)
+    || FLOW_WHICH_ORDER_IN_EN_RE.test(clause)
+  ) return true;
+  if (
+    cues.callEn
+    && (FLOW_WHAT_ORDER_EN_RE.test(clause) || FLOW_IN_WHICH_ORDER_EN_RE.test(clause)
+      || FLOW_THE_ORDER_RELATIVE_EN_RE.test(clause) || FLOW_SEQUENCE_RELATIVE_EN_RE.test(clause))
+  ) return true;
+  if (cues.whichWhat && (FLOW_ORDINAL_EN_RE.test(clause) || FLOW_DO_SUPPORT_ORDINAL_EN_RE.test(clause))) return true;
+  if (cues.interrogativeJa && FLOW_FIRST_NEXT_ACTIVE_JA_RE.test(clause)) return true;
+  return cues.callJa && (FLOW_DONNA_JUN_JA_RE.test(clause) || FLOW_DOU_NAGARE_JA_RE.test(clause));
+}
 
 /**
  * held-out2 b-ja-09/b-ja-18 (brief rule 4): 経路/流れ stay gated UNLESS the
@@ -1077,8 +1277,9 @@ function isFlowFramedJaClause(clause: string): boolean {
   return /(?:経路|流れ|順序)(?:を教えて|を追って|をステップごとに|を説明して)/.test(clause);
 }
 
-function isFlowClause(guardedClause: string): boolean {
+function isFlowClause(guardedClause: string, cues: SentenceCallCues): boolean {
   return FLOW_PHRASE_EN_RE.test(guardedClause)
+    || isCallOrderClause(guardedClause, cues)
     || FLOW_VERB_EN_RE.test(guardedClause)
     || FLOW_PROPAGATE_EN_RE.test(guardedClause)
     || FLOW_ORDERING_RE.test(guardedClause)
@@ -1113,13 +1314,17 @@ const ALL_NEGATIVE_GUARDS: readonly RegExp[] = [
   ...FLOW_NEGATIVE_GUARDS,
 ];
 
-function detectFacets(clause: string): RequestFacet[] {
-  const guarded = stripGuardedSpans(clause, ALL_NEGATIVE_GUARDS);
+/** `cues` are those of the sentence `clause` was cut from: only the flow facet's order-of-calls phrasings read them (see `isCallOrderClause`). */
+function detectFacets(
+  clause: string,
+  guarded: string = stripGuardedSpans(clause, ALL_NEGATIVE_GUARDS),
+  cues: SentenceCallCues = sentenceCallCues(guarded),
+): RequestFacet[] {
   const hits = new Set<RequestFacet>();
   if (isValueClause(guarded) || asksForCallReturnValue(clause)) hits.add("value");
   if (isConditionClause(guarded)) hits.add("condition");
   if (isCallersClause(guarded)) hits.add("callers");
-  if (isFlowClause(guarded)) hits.add("flow");
+  if (isFlowClause(guarded, cues)) hits.add("flow");
   return FACET_ORDER.filter((facet) => hits.has(facet));
 }
 
@@ -1314,9 +1519,15 @@ const SCRIPT_AWARE_IDENTIFIER_TOKEN_RE = new RegExp(
  * enough that V01's English clauses and V03's Japanese clauses name the same
  * identifiers from the same query shape (EN/JA parity — see the held-out
  * spec's V01/V03 parity case).
+ *
+ * Deliberately NOT mirrored: `explicitCodeIdentifiers`' member-access rule
+ * (`Uploader.Retry` -> `Retry`, util/memberReferences.ts). A facet's subject
+ * stays the owner, so a member the owner lacks is disclosed against it (as in
+ * replay case ir1010gc, "retry ... matches no member of Uploader") instead of
+ * becoming a subject nothing resolves.
  */
 export function explicitIdentifiersIn(clause: string): string[] {
-  const cleaned = stripPathSpans("", clause);
+  const cleaned = stripPathSpans("", maskCitationFormatFields(maskEvaluationInputRecords(clause)));
   // P1-9 (eval-0927 review-r2 #9, perfEdge): ASCII-only, so a query naming
   // `größe` (whole word, or backtick-quoted) never even reached the
   // `codeShaped` classification below — the ASCII regex split it into
@@ -1547,6 +1758,56 @@ const FACET_END_TO_END_IDIOM_RE = /\bend[\s-]+to[\s-]+end\b/giu;
 const FACET_IN_ITS_LIFECYCLE_IDIOM_RE = /\bin\s+(?:its|their|his|her|the)\s+lifecycle\b/giu;
 const FACET_IN_WHAT_ORDER_IDIOM_RE = /\bin\s+what\s+order\b/giu;
 const FACET_HOW_X_HANDLES_IDIOM_RE = /\b(how)\b([^.?!]*?)\b(handles?|sequences?|sequenced)\b/giu;
+
+/**
+ * 2026-10-24 (structure-map entry vocabulary): the scaffolding words of the
+ * order-of-calls phrasings (`isCallOrderClause`) — "what order", "in which
+ * order", "the order" before a relative clause or a pronoun subject ("the order
+ * it calls …", "the order in which …"), "call order" / "hook order" …, "the
+ * sequence of / in which / it …", and the ordinal after a run/execute verb
+ * ("runs FIRST", "gets called NEXT") — ask about the order of the calls; they are
+ * not words the workspace spells. Left as subject terms they were points a type's
+ * members had to account for ("order … matches no member of CheckoutService").
+ * Blanked like "in what order" above; named concerns stay, while the
+ * grammatical call verb is masked separately. Applied ONLY to a clause (or lead) in which the order-of-calls
+ * phrasing fired (`maskOrderOfCallsCues`), so no other clause's terms change:
+ * "the order that was placed" and "Nightly reconciliation runs after …" keep
+ * every word.
+ */
+const FACET_ORDER_OF_CALLS_IDIOM_RES: readonly RegExp[] = [
+  /\bwhat\s+order(?=\s+(?:does|do|did|will|would|should|can|could|is|are|was|were|has|have|gets?)\b)/giu,
+  /\bin\s+which\s+order\b/giu,
+  /\bthe\s+(?:(?:exact|precise|actual|real|right|correct|usual|default|typical|normal|full|complete|whole|overall|specific)\s+)?order(?=\s+(?:in\s+which|that|which|it|they|we|you|he|she|each|everything|its|their|these|those|the)\b)/giu,
+  /\b(?:call(?:ing)?|invocation|run|evaluation|initiali[sz]ation|init|startup|boot|bootstrap|setup|shutdown|teardown|cleanup|destruction|load(?:ing)?|hook|middleware|callback)\s+order(?:ing)?\b/giu,
+  /\b(?:call(?:ing)?|invocation|execution)\s+sequence\b/giu,
+  /\bsequence\s+of(?=\s+(?:[\w/-]+\s+){0,6}?(?:calls?|invocations?|hooks|callbacks)\b)/giu,
+  /\bsequence(?=\s+(?:in\s+which|that|which|it|they)\b)/giu,
+  /(?<=\b(?:runs?|executes?|fires?|happens?|triggers?|called|invoked|run|executed|fired|triggered)\s+)(?:first|next|last|second|third)\b/giu,
+];
+
+/** `text` with the scaffolding of its order-of-calls phrasings blanked (equal-length filler; see the list above). */
+function maskOrderOfCallsCues(text: string): string {
+  let out = maskStructureMapAnswerWording(text);
+  const callVerbs = "(?:call(?:s|ed|ing)?|invok(?:e|es|ed|ing)|runs?|execut(?:e|es|ed|ing))";
+  for (const re of [
+    new RegExp(`\\b((?:it|they|we|you|he|she)\\s+)${callVerbs}\\b`, "giu"),
+    new RegExp(`\\b((?:does|do|did|will|would)\\s+(?:[A-Za-z_$][\\w$]*\\s+){0,2})${callVerbs}\\b`, "giu"),
+  ]) out = out.replace(re, (m, prefix: string) => prefix + " ".repeat(m.length - prefix.length));
+  out = out.replace(/\b(?:get|gets|are|is|were|was)\s+(?:called|invoked|executed|run|triggered|fired)\b/giu, (m) => " ".repeat(m.length));
+  out = out.replace(/\b(?:runs?|executes?|fires?|happens?|triggers?)\s+(?:first|next|last|second|third)\b/giu, (m) => " ".repeat(m.length));
+  out = out.replace(/\b(sequence\s+of\s+(?:[\w/-]+\s+){0,6}?)(?:calls?|invocations?|hooks|callbacks)\b/giu,
+    (m, prefix: string) => prefix + " ".repeat(m.length - prefix.length));
+  for (const re of FACET_ORDER_OF_CALLS_IDIOM_RES) out = out.replace(re, (m) => " ".repeat(m.length));
+  // Only the clause (or lead) that actually asks for call order reaches here.
+  // Explicit identifiers, qualified members and callables are independently
+  // extracted from the original text, so a named `run()` or Call.answer stays.
+  const prose = [
+    /\b(?:give|focusing)\b/giu,
+    /(?:呼び出される|呼ばれる|呼び出す|呼ぶ)(?=\s*[？?。]|\s*$)/gu,
+  ];
+  for (const re of prose) out = out.replace(re, (m) => " ".repeat(m.length));
+  return out;
+}
 
 /**
  * 2026-10-06 independent review (P2-1): explanation-aspect phrases — "edge
@@ -1800,7 +2061,7 @@ const CJK_TEXT_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
 /** True when `term` is a flow / explanation-kind or declaration-kind word — for a Japanese run, when nothing but such nouns and particles is left of it. */
 function isNonPointWord(term: string): boolean {
   if (CJK_TEXT_RE.test(term)) {
-    return term.replace(FLOW_JA_PHRASE_ALL_RE, " ").split(JA_RUN_PARTICLES_RE).filter((segment) => segment.length > 0)
+    return term.replace(FLOW_JA_PHRASE_ALL_RE, " ").replace(effFlowOrderVocabEnabled() ? new RegExp(FLOW_JA_CALL_ORDER_RE.source, "gu") : /$^/u, " ").split(JA_RUN_PARTICLES_RE).filter((segment) => segment.length > 0)
       .every((segment) => FLOW_DESCRIPTOR_WORDS_JA.has(segment) || DECLARATION_KIND_WORDS_JA.has(segment));
   }
   const lower = term.toLowerCase();
@@ -2079,13 +2340,21 @@ export function extractFacetRequirements(query: string): FacetRequirement[] {
   // …") describe the facet, never the subject, so they are no lead term a
   // facet-only clause inherits.
   const leadSubjectText = splitClauses(sentences[0]!).filter((clause) => !isQualifierClause(clause)).join(" ");
-  const leadTermsSource = leadSubjectText.length > 0 ? leadSubjectText : sentences[0]!;
+  // 2026-10-24: the scaffolding of an order-of-calls phrasing ("the order it
+  // calls …", "in which order") is no subject term (`maskOrderOfCallsCues`) —
+  // blanked only in a lead whose own clause carries one, so a lead without it
+  // keeps every word; the clause's own is blanked the same way below.
+  const leadCues = sentenceCallCues(stripGuardedSpans(sentences[0]!, ALL_NEGATIVE_GUARDS));
+  const leadAsksOrderOfCalls = splitClauses(sentences[0]!).some((clause) => isCallOrderClause(stripGuardedSpans(clause, ALL_NEGATIVE_GUARDS), leadCues));
+  const leadSubjectSource = leadSubjectText.length > 0 ? leadSubjectText : sentences[0]!;
+  const leadTermsSource = leadAsksOrderOfCalls ? maskOrderOfCallsCues(leadSubjectSource) : leadSubjectSource;
   const leadTerms = conceptTermsIn(leadTermsSource);
   const leadQualifiedMembers = qualifiedMemberPairsIn(sentences[0]!);
   const leadCallables = subjectCallableNamesIn(sentences[0]!);
 
   const requirements: FacetRequirement[] = [];
   for (const sentence of sentences) {
+    const sentenceCues = sentenceCallCues(stripGuardedSpans(stripNegatedInstructionParentheticals(sentence), ALL_NEGATIVE_GUARDS));
     for (const clause of splitClauses(sentence)) {
       // P1-10: a negated instruction sitting in its OWN parenthetical inside
       // a larger clause is excised (blanked) here, never used to drop the
@@ -2099,7 +2368,8 @@ export function extractFacetRequirements(query: string): FacetRequirement[] {
       // before.
       const declawed = stripNegatedInstructionParentheticals(clause);
       if (isChangeClause(declawed) || isDocumentationExistenceClause(declawed) || isNegatedInstructionClause(declawed)) continue;
-      const facets = detectFacets(declawed);
+      const guardedClause = stripGuardedSpans(declawed, ALL_NEGATIVE_GUARDS);
+      const facets = detectFacets(declawed, guardedClause, sentenceCues);
       if (facets.length === 0) continue;
       const identifiers = explicitIdentifiersIn(declawed);
       // v0.15.1 runtime review (2026-10-06): a QUALIFIER clause — "including
@@ -2116,7 +2386,10 @@ export function extractFacetRequirements(query: string): FacetRequirement[] {
         && isQualifierClause(declawed)
         && facets.every((facet) => requirements.some((earlier) => earlier.facet === facet))
       ) continue;
-      const ownTerms = conceptTermsIn(declawed);
+      const termsClause = isCallOrderClause(guardedClause, sentenceCues)
+        ? maskOrderOfCallsCues(declawed)
+        : declawed;
+      const ownTerms = conceptTermsIn(termsClause);
       const ownQualifiedMembers = qualifiedMemberPairsIn(declawed);
       const inheritedFromLead = identifiers.length === 0;
       const subjectIdentifiers = inheritedFromLead ? leadIdentifiers : identifiers;
@@ -2128,7 +2401,7 @@ export function extractFacetRequirements(query: string): FacetRequirement[] {
       // folded into `subjectTerms` (lowercased, deduped) so a downstream
       // concept-anchored resolution can still use it even where the exact-
       // declaration tier (resolveFacetFocal) does not apply.
-      const weakCandidates = weakSubjectCandidatesIn(declawed, subjectIdentifiers);
+      const weakCandidates = weakSubjectCandidatesIn(termsClause, subjectIdentifiers);
       const subjectTermsWithWeak = weakCandidates.length === 0
         ? subjectTerms
         : [...new Set([...subjectTerms, ...weakCandidates.map((w) => w.toLowerCase())])];
@@ -2136,7 +2409,7 @@ export function extractFacetRequirements(query: string): FacetRequirement[] {
       // flow (see `nonPointTermsIn`) — derived from the same texts the terms
       // came from.
       const nonPointTerms = facets.includes("flow")
-        ? nonPointTermsIn(subjectTermsWithWeak, inheritedFromLead ? [declawed, leadTermsSource] : [declawed])
+        ? nonPointTermsIn(subjectTermsWithWeak, inheritedFromLead ? [termsClause, leadTermsSource] : [termsClause])
         : [];
       for (const facet of facets) {
         requirements.push({

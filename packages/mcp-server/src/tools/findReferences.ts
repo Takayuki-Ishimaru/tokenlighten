@@ -871,15 +871,23 @@ async function resolveReferencesCursorInput(
     lang: input.lang,
   });
   if (mismatch !== undefined) {
+    // 2026-10-19 (DESIGN-v0.14-plan.md §20.22, the sibling §20.21 left open):
+    // as the tree and find cursors' scope-change refusals, `next` serves what
+    // this call asked for: a new references request for its symbol, path and
+    // lang, without the cursor, with this call's budget, lane and task (the
+    // builder the stale restart below uses). `field` names the canonical input
+    // the caller sent, not the record's internal key.
+    const field = mismatch === "symbol" ? "queries" : mismatch === "path" ? "scope.path" : "scope.lang";
     return {
       pos: undefined,
       cursorInvalidNote: false,
       refusal: {
         ok: false,
         reason: "invalid-input",
-        field: mismatch,
-        detail: `search cursor continuation cannot change '${mismatch}'; re-issue the original request to change it`,
+        field,
+        detail: `a references cursor continuation cannot change '${field}'; next runs the symbol and scope this call asked for as a new request (resuming the cursor needs those of the call that returned it)`,
         retry: "call",
+        next: continuationNextCall(symbol, undefined, input),
       },
     };
   }

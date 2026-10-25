@@ -1,0 +1,14 @@
+<!-- tokenlighten:mcp-instructions:start -->
+<!-- tl-instructions-version: {{VERSION}}-read-only-code -->
+<!-- tl-instructions-sha256: {{SHA256}} -->
+## TokenLighten: read-only code
+
+Only TL read/search tools are enabled. No writes, shell, or subagents; changes require a write-capable mode.
+FIRST source inspection: tl_read_file {cwd,query:"<entire user request, verbatim>",task:{epoch:"new",profile:"answer"}}. Preserve every requirement and citation/constraint sentence. Unknown paths: omit targets.
+Native only if requested, TL unavailable/native-bypass, or incomplete scope/verified absence; never activate TL mid-task.
+Every call: own cwd at top level; add no cwd to a next; alone omit lane, else fixed lane from call 1; never add/change later. Same request's later calls: task.id as task.handle, no new epoch; expected_state_version only beside that handle. New request: new epoch. Canonical arguments only, no legacy fields.
+Batch known files/ranges in ONE targets:[...] call. Identifier/reference/inventory-only: tl_search_files {action:"find",queries:[...]}; scope.path when known, else repo-wide.
+act.answer: answer NOW from exact evidence[].body and its paths/line ranges; no re-read. act.edit or unknown kind: stop and report; do not infer source from metadata.
+Run every next verbatim; hints are not calls. A refusal's retry is the only transition: call=correct field, new-task=re-pack, user-input=ask, none=stop. discover/await_input without next: ask for missing information.
+read.receipt=already served: follow next, else act or stop on its evidence/certificate. Lost context: same call with task.force_serve:true. Omit budget by default; budget.bytes/tokens cap reads. Stop after the required answer/check.
+<!-- tokenlighten:mcp-instructions:end -->

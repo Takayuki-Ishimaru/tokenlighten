@@ -872,6 +872,7 @@ describe("tl clients engine — copilot-cli (config-file mechanism)", () => {
       type: "local",
       command: launcher.command,
       tools: ["*"],
+      deferTools: "never",
     });
     expect(doc.mcpServers.tokenlighten.env.TOKENLIGHTEN_MANAGED).toBe("1");
   });
@@ -893,6 +894,43 @@ describe("tl clients engine — copilot-cli (config-file mechanism)", () => {
     const forced = await registerClients(["copilot-cli"], { launcher, homeDir }, true);
     expect(forced.ok).toBe(true);
     expect(JSON.parse(readFileSync(configPath, "utf8")).mcpServers.tokenlighten.command).toBe(launcher.command);
+  });
+
+  it.each(["auto", "never"] as const)(
+    "preserves a user's explicit managed deferTools setting %s on re-registration",
+    async (deferTools) => {
+      const launcher = fixtureLauncher();
+      const homeDir = join(tmpdir(), `tl-copilot-defer-${randomUUID()}`);
+      mkdirSync(join(homeDir, ".copilot"), { recursive: true });
+      const configPath = copilotConfigFor(homeDir);
+
+      await registerClients(["copilot-cli"], { launcher, homeDir });
+      const config = JSON.parse(readFileSync(configPath, "utf8"));
+      config.mcpServers.tokenlighten.deferTools = deferTools;
+      writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+      const result = await registerClients(["copilot-cli"], { launcher, homeDir });
+      expect(result.ok).toBe(true);
+      expect(JSON.parse(readFileSync(configPath, "utf8")).mcpServers.tokenlighten.deferTools)
+        .toBe(deferTools);
+    },
+  );
+
+  it("defaults an existing managed Copilot entry without deferTools to never when updated", async () => {
+    const launcher = fixtureLauncher();
+    const homeDir = join(tmpdir(), `tl-copilot-defer-missing-${randomUUID()}`);
+    mkdirSync(join(homeDir, ".copilot"), { recursive: true });
+    const configPath = copilotConfigFor(homeDir);
+
+    await registerClients(["copilot-cli"], { launcher, homeDir });
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    delete config.mcpServers.tokenlighten.deferTools;
+    writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+    const result = await registerClients(["copilot-cli"], { launcher, homeDir });
+    expect(result.ok).toBe(true);
+    expect(JSON.parse(readFileSync(configPath, "utf8")).mcpServers.tokenlighten.deferTools)
+      .toBe("never");
   });
 
   it("unregisters a managed entry, leaving the file's other keys untouched", async () => {
@@ -935,6 +973,8 @@ describe("tl clients snippet", () => {
     expect(copilotCli.mechanism).toBe("config-file");
     expect(copilotCli.file).toBe(join("/home/example", ".copilot", "mcp-config.json"));
     expect(copilotCli.addCommand).toBeUndefined();
+    expect((copilotCli.json?.mcpServers as Record<string, { deferTools?: string }>)
+      ?.tokenlighten?.deferTools).toBe("never");
 
     const vscodeUser = buildClientSnippet("vscode-user", { launcher });
     expect(vscodeUser.mechanism).toBe("snippet");

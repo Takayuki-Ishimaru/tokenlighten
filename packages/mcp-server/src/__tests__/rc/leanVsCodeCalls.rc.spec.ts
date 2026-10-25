@@ -12,16 +12,15 @@
  */
 
 import { afterAll, afterEach, describe, expect, it } from "vitest";
-import { spawn, type ChildProcess } from "child_process";
-import { createRequire } from "node:module";
+import { type ChildProcess } from "child_process";
 import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { killServerGroup } from "../helpers/killServerGroup.js";
+import { TSX_NODE_ARGS } from "../helpers/tsxNode.js";
+import { pooledSpawn } from "../helpers/serverPool.js";
 
-const nodeRequire = createRequire(import.meta.url);
-const TSX_CLI = nodeRequire.resolve("tsx/cli");
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BIN_TS = path.resolve(HERE, "..", "..", "bin.ts");
 const SPAWN_TIMEOUT_MS = 90_000;
@@ -76,7 +75,7 @@ const tmpDirs: string[] = [];
 const spawnedServers: ServerHandle[] = [];
 
 function startServer(ws: string, env: Record<string, string>): ServerHandle {
-  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, "--liftoff-only", BIN_TS, ws], {
+  const child: ChildProcess = pooledSpawn(process.execPath, [...TSX_NODE_ARGS, BIN_TS, ws], {
     cwd: ws,
     stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32",
     env: { ...process.env, ...env },
@@ -247,11 +246,16 @@ describe("WP-V1 — leaned tl_read_file/tl_search_files continuations replay ide
     expect(serverB.alive()).toBe(true);
   }, SPAWN_TIMEOUT_MS);
 
-  it("a real server-authored decision.next omits cwd under vscode+TL_LEAN_CALLS, and keeps it for vscode without the flag and for a non-vscode client", async () => {
+  it("a real server-authored decision.next omits cwd under vscode+TL_LEAN_CALLS, and keeps it (unless it is a compact cursor under the root) for vscode without the flag and for a non-vscode client", async () => {
     async function nextArguments(env: Record<string, string>, clientName: string): Promise<Record<string, unknown> | undefined> {
       const ws = scopeWorkspace();
       tmpDirs.push(ws);
-      const server = startServer(ws, env);
+      // TL_EFF_AUTOFOLLOW=0 (default ON since 2026-10-19): this pack's one
+      // `next` re-issues the request, which the server now follows itself
+      // for a client without a byte ceiling ("claude-code" below), so the
+      // client never receives it. The subject here is how a server-authored
+      // `next` is spelled, so every arm keeps the pack's own.
+      const server = startServer(ws, { ...env, TL_EFF_AUTOFOLLOW: "0" });
       await server.initialize(clientName);
       const body = bodyOf(await server.rpc(2, "tools/call", {
         name: "tl_read_file",
@@ -285,17 +289,27 @@ describe("WP-V1 — leaned tl_read_file/tl_search_files continuations replay ide
     expect(leanedNextArgs, "expected a real decision.next; the fixture/query no longer leaves the pack open").toBeDefined();
     expect(leanedNextArgs!["cwd"]).toBeUndefined();
 
+    // A compact short-alias next (tlc_s1_…) under the configured root carries
+    // no cwd for ANY client or flag: ingress resolves an omitted cwd to that
+    // root (protocol/readCallContinuation.ts omitConfiguredRootCwdOnNext;
+    // readCallCwdlessNext.spec.ts). The vscode+flag gate therefore shows only
+    // on an expanded next, which the unit specs (leanContinuationForVsCode.spec.ts)
+    // pin; here an arm keeps its cwd unless its next is that cursor alone.
+    const keepsCwdOrIsCursorAlone = (args: Record<string, unknown> | undefined): boolean =>
+      args?.["cwd"] !== undefined
+      || (Object.keys(args ?? {}).join() === "cursor" && String(args?.["cursor"]).startsWith("tlc_s1_"));
+
     const vscodeNoFlagNextArgs = await nextArguments(
       { TOKENLIGHTEN_CLIENT_ID: "vscode", TL_LEGACY_INPUT: "refuse" },
       "Visual Studio Code",
     );
-    expect(vscodeNoFlagNextArgs?.["cwd"]).toBeDefined();
+    expect(keepsCwdOrIsCursorAlone(vscodeNoFlagNextArgs), JSON.stringify(vscodeNoFlagNextArgs)).toBe(true);
 
     const nonVscodeNextArgs = await nextArguments(
       { TL_LEAN_CALLS: "1", TL_LEGACY_INPUT: "refuse" },
       "claude-code",
     );
-    expect(nonVscodeNextArgs?.["cwd"]).toBeDefined();
+    expect(keepsCwdOrIsCursorAlone(nonVscodeNextArgs), JSON.stringify(nonVscodeNextArgs)).toBe(true);
   }, SPAWN_TIMEOUT_MS);
 });
 

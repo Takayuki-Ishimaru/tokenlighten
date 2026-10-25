@@ -228,6 +228,16 @@ export type FrontierEntry = {
    * is absent from the array, and no entry is writable that is not marked so.
    */
   writable: boolean;
+
+  /**
+   * A source-order fact about this write target, stated beside the target it
+   * concerns (2026-10-22, codex-copilot-proxy r18 T07). Today it is the Go
+   * returned-local review (`goReturnedLocalReview.ts`): which assignment the
+   * function's return reads, and which earlier call it does not read. Never a
+   * conclusion, a diagnosis or an instruction; absent when there is no such
+   * fact for this file. Additive under §1.4(a).
+   */
+  review?: string;
 };
 
 /**

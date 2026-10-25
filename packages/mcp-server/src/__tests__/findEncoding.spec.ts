@@ -330,7 +330,17 @@ describe("find inventory completeness — undecodable files must not read as an 
     // In scope, undecodable — never actually content-scanned.
     writeBytes(ws, "legacy.ps1", Buffer.from("const inventoryGapToken = 1;\r\n", "utf16le"));
 
-    const response = buildFindResponse({ query: "inventoryGapToken" }, ws);
+    // 2026-10-19: the byte cap is reached through all twenty files' snippets;
+    // TL_EFF_FIND_SNIPPET_CAP (default ON) keeps them for ten files only, under
+    // which this fixture fits. Pinned off so the truncated note branch is the
+    // one under test (findSnippetCap.spec.ts covers the cap).
+    process.env["TL_EFF_FIND_SNIPPET_CAP"] = "0";
+    let response: ReturnType<typeof buildFindResponse>;
+    try {
+      response = buildFindResponse({ query: "inventoryGapToken" }, ws);
+    } finally {
+      delete process.env["TL_EFF_FIND_SNIPPET_CAP"];
+    }
 
     expect(response.truncated).toBe(true);
     expect(response.inventory_complete).toBeDefined();

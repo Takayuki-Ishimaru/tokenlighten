@@ -55,6 +55,12 @@ import { startHostActivationWatch, type HostActivationWatch } from "../hostActiv
 // hard, known ceiling rather than "whatever fits in memory".
 const MAX_LEGACY_LINE_BYTES = 16 * 1024 * 1024;
 
+// Test harness only: the request a spec helper sends to reuse this process for
+// its next test (testing/sessionReset.ts). Recognized only when the process was
+// launched with TL_TEST_SESSION_RESET=1; otherwise it reaches the handler and
+// is answered "Method not found" like any other unknown method.
+const SESSION_RESET_METHOD = "tokenlighten/testReset";
+
 /**
  * A request that has been read and neither answered nor dropped yet — queued
  * behind an earlier one, or running. Only these can be cancelled.
@@ -85,6 +91,12 @@ export function runLegacyStdio(
   process.stderr.write(`[tl-mcp] workspace root: ${activeRoot}\n`);
 
   const rl = readline.createInterface({ input });
+  // Loaded now, while the launch directory exists: tsx cannot load a module
+  // it has not cached yet once the process's cwd is gone, and a pooled server's
+  // cwd is the previous test's workspace, deleted, until the reset moves it.
+  const sessionReset = process.env.TL_TEST_SESSION_RESET === "1"
+    ? import("../../testing/sessionReset.js")
+    : undefined;
 
   // Requests are fully serialized (a queued line always gets its turn, in
   // order) rather than fired unboundedly: trading away concurrency for a hard
@@ -183,6 +195,24 @@ export function runLegacyStdio(
     // consulted.
     if (req.method === "notifications/cancelled") {
       cancel(req.params);
+      return;
+    }
+
+    // Queued like any request, so every earlier one has been answered and
+    // nothing is in flight when the reset runs. The next `initialize` then
+    // starts the new session, host-activation watch included.
+    if (sessionReset !== undefined && req.method === SESSION_RESET_METHOD) {
+      const id = req.id ?? null;
+      queueTail = queueTail.then(async () => {
+        hostActivationWatch?.stop();
+        hostActivationWatch = undefined;
+        const { resetServerSessionForTests } = await sessionReset;
+        const result = resetServerSessionForTests(req.params);
+        output.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
+      }).catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        output.write(JSON.stringify(makeError(id, -32603, `session reset failed: ${message}`)) + "\n");
+      });
       return;
     }
 

@@ -46,7 +46,7 @@ import { fileURLToPath } from "node:url";
 import { bundleCli } from "../packages/vscode-extension/scripts/bundle-cli.mjs";
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-export const NODE_LTS_VERSION = "24.21.0";
+export const NODE_LTS_VERSION = "24.22.1";
 export const DEFAULT_NODE_CACHE = join(homedir(), ".cache", "tokenlighten-build", "node");
 export const DEFAULT_OUT_ROOT = join(ROOT, "dist-install");
 export const PLATFORMS = ["win-x64", "darwin-arm64", "darwin-x64", "linux-x64"];

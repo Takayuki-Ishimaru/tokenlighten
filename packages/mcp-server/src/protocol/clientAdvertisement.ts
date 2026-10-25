@@ -59,6 +59,11 @@
 // one more branch inside `baseServerInstructionsForClient`/
 // `toolDescriptionForClient`; callers (server.ts) do not change.
 //
+// Outside the validated VS Code and copilot-cli advertisements, default
+// behavior remains byte-identical. Copilot CLI drops nested descriptions;
+// TL_LEAN_CALLS=1 plus TL_MINIMAL_TOOLS=1 also opts it into the existing
+// minimal schema. Canonical dispatch and write safeguards remain authoritative.
+// The following original compatibility note describes the VS Code branch.
 // DEFAULT BEHAVIOR IS BYTE-IDENTICAL. Every function below returns
 // `undefined` (for a per-tool description override) or the pre-existing
 // default text (for the base instructions) for any client that does not
@@ -149,7 +154,7 @@ export const VSCODE_TOOL_DESCRIPTIONS: Readonly<Record<AdvertisedToolName, strin
   tl_edit_file:
     `TokenLighten file editor. Batch edits[] items in ONE call, each with path or handle plus search/replace (add precondition:"unique-match" for a single known value). create:true plus content makes a new file. Always pass top-level cwd so writes land in the right worktree.`,
   tl_search_files:
-    `TokenLighten code/text search. action:"find" with queries:[...] (up to 5 per call) locates identifiers or text; "references" finds call sites; "tree" inventories a directory. Set scope.path when the package/module is known.`,
+    `TokenLighten code/text search. action:"find" with queries:[...] (up to 10 per call) locates identifiers or text; "references" finds call sites; "tree" inventories a directory. Set scope.path when the package/module is known.`,
 };
 
 /**
@@ -186,12 +191,47 @@ export const VSCODE_MINIMAL_TOOL_DESCRIPTIONS: Readonly<Record<AdvertisedToolNam
   tl_edit_file:
     `Edit files in ONE call: edits:[{path|handle, search, replace}] (precondition:"unique-match" for one known value) or {path, create:true, content}; pass top-level cwd.`,
   tl_search_files:
-    `For source questions/tasks use tl_read_file {query} first. Identifier/reference/inventory-only: {action:"find",queries:[...]} (up to 5; scope.regex for patterns, scope.path narrows); a few small matching files come back whole, so no read follows. "references" = call sites; "tree" = inventory.`,
+    `For source questions/tasks use tl_read_file {query} first. Identifier/reference/inventory-only: {action:"find",queries:[...]} (up to 10; scope.regex for patterns, scope.path narrows); a few small matching files come back whole, so no read follows. "references" = call sites; "tree" = inventory.`,
 };
 
 /** tl_search_files under TL_MINIMAL_TOOLS while TL_FIND_SMALL_BODIES is off: the same text without the whole-file promise. */
 export const VSCODE_MINIMAL_SEARCH_DESCRIPTION_WITHOUT_BODIES =
-  `For source questions/tasks use tl_read_file {query} first. Identifier/reference/inventory-only: {action:"find",queries:[...]} (up to 5; scope.regex for patterns, scope.path narrows). "references" = call sites; "tree" = inventory.`;
+  `For source questions/tasks use tl_read_file {query} first. Identifier/reference/inventory-only: {action:"find",queries:[...]} (up to 10; scope.regex for patterns, scope.path narrows). "references" = call sites; "tree" = inventory.`;
+
+/** Copilot CLI 1.0.96 reports this exact initialize clientInfo.name. */
+export function isCopilotCliClient(clientId: string | undefined): boolean {
+  return clientId?.toLowerCase() === "copilot-cli";
+}
+
+/** Claude Code (2.1.x) reports this exact initialize clientInfo.name. */
+export function isClaudeCodeClient(clientId: string | undefined): boolean {
+  return clientId?.toLowerCase() === "claude-code";
+}
+
+/** Codex CLI (0.159.x, also its IDE and `exec` modes) reports this exact initialize clientInfo.name. */
+export function isCodexCliClient(clientId: string | undefined): boolean {
+  return clientId?.toLowerCase() === "codex-mcp-client";
+}
+
+/**
+ * The terminal coding agents of the 2026-10-16 simple paired bench
+ * (DESIGN-v0.14-plan §20.7-20.8): every model request carries every
+ * advertised schema (Claude Code registers TokenLighten with `alwaysLoad`, so
+ * its tools are never deferred), and their answers cite `file:line`. Codex
+ * CLI is the same kind of host (2026-10-17, §20.11): it lists the tools on
+ * every request, runs the tests itself, and its 2026-10-16 portable smoke
+ * (`portable-20261016-hosts-final`) passed in one TokenLighten call.
+ */
+export function isCliCodingHost(clientId: string | undefined): boolean {
+  return isClaudeCodeClient(clientId) || isCopilotCliClient(clientId) || isCodexCliClient(clientId);
+}
+
+/** CLI eagerly sends definitions, so put routing rules here and avoid duplication. */
+const COPILOT_CLI_TOOL_DESCRIPTIONS: Readonly<Record<AdvertisedToolName, string>> = {
+  tl_read_file: 'FIRST source lookup instead of grep/view: {cwd,query:"<entire user request, verbatim>",task:{epoch:"new"}}. Read-only: add task.profile:"answer". Locates and serves needed code; act.answer means answer now; otherwise run next verbatim.',
+  tl_edit_file: 'Batch edits[] with served handles; pass cwd. For one known replacement use precondition:"unique-match",allowPathFallback:false. Writes require --allow-write.',
+  tl_search_files: 'Source tasks: use tl_read_file first. Find/references/diff/tree via action and queries[]; scope.path narrows the search.',
+};
 
 /** True when `clientId` resolves (via clientProfile.ts's `resolveClientProfile`) to VS Code's built-in MCP client. */
 function isVsCodeClient(clientId: string | undefined): boolean {
@@ -229,6 +269,11 @@ export function toolDescriptionForClient(
   minimal = false,
   smallFindBodies = false,
 ): string | undefined {
+  if (isCopilotCliClient(clientId)) {
+    return Object.prototype.hasOwnProperty.call(COPILOT_CLI_TOOL_DESCRIPTIONS, toolName)
+      ? COPILOT_CLI_TOOL_DESCRIPTIONS[toolName as AdvertisedToolName]
+      : undefined;
+  }
   if (!isVsCodeClient(clientId)) return undefined;
   if (minimal && !smallFindBodies && toolName === "tl_search_files") return VSCODE_MINIMAL_SEARCH_DESCRIPTION_WITHOUT_BODIES;
   const table = minimal ? VSCODE_MINIMAL_TOOL_DESCRIPTIONS : VSCODE_TOOL_DESCRIPTIONS;

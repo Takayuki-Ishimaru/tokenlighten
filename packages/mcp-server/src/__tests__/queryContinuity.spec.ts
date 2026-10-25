@@ -169,7 +169,7 @@ describe("D1 — a `next` hint carries the whole task query", () => {
     expect(continuationQuery(messy)).toBe("fix the checksumContract validator and its tests");
   });
 
-  it("no next-hint builder embeds a sliced query any more", () => {
+  it("no next-hint prose embeds a sliced query any more", () => {
     // B-F2: resolve relative to THIS file, not `process.cwd()` — the canonical
     // form (matching the A-branch fix), so `npx vitest run` from the repo
     // root (not just from packages/mcp-server) can find the source file.
@@ -180,27 +180,27 @@ describe("D1 — a `next` hint carries the whole task query", () => {
     // The exact shape of the defect: a `query="..."` / `query=<...>` template
     // interpolating a slice of the task query.
     expect(source).not.toMatch(/query=[^\n]*\$\{query\.slice\(/u);
-    // Every query-carrying ToolCall producer uses the lossless normalizer,
-    // including the v0.14 rootSuggestion re-scope continuation.
-    expect(source.match(/query:\s*continuationQuery\(query\)/gu)?.length ?? 0).toBe(5);
   });
 
-  it("a missing-roles pack emits an EXECUTABLE hint that replays the whole query", async () => {
+  it("a missing-roles pack preserves the exact structured query in its EXECUTABLE hint", async () => {
     const ws = makeWorkspace("d1-missing-roles");
+    const originalQuery = `${ROLE_GAP_QUERY}\nKeep the \"quoted-tail\" exactly\t after the sentence `;
     const result = await buildTaskPack(
-      { query: ROLE_GAP_QUERY, surfaceRoles: ["ui"] } as never,
+      { query: originalQuery, surfaceRoles: ["ui"] } as never,
       ws,
     );
     expect(result.coverage_reason).toBe("missing-roles");
     expect(result.next).toBeDefined();
     expect(result.next!.tool).toBe("tl_read_file");
     const replayed = (result.next!.arguments as { query?: string }).query;
-    expect(replayed).toBe(continuationQuery(ROLE_GAP_QUERY));
-    // The intent-bearing tail is the whole point: a 60/80-char slice lost it.
+    expect(replayed).toBe(originalQuery);
+    // Structured RPC arguments retain the original quoting and whitespace;
+    // unlike a prose `query="..."` encoding, they need no normalization.
     expect(replayed!.length).toBeGreaterThan(80);
     expect(replayed).toContain("release documentation notes");
+    expect(replayed).toContain("\nKeep the \"quoted-tail\" exactly\t after the sentence ");
     // Same task, not a different one: the replay's epoch still overlaps.
-    expect(tokenizeForEpoch(replayed!).some((t) => tokenizeForEpoch(ROLE_GAP_QUERY).includes(t))).toBe(true);
+    expect(tokenizeForEpoch(replayed!).some((t) => tokenizeForEpoch(originalQuery).includes(t))).toBe(true);
   });
 
   it("a qref resolves server-side to the FULL query, so a qref replay is lossless too", () => {

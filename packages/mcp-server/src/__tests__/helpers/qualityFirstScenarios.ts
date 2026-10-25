@@ -69,14 +69,16 @@
  * ---------------------------------------------------------------------------
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
-import { createRequire } from "node:module";
+import { type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { waitForExit } from "./rmDirWithRetry.js";
+import { isPooledChild, pooledSpawn } from "./serverPool.js";
+import { TSX_NODE_ARGS } from "./tsxNode.js";
+import { expandEvidencePathGroups } from "../../protocol/evidencePathGroups.js";
 
 // ---------------------------------------------------------------------------
 // Config axes (plan §2.2 / brief-common "Builds available for A/B")
@@ -179,7 +181,7 @@ function spawnJsonRpcServer(command: string, args: readonly string[], cwd: strin
   // `process.kill(-pid, ...)` then reaches both in one signal. Verified by
   // hand (spawn `tl mcp start --stdio`, SIGKILL the wrapper's pid alone: the
   // grandchild `bin.js` can outlive it) before relying on this.
-  const child: ChildProcess = spawn(command, args, {
+  const child: ChildProcess = pooledSpawn(command, args, {
     cwd,
     stdio: ["pipe", "pipe", "pipe"],
     env,
@@ -253,7 +255,12 @@ function spawnJsonRpcServer(command: string, args: readonly string[], cwd: strin
       if (typeof text !== "string") {
         throw new Error(`tool ${name} returned no text content: ${JSON.stringify(res).slice(0, 2000)}`);
       }
-      return { body: JSON.parse(text), textBytes: Buffer.byteLength(text, "utf8") };
+      // 2026-10-23 (codex-copilot-proxy wire compaction): a grouped task pack (TL_EFF_EVIDENCE_PATH_GROUPS, default OFF) is
+      // read back into whole rows, so the scenarios that match rows by path see the same rows the flag does not group;
+      // `textBytes` is what shipped. The call is the identity for every other reply.
+      const parsed = JSON.parse(text);
+      const whole = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? expandEvidencePathGroups(parsed) : parsed;
+      return { body: whole, textBytes: Buffer.byteLength(text, "utf8") };
     },
     async listTools() {
       const res = await rpc("tools/list", {});
@@ -267,6 +274,12 @@ function spawnJsonRpcServer(command: string, args: readonly string[], cwd: strin
       return { tools, textBytes: Buffer.byteLength(JSON.stringify(tools), "utf8") };
     },
     async kill(): Promise<void> {
+      if (isPooledChild(child)) {
+        // A pooled lease (helpers/serverPool.ts): ending it hands the process back.
+        child.kill("SIGKILL");
+        await waitForExit(child);
+        return;
+      }
       try {
         if (process.platform === "win32") {
           // /T = kill the whole tree, /F = force. Best-effort: a server that
@@ -324,7 +337,6 @@ export function withTracing(server: ServerHandle, sink: TraceEntry[]): ServerHan
   };
 }
 
-const nodeRequire = createRequire(import.meta.url);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 /** `__tests__/helpers/` -> `__tests__/` -> `src/` -> `bin.ts`. */
 const DEV_BIN_TS = path.resolve(HERE, "..", "..", "bin.ts");
@@ -340,8 +352,7 @@ export interface DevServerOptions {
 /** Starts the DEV tree's server directly (`tsx bin.ts <ws> ...`) — no CLI
  *  wrapper, no process nesting, matching the existing spec convention. */
 export function startDevServer(workspace: string, config: ConfigName, opts: DevServerOptions = {}): ServerHandle {
-  const tsxCli = nodeRequire.resolve("tsx/cli");
-  const args = [tsxCli, "--liftoff-only", DEV_BIN_TS, workspace, "--tool-surface", opts.toolSurface ?? "code"];
+  const args = [...TSX_NODE_ARGS, DEV_BIN_TS, workspace, "--tool-surface", opts.toolSurface ?? "code"];
   if (opts.allowWrite) args.push("--allow-write");
   if (opts.extraArgs) args.push(...opts.extraArgs);
   return spawnJsonRpcServer(process.execPath, args, workspace, { ...devSpawnEnv(config), ...(opts.extraEnv ?? {}) });

@@ -1,0 +1,115 @@
+{
+  "note": "Unmodified upstream MIT license and aggregate third-party notices. The aggregate includes optional execution-provider/build components; its presence does not assert those components are included in the CPU/WASM bundle. Common JavaScript packages receive the MIT license; native and Web runtimes also receive the aggregate notices.",
+  "revisions": [
+    {
+      "ref": "v1.30.0",
+      "sha": "f2c39fe2f838cf35ce7da92824f5a5e3ee6e88a7",
+      "packages": [
+        "onnxruntime-node@1.30.0",
+        "onnxruntime-common@1.30.0"
+      ],
+      "binary": true,
+      "files": [
+        {
+          "upstreamPath": "LICENSE",
+          "url": "https://raw.githubusercontent.com/microsoft/onnxruntime/f2c39fe2f838cf35ce7da92824f5a5e3ee6e88a7/LICENSE",
+          "bytes": 1073,
+          "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
+        },
+        {
+          "upstreamPath": "ThirdPartyNotices.txt",
+          "url": "https://raw.githubusercontent.com/microsoft/onnxruntime/f2c39fe2f838cf35ce7da92824f5a5e3ee6e88a7/ThirdPartyNotices.txt",
+          "bytes": 338088,
+          "sha256": "143764b952fdb1a7c69ce653bfba74a7744d6a8a573bfb73e235fba356c83de3"
+        },
+        {
+          "upstreamPath": "VERSION_NUMBER",
+          "url": "https://raw.githubusercontent.com/microsoft/onnxruntime/f2c39fe2f838cf35ce7da92824f5a5e3ee6e88a7/VERSION_NUMBER",
+          "bytes": 7,
+          "sha256": "59ed8e11070a3db06654dc5a21ddccd8ca160b8040544b800ff19253ddefb978",
+          "version": "1.30.0"
+        },
+        {
+          "upstreamPath": "js/node/package.json",
+          "url": "https://raw.githubusercontent.com/microsoft/onnxruntime/f2c39fe2f838cf35ce7da92824f5a5e3ee6e88a7/js/node/package.json",
+          "bytes": 1601,
+          "sha256": "0b8e0299db98e9b6d91272e696cc6f5579eefa146dcc9133d79b1c95b7a42569",
+          "packageVersion": "1.30.0"
+        },
+        {
+          "upstreamPath": "js/common/package.json",
+          "url": "https://raw.githubusercontent.com/microsoft/onnxruntime/f2c39fe2f838cf35ce7da92824f5a5e3ee6e88a7/js/common/package.json",
+          "bytes": 977,
+          "sha256": "4266741a80346e25820ccc494fbffb95e2f652b6dfb5585025be44df3b0d6722",
+          "packageVersion": "1.30.0"
+        }
+      ]
+    },
+    {
+      "ref": "8d85527a0",
+      "sha": "8d85527a010e294a26b274749f74294b2a32cec5",
+      "packages": [
+        "onnxruntime-web@1.31.0-dev.20260914-8d85527a0"
+      ],
+      "binary": true,
+      "files": [
+        {
+          "upstreamPath": "LICENSE",
+          "url": "https://raw.githubusercontent.com/microsoft/onnxruntime/8d85527a010e294a26b274749f74294b2a32cec5/LICENSE",
+          "bytes": 1073,
+          "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
+        },
+        {
+          "upstreamPath": "ThirdPartyNotices.txt",
+          "url": "https://raw.githubusercontent.com/microsoft/onnxruntime/8d85527a010e294a26b274749f74294b2a32cec5/ThirdPartyNotices.txt",
+          "bytes": 338088,
+          "sha256": "143764b952fdb1a7c69ce653bfba74a7744d6a8a573bfb73e235fba356c83de3"
+        },
+        {
+          "upstreamPath": "VERSION_NUMBER",
+          "url": "https://raw.githubusercontent.com/microsoft/onnxruntime/8d85527a010e294a26b274749f74294b2a32cec5/VERSION_NUMBER",
+          "bytes": 7,
+          "sha256": "b4808e6e33fef47c318b7a15f93484ea3656ce673ddde651b5cc4375087f3739",
+          "version": "1.31.0"
+        },
+        {
+          "upstreamPath": "js/web/package.json",
+          "url": "https://raw.githubusercontent.com/microsoft/onnxruntime/8d85527a010e294a26b274749f74294b2a32cec5/js/web/package.json",
+          "bytes": 4601,
+          "sha256": "f8be64a92389cd8850c6cd9997d37c938934fab18f945c278b559aef5dab308a",
+          "packageVersion": "1.31.0"
+        }
+      ]
+    },
+    {
+      "ref": "2a43ec07e",
+      "sha": "2a43ec07e67df9263c7c56c15da76cc7f74d7b32",
+      "packages": [
+        "onnxruntime-common@1.31.0-dev.20260911-2a43ec07e"
+      ],
+      "binary": false,
+      "files": [
+        {
+          "upstreamPath": "LICENSE",
+          "url": "https://raw.githubusercontent.com/microsoft/onnxruntime/2a43ec07e67df9263c7c56c15da76cc7f74d7b32/LICENSE",
+          "bytes": 1073,
+          "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
+        },
+        {
+          "upstreamPath": "VERSION_NUMBER",
+          "url": "https://raw.githubusercontent.com/microsoft/onnxruntime/2a43ec07e67df9263c7c56c15da76cc7f74d7b32/VERSION_NUMBER",
+          "bytes": 7,
+          "sha256": "b4808e6e33fef47c318b7a15f93484ea3656ce673ddde651b5cc4375087f3739",
+          "version": "1.31.0"
+        },
+        {
+          "upstreamPath": "js/common/package.json",
+          "url": "https://raw.githubusercontent.com/microsoft/onnxruntime/2a43ec07e67df9263c7c56c15da76cc7f74d7b32/js/common/package.json",
+          "bytes": 977,
+          "sha256": "93fe51a415d9ee6e2a46c13566df5308ecbc12cd4d2a9d658a57bf643d2cf601",
+          "packageVersion": "1.31.0"
+        }
+      ]
+    }
+  ]
+}

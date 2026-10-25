@@ -17,16 +17,15 @@
 // emitted.
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { spawn, type ChildProcess } from "child_process";
-import { createRequire } from "node:module";
+import { type ChildProcess } from "child_process";
 import { fileURLToPath } from "node:url";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { killServerGroup } from "./helpers/killServerGroup.js";
+import { TSX_NODE_ARGS } from "./helpers/tsxNode.js";
+import { pooledSpawn } from "./helpers/serverPool.js";
 
-const nodeRequire = createRequire(import.meta.url);
-const TSX_CLI = nodeRequire.resolve("tsx/cli");
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BIN_TS = path.resolve(HERE, "..", "bin.ts");
 const HOME = process.env["HOME"] ?? process.env["USERPROFILE"] ?? os.homedir();
@@ -38,9 +37,9 @@ interface ServerHandle {
 }
 
 function startServer(opts: { cwd: string; args: string[]; env?: Record<string, string> }): ServerHandle {
-  const child: ChildProcess = spawn(
+  const child: ChildProcess = pooledSpawn(
     process.execPath,
-    [TSX_CLI, "--liftoff-only", BIN_TS, ...opts.args],
+    [...TSX_NODE_ARGS, BIN_TS, ...opts.args],
     { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", env: { ...process.env, ...(opts.env ?? {}) } },
   );
   let stdoutBuf = "";

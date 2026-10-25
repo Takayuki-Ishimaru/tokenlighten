@@ -15,8 +15,17 @@ export interface CanonicalDialectRescueDependencies {
     canonical: string,
     schema: Record<string, SchemaNode>,
     value: Record<string, unknown>,
-  ) => readonly unknown[];
+  ) => readonly { readonly field: string }[];
   readonly asObject: (value: unknown) => Record<string, unknown> | undefined;
+  /**
+   * Legacy member names, per object field, that the server resolves itself
+   * once the value is an object: normalized where a policy accepts them,
+   * refused naming them otherwise (`task.taskProfile`). A string whose parsed
+   * object's only unknown members are these is still rescued, so it meets the
+   * same treatment as a native object rather than failing as "must be an
+   * object".
+   */
+  readonly legacyMembers?: Readonly<Record<string, readonly string[]>>;
 }
 
 function jsonParseIfStructureLike(value: unknown): { parsed: unknown } | undefined {
@@ -45,13 +54,18 @@ function valuePassesSchema(
   deps: CanonicalDialectRescueDependencies,
 ): boolean {
   const schema = deps.advertisedPropertiesFor(canonical)[field];
+  const legacy = deps.legacyMembers?.[field] ?? [];
   return schema !== undefined
-    && deps.findUnknownProperties(canonical, { [field]: schema }, { [field]: value }).length === 0;
+    && deps.findUnknownProperties(canonical, { [field]: schema }, { [field]: value })
+      .every((violation) => legacy.some((name) => violation.field === `${field}.${name}`));
 }
 
 /**
- * Rescue only JSON-stringified canonical structures. Invalid or legacy-shaped
- * values remain untouched so normal request validation owns their refusal.
+ * Rescue only JSON-stringified canonical structures. Invalid values remain
+ * untouched so normal request validation owns their refusal; a value whose
+ * only unknown members are `legacyMembers` is rescued, because the validation
+ * a native object gets owns those (a string would be refused as "must be an
+ * object", which names neither the member nor its canonical spelling).
  */
 export function rescueStringifiedCanonicalFields(
   canonical: string,

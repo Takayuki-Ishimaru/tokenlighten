@@ -1,6 +1,7 @@
 import * as https from "node:https";
 import * as vscode from "vscode";
 import { getDisplayLanguage } from "./statusBar.js";
+import { installReleaseVsix } from "./extensionUpdater.js";
 
 const RELEASES_API =
   "https://api.github.com/repos/Takayuki-Ishimaru/tokenlighten/releases?per_page=10";
@@ -119,10 +120,15 @@ function trustedGitHubReleaseUrl(
 export function selectReleaseTarget(
   release: GitHubRelease,
 ): ReleaseTarget | undefined {
+  const version = release.tagName.replace(/^v/i, "");
+  const expectedName = `tokenlighten-vscode-extension-${version}.vsix`;
   for (const asset of release.assets) {
-    if (!asset.name.toLowerCase().endsWith(".vsix")) continue;
+    if (asset.name !== expectedName) continue;
     const url = trustedGitHubReleaseUrl(asset.browserDownloadUrl, "download");
-    if (url) return { url, directVsix: true };
+    if (url && new URL(url).pathname ===
+      `/Takayuki-Ishimaru/tokenlighten/releases/download/${release.tagName}/${expectedName}`) {
+      return { url, directVsix: true };
+    }
   }
 
   const releaseUrl = trustedGitHubReleaseUrl(release.htmlUrl, "release");
@@ -241,35 +247,138 @@ function currentExtensionVersion(context: vscode.ExtensionContext): string {
   return typeof packageJson["version"] === "string" ? packageJson["version"] : "";
 }
 
-export async function checkForExtensionUpdate(
+// Keep overlapping startup, timer and settings events to a single check per host.
+const pendingChecks = new WeakMap<vscode.ExtensionContext, Promise<void>>();
+const installedVersions = new WeakMap<vscode.ExtensionContext, string>();
+export const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1_000;
+export type ReleaseInstaller = (url: string, signal: AbortSignal) => Promise<void>;
+
+function updateChecksEnabled(): boolean {
+  return vscode.workspace.getConfiguration("tokenlighten")
+    .get<boolean>("updateCheck.enabled", true);
+}
+
+function automaticUpdatesEnabled(): boolean {
+  return vscode.workspace.getConfiguration("tokenlighten")
+    .get<boolean>("autoUpdate.enabled", true);
+}
+
+async function performUpdateCheck(
   context: vscode.ExtensionContext,
-  fetcher: LatestReleaseFetcher = fetchLatestRelease,
+  fetcher: LatestReleaseFetcher,
+  installer: ReleaseInstaller,
+  signal: AbortSignal,
 ): Promise<void> {
   try {
-    const enabled = vscode.workspace
-      .getConfiguration("tokenlighten")
-      .get<boolean>("updateCheck.enabled", true);
-    if (!enabled) return;
-
-    const current = currentExtensionVersion(context);
+    if (signal.aborted || !updateChecksEnabled()) return;
+    const current = installedVersions.get(context) ?? currentExtensionVersion(context);
     const release = await fetcher();
+    if (signal.aborted || !updateChecksEnabled()) return;
     if (!release || !isVersionNewer(release.tagName, current)) return;
 
     const target = selectReleaseTarget(release);
     if (!target) return;
-
     const japanese = getDisplayLanguage() === "ja";
     const action = target.directVsix
       ? japanese ? "GitHubからVSIXをダウンロード" : "Download VSIX from GitHub"
       : japanese ? "GitHubリリースを開く" : "Open GitHub release";
+
+    if (target.directVsix && automaticUpdatesEnabled()) {
+      try {
+        await installer(target.url, signal);
+        installedVersions.set(context, release.tagName);
+      } catch {
+        if (signal.aborted || !updateChecksEnabled() || !automaticUpdatesEnabled()) return;
+        const failure = japanese
+          ? `TokenLighten ${release.tagName} の自動更新に失敗しました。後で再試行します。`
+          : `TokenLighten ${release.tagName} could not be updated automatically. It will retry later.`;
+        void vscode.window.showWarningMessage(failure, action).then(async selected => {
+          if (selected === action && !signal.aborted && updateChecksEnabled()) {
+            await vscode.env.openExternal(vscode.Uri.parse(target.url, true));
+          }
+        }).then(undefined, () => {});
+        return;
+      }
+      if (signal.aborted) return;
+      const reload = japanese ? "ウィンドウを再読み込み" : "Reload Window";
+      const updated = japanese
+        ? `TokenLighten ${release.tagName} をインストールしました。必要に応じてウィンドウを再読み込みしてください。`
+        : `TokenLighten ${release.tagName} has been installed. Reload the window if needed to use the update.`;
+      void vscode.window.showInformationMessage(updated, reload).then(async selected => {
+        if (selected === reload && !signal.aborted) {
+          await vscode.commands.executeCommand("workbench.action.reloadWindow");
+        }
+      }).then(undefined, () => {});
+      return;
+    }
+
     const message = japanese
       ? `TokenLighten ${release.tagName} が利用できます（現在: ${current}）。`
       : `TokenLighten ${release.tagName} is available (installed: ${current}).`;
-
-    const selected = await vscode.window.showInformationMessage(message, action);
-    if (selected !== action) return;
-    await vscode.env.openExternal(vscode.Uri.parse(target.url, true));
+    void vscode.window.showInformationMessage(message, action).then(async selected => {
+      if (selected !== action || signal.aborted || !updateChecksEnabled()) return;
+      await vscode.env.openExternal(vscode.Uri.parse(target.url, true));
+    }).then(undefined, () => {});
   } catch {
     // Update checks are best-effort and must never block extension activation.
   }
+}
+
+export function checkForExtensionUpdate(
+  context: vscode.ExtensionContext,
+  fetcher: LatestReleaseFetcher = fetchLatestRelease,
+  installer: ReleaseInstaller = installReleaseVsix,
+  signal: AbortSignal = new AbortController().signal,
+): Promise<void> {
+  const pending = pendingChecks.get(context);
+  if (pending) return pending;
+  const check = performUpdateCheck(context, fetcher, installer, signal)
+    .finally(() => pendingChecks.delete(context));
+  pendingChecks.set(context, check);
+  return check;
+}
+
+export function registerExtensionUpdateChecks(
+  context: vscode.ExtensionContext,
+  fetcher: LatestReleaseFetcher = fetchLatestRelease,
+  installer: ReleaseInstaller = installReleaseVsix,
+): void {
+  let disposed = false;
+  let inFlight: Promise<void> | undefined;
+  let controller: AbortController | undefined;
+  let restartRequested = false;
+  const run = (): void => {
+    if (disposed) return;
+    if (inFlight) {
+      restartRequested = true;
+      return;
+    }
+    controller = new AbortController();
+    inFlight = checkForExtensionUpdate(context, fetcher, installer, controller.signal)
+      .finally(() => {
+        inFlight = undefined;
+        controller = undefined;
+        if (restartRequested) {
+          restartRequested = false;
+          run();
+        }
+      });
+  };
+  const timer = setInterval(run, UPDATE_INTERVAL_MS);
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (!event.affectsConfiguration("tokenlighten.autoUpdate.enabled")
+        && !event.affectsConfiguration("tokenlighten.updateCheck.enabled")) return;
+      controller?.abort();
+      run();
+    }),
+    {
+      dispose: () => {
+        disposed = true;
+        controller?.abort();
+        clearInterval(timer);
+      },
+    },
+  );
+  run();
 }

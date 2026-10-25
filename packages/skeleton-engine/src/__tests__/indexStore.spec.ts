@@ -10,6 +10,7 @@ import {
   invalidateCachedWorkspaceFiles,
   MAX_CACHE_MANIFEST_BYTES,
   resetManifestTooLargeMemo,
+  resetManifestMemoForTest,
 } from "../indexStore.js";
 import type { SourceIndexManifestV1 } from "../indexStore.js";
 import { hashContent } from "../merkle.js";
@@ -223,6 +224,55 @@ describe("writeManifest — item D: skip the doomed full stringify for an oversi
 // ---------------------------------------------------------------------------
 
 describe("loadOrBuildSourceIndex", () => {
+  it.each([false, true])("keeps nested same-name symbols bound to their own chunks (sliced=%s)", async (sliced) => {
+    const padding = sliced ? `  // ${"padding".repeat(600)}\n` : "";
+    const raw = `export function foo() {\n${padding}  function foo() {\n    return 'inner';\n  }\n  return foo();\n}\n`;
+    await fs.writeFile(join(tmpDir, "nested.ts"), raw, "utf8");
+    const { manifest } = await loadOrBuildSourceIndex(tmpDir, { noCache: true, ignoreHash: "fixture" });
+    const file = manifest.files["nested.ts"]!;
+    const symbols = file.symbols.filter(symbol => symbol.name === "foo");
+    expect(symbols).toHaveLength(2);
+    for (const symbol of symbols) {
+      const chunks = symbol.chunkIds.map(id => file.chunks.find(chunk => chunk.id === id)!);
+      expect(chunks.length).toBeGreaterThan(0);
+      expect(chunks.every(Boolean)).toBe(true);
+      if (sliced && symbol.lineStart === 1) expect(chunks.length).toBeGreaterThan(1);
+      const body = chunks.map(chunk => Buffer.from(raw).subarray(chunk.byteStart, chunk.byteEnd).toString("utf8")).join("");
+      const expected = raw.split("\n").slice(symbol.lineStart - 1, symbol.lineEnd).join("\n") + "\n";
+      expect(body).toBe(expected);
+    }
+  });
+
+  it("rebuilds se3 caches whose same-name symbols share unrelated chunk ids", async () => {
+    const raw = "function foo() {\n  function foo() { return 1; }\n  return foo();\n}\n";
+    await fs.writeFile(join(tmpDir, "nested.ts"), raw, "utf8");
+    const options = { noCache: false, ignoreHash: "fixture" };
+    const first = await loadOrBuildSourceIndex(tmpDir, options);
+    first.manifest.engineVersion = first.manifest.engineVersion.split("+")[0] + "+se3";
+    const stale = first.manifest.files["nested.ts"]!;
+    for (const symbol of stale.symbols) symbol.chunkIds = stale.chunks.map(chunk => chunk.id);
+    await writeManifest(tmpDir, first.manifest);
+    resetManifestMemoForTest();
+    const rebuilt = await loadOrBuildSourceIndex(tmpDir, options);
+    expect(rebuilt.reparsed).toBe(1);
+    expect(rebuilt.reused).toBe(0);
+    expect(rebuilt.cacheRebuildReasons).toContain("engine-version");
+    expect(rebuilt.manifest.files["nested.ts"]!.symbols.map(symbol => symbol.chunkIds.length)).toEqual([1, 1]);
+  });
+
+  it("reuses persisted symbols on their correct lines in a CR-only file", async () => {
+    const raw = "// header\r\r\r\r\r\rexport function marker() { return 1; }\r";
+    await fs.writeFile(join(tmpDir, "cr.ts"), raw, "utf8");
+    const options = { noCache: false, ignoreHash: "fixture" };
+    await loadOrBuildSourceIndex(tmpDir, options);
+    resetManifestMemoForTest();
+    const reused = await loadOrBuildSourceIndex(tmpDir, options);
+    expect(reused.manifest.files["cr.ts"]!.symbols[0]!.lineStart).toBe(7);
+    expect(reused.reused).toBe(1);
+    expect(reused.reparsed).toBe(0);
+    expect(reused.cacheRebuildReasons).toEqual([]);
+  });
+
   it("builds a manifest from a minimal fixture", async () => {
     // Write two small TypeScript files.
     const srcDir = join(tmpDir, "src");
@@ -265,6 +315,29 @@ describe("loadOrBuildSourceIndex", () => {
 
     expect(result2.reused).toBeGreaterThan(0);
     expect(result2.reparsed).toBe(0);
+  });
+
+  it("rebuilds cached chunks from the old extraction revision even when the source is unchanged", async () => {
+    const raw = "// é\nexport function foo() {\n  return target;\n}\n";
+    await fs.writeFile(join(tmpDir, "unicode.ts"), raw, "utf8");
+    const options = { noCache: false, commit: "same-commit", ignoreHash: "same-ignore" };
+    const first = await loadOrBuildSourceIndex(tmpDir, options);
+    const oldVersion = first.manifest.engineVersion.split("+")[0] + "+se2";
+    first.manifest.engineVersion = oldVersion;
+    const stale = first.manifest.files["unicode.ts"]!.chunks[0]!;
+    stale.byteEnd = Buffer.byteLength(raw) + 1;
+    stale.identifiers = ["foo", "return", "target", "unction"];
+    await writeManifest(tmpDir, first.manifest);
+    resetManifestMemoForTest();
+    const rebuilt = await loadOrBuildSourceIndex(tmpDir, options);
+    expect(rebuilt.reparsed).toBe(1);
+    expect(rebuilt.reused).toBe(0);
+    expect(rebuilt.cacheRebuildReasons).toContain("engine-version");
+    expect(rebuilt.manifest.engineVersion).not.toBe(oldVersion);
+    const chunk = rebuilt.manifest.files["unicode.ts"]!.chunks[0]!;
+    expect(chunk.byteEnd).toBe(Buffer.byteLength(raw));
+    expect(chunk.identifiers).toContain("function");
+    expect(chunk.identifiers).not.toContain("unction");
   });
 
   it("noCache=true always reparses", async () => {

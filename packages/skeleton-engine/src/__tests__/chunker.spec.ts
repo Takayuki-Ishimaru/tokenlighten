@@ -89,4 +89,49 @@ describe("extractChunks", () => {
     const ids = chunks[0]!.identifiers;
     expect([...ids].sort()).toEqual(ids);
   });
+
+  it.each(["\n", "\r\n", "\r"])("keeps exact UTF-8 symbol bounds with %j line endings and no trailing newline", newline => {
+    const prefix = `// 日本語😀${newline}`;
+    const body = `function foo() {${newline}  return target;${newline}}`;
+    const raw = prefix + body;
+    const [chunk] = extractChunks({ path: "unicode.ts", raw, language: "typescript", symbols: [makeSymbol("foo", 2, 4, "function foo()")] });
+    expect(chunk!.byteStart).toBe(Buffer.byteLength(prefix));
+    expect(chunk!.byteEnd).toBe(Buffer.byteLength(raw));
+    expect(chunk!.identifiers).toEqual(["foo", "function", "return", "target"]);
+  });
+
+  it("does not invent a byte or an extra chunk at an exact text slice boundary", () => {
+    const raw = "x".repeat(1600);
+    const chunks = extractChunks({ path: "exact.txt", raw, language: "text", symbols: [] });
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]!.byteEnd).toBe(1600);
+  });
+
+  it("extracts identifiers from the matching byte slice of Unicode text", () => {
+    const raw = "é".repeat(800) + " target";
+    const chunks = extractChunks({ path: "unicode.txt", raw, language: "text", symbols: [] });
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]!.identifiers).toEqual([]);
+    expect(chunks[1]!.identifiers).toEqual(["target"]);
+    expect(chunks[1]!.byteEnd).toBe(Buffer.byteLength(raw));
+  });
+
+  it("includes a partially covered final line in text slice ranges", () => {
+    const raw = "x".repeat(1000) + "\r\n" + "y".repeat(1000);
+    const chunks = extractChunks({ path: "lines.txt", raw, language: "text", symbols: [] });
+    expect(chunks[0]).toMatchObject({ lineStart: 1, lineEnd: 2 });
+    expect(chunks[1]).toMatchObject({ lineStart: 2, lineEnd: 2, byteEnd: Buffer.byteLength(raw) });
+  });
+
+  it("keeps large symbol slices aligned after Unicode prefixes", () => {
+    const prefix = "é".repeat(1000) + "\n";
+    const raw = prefix + "function big() {\n" + "é".repeat(900) + "; return target;\n}";
+    const chunks = extractChunks({ path: "large.ts", raw, language: "typescript", symbols: [makeSymbol("big", 2, 4, "function big()")] });
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]!.byteStart).toBe(Buffer.byteLength(prefix));
+    expect(chunks[0]!.identifiers).toEqual(["big", "function"]);
+    expect(chunks[0]).toMatchObject({ lineStart: 2, lineEnd: 3 });
+    expect(chunks[1]!.identifiers).toEqual(["return", "target"]);
+    expect(chunks[1]!.byteEnd).toBe(Buffer.byteLength(raw));
+  });
 });

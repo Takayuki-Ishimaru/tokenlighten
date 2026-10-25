@@ -38,6 +38,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
@@ -81,6 +82,15 @@ export interface SearchSymbolsInput {
   path?: string;
   limit?: number;
   includeScores?: boolean;
+  /**
+   * Records of the RANKED list to skip before serving this page (0-based).
+   * `total` stays the true pre-cap count of the whole ranking, so a caller
+   * paging with `offset` sees a stable prefix of the same order and can walk
+   * to exhaustion; `truncated` then means "records remain past this page".
+   */
+  offset?: number;
+  /** Internal only: use the filtered, complete ranked universe for public cursor paging. */
+  cursorPage?: true;
 }
 
 export type SymbolKind = "function" | "class" | "method" | "const" | "type";
@@ -159,6 +169,13 @@ export interface SearchSymbolsResult {
   total: number;
   /** PI-06 beta.2 — see `SymbolCoverage`'s doc comment for the emission gate. */
   symbol_coverage?: SymbolCoverage;
+}
+
+const resultSourceFingerprints = new WeakMap<object, string>();
+
+/** Internal index/ranking binding for cursor state; never serialized onto the wire. */
+export function sourceFingerprintForSymbolResult(result: SearchSymbolsResult): string | undefined {
+  return resultSourceFingerprints.get(result);
 }
 
 // ---------------------------------------------------------------------------
@@ -480,18 +497,52 @@ export async function searchSymbols(
   // 4) Build search context and call ranker.
   const ctx: SearchContext = { manifest, fileScores, recentFiles };
   const limit = Math.min(input.limit ?? 20, 50);
-
-  const ranked = searchIndexSymbols(ctx, {
+  const offset = Math.max(0, Math.floor(input.offset ?? 0));
+  const rankInput = {
     query: input.query,
     lang: input.lang,
     path: input.path,
-    limit,
     includeScores: input.includeScores,
-  });
+  };
+
+  // Public cursors page the same filtered universe they count. Internal
+  // locator callers keep the historical single-page behavior and cost.
+  let rankedTotal: number;
+  let rankedTruncated = false;
+  let sourceLocations: import("@tokenlighten/skeleton-engine").RankedLocation[];
+  if (input.cursorPage === true) {
+    // Filter the manifest before ranking so the engine computes one complete
+    // ranked page (including the true eligible total) per cursor request.
+    // Keep fileScores/recentFiles intact: they are ranking inputs even when a
+    // path is absent from the filtered manifest.
+    const filteredContext: SearchContext = {
+      ...ctx,
+      manifest: {
+        ...ctx.manifest,
+        files: Object.fromEntries(
+          Object.entries(ctx.manifest.files).filter(([relPath]) => !isSourceOnlyExcludedPath(relPath, input.path)),
+        ),
+      },
+    };
+    const ranked = searchIndexSymbols(filteredContext, { ...rankInput, limit, offset });
+    rankedTotal = ranked.total;
+    rankedTruncated = ranked.truncated;
+    sourceLocations = ranked.locations;
+  } else {
+    const ranked = searchIndexSymbols(ctx, {
+      ...rankInput,
+      // Keep legacy pre-offset filtering semantics for non-cursor consumers.
+      limit: Math.min(50, offset + limit),
+    });
+    rankedTotal = ranked.total;
+    rankedTruncated = ranked.truncated;
+    sourceLocations = ranked.locations
+      .filter((row) => !isSourceOnlyExcludedPath(row.path, input.path))
+      .slice(offset, offset + limit);
+  }
 
   // 5) Map to SymbolLocation (strip signature by default, keep score/reasons
   //    only if includeScores=true).
-  const sourceLocations = ranked.locations.filter((r) => !isSourceOnlyExcludedPath(r.path, input.path));
   const locations: SymbolLocation[] = sourceLocations.map((r) => {
     const loc: SymbolLocation = {
       path: r.path,
@@ -515,12 +566,18 @@ export async function searchSymbols(
 
   // 6) Enforce byte cap: drop lowest-scoring results until JSON fits.
   //    Keep at least MIN_LOCATIONS locations.
-  let finalTruncated = ranked.truncated;
+  // An offset page is truncated iff records remain past ITS end, which the
+  // engine's own flag (computed against the span it was asked for) cannot know.
+  let finalTruncated = input.cursorPage === true
+    ? offset + provenanceLocations.length < rankedTotal
+    : offset > 0
+      ? offset + provenanceLocations.length < rankedTotal
+      : rankedTruncated;
   let finalLocations = provenanceLocations;
 
   // Check if the result serializes within cap.
   function serialize(locs: SymbolLocationInternal[]): string {
-    return JSON.stringify({ locations: locs, truncated: finalTruncated, total: ranked.total });
+    return JSON.stringify({ locations: locs, truncated: finalTruncated, total: rankedTotal });
   }
 
   if (Buffer.byteLength(serialize(finalLocations), "utf8") > MAX_RESPONSE_BYTES) {
@@ -542,7 +599,7 @@ export async function searchSymbols(
   const roledLocations = applyRoles(
     finalLocations,
     (p) => deriveFileRole(workspace, p),
-    (locs) => ({ locations: locs, truncated: finalTruncated, total: ranked.total }),
+    (locs) => ({ locations: locs, truncated: finalTruncated, total: rankedTotal }),
     MAX_RESPONSE_BYTES,
   );
 
@@ -552,10 +609,25 @@ export async function searchSymbols(
   //    the wire (SymbolLocationInternal -> SymbolLocation).
   const symbolCoverage = computeSymbolCoverage(roledLocations);
 
-  return {
+  const result: SearchSymbolsResult = {
     locations: roledLocations.map(stripCoverageReason),
     truncated: finalTruncated,
-    total: ranked.total,
+    total: rankedTotal,
     ...(symbolCoverage !== undefined ? { symbol_coverage: symbolCoverage } : {}),
   };
+  if (input.cursorPage === true) {
+    const sourceIdentity = Object.values(manifest.files)
+      .map((file) => [file.path, file.contentSha256, file.sizeBytes, file.mtimeMs, file.language] as const)
+      .sort((a, b) => Buffer.compare(Buffer.from(a[0]), Buffer.from(b[0])));
+    const fingerprintInput = JSON.stringify({
+      rootHash: manifest.rootHash,
+      ignoreHash: manifest.ignoreHash,
+      sourceIdentity,
+      recentFiles: [...recentFiles].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b))),
+      ranking: rankInput,
+      sourceOnlyPathScope: input.path ?? "",
+    });
+    resultSourceFingerprints.set(result, createHash("sha256").update(fingerprintInput).digest("hex"));
+  }
+  return result;
 }

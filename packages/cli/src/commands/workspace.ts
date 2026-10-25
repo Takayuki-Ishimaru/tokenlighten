@@ -65,7 +65,7 @@ const CLIENTS = new Set<TokenLightenSetupClient>([
 
 const WORKSPACE_USAGE = `\
 Usage:
-  tl workspace setup [--root DIR] [--clients vscode,codex,claude-code] [--read-only | --allow-write] [--guide-profile full|medium|compact] [--tool-surface code|full] [--copilot-inline-results raise|keep] [--copilot-guide standalone|agents-md|keep] [--copilot-session-context install|keep] [--rules-only] [--json]
+  tl workspace setup [--root DIR] [--clients vscode,codex,claude-code] [--read-only | --allow-write] [--guide-profile full|medium|compact|portable] [--tool-surface code|full] [--copilot-inline-results raise|keep] [--copilot-guide standalone|agents-md|keep] [--copilot-session-context install|keep] [--rules-only] [--json]
   tl workspace status [--root DIR] [--json]
   tl workspace list [--json]
 
@@ -73,7 +73,8 @@ Setup creates AI rules and project-scoped MCP settings. Status verifies one
 workspace without changing it. List reports every
 workspace registered by setup on this machine for desktop-wide management.
 TokenLighten write tools and local privacy-preserving usage logging are enabled
-by default in generated MCP settings. Pass --read-only to disable writes or
+by default on first setup. Updates preserve each client's write permission.
+Pass --read-only to disable writes or
 --allow-write to select them explicitly. A manual 'tl mcp start' is read-only
 unless --allow-write is supplied. The guide profile defaults to compact for all clients and tool
 surfaces (an explicit --guide-profile always wins). Claude Code loads the
@@ -873,7 +874,7 @@ export function formatGuideProfileAdviceLine(
  * rerunning `tl workspace setup` later picks up a real value once the
  * resolvable mcp-server can report one.
  */
-export function currentMcpSchemaStamp(toolSurface?: ToolSurface): string | undefined {
+export function currentMcpSchemaStamp(toolSurface?: ToolSurface, portableTools = false): string | undefined {
   try {
     const bin = resolveMcpBin();
     if (!existsSync(bin)) return undefined;
@@ -885,7 +886,8 @@ export function currentMcpSchemaStamp(toolSurface?: ToolSurface): string | undef
     const result = crossSpawn.sync(
       process.execPath,
       [bin, "--print-schema-stamp", ...(toolSurface !== undefined ? ["--tool-surface", toolSurface] : [])],
-      { shell: false, encoding: "utf8", timeout: 30_000 },
+      { shell: false, encoding: "utf8", timeout: 30_000,
+        ...(portableTools ? { env: { ...process.env, TL_PORTABLE_TOOLS: "1" } } : {}) },
     );
     if (result.error || result.status !== 0) return undefined;
     const first = String(result.stdout ?? "").trim().split(/\r?\n/, 1)[0] ?? "";
@@ -1005,6 +1007,29 @@ function portableIdentityFor(
   return portableIdentity(launcher, varName, home);
 }
 
+/** Omitted permission flags preserve the entry being updated, per client. */
+function existingClientWriteEnabled(root: string, client: TokenLightenSetupClient): boolean {
+  const target = join(root, client === "vscode" ? ".vscode/mcp.json" : client === "codex" ? ".codex/config.toml" : ".mcp.json");
+  assertInsideRoot(root, target);
+  assertNotSymlink(target);
+  assertNotSymlink(dirname(target));
+  const previous = client === "codex"
+    ? getNestedKey(readConfig(target), "mcp_servers.tokenlighten")
+    : objectMember(readJsonObject(target), client === "vscode" ? "servers" : "mcpServers")["tokenlighten"];
+  if (previous === undefined) return true;
+  if (!previous || typeof previous !== "object" || Array.isArray(previous)) {
+    throw new Error(`Expected a TokenLighten server object in ${target}`);
+  }
+  const args = (previous as Record<string, unknown>)["args"];
+  // Older/manual entries may contain only host startup settings. No args
+  // means no explicit write grant; repair the launcher conservatively.
+  if (args === undefined) return false;
+  if (!Array.isArray(args) || !args.every(arg => typeof arg === "string")) {
+    throw new Error(`Cannot preserve TokenLighten write permission: expected string args in ${target}`);
+  }
+  return args.includes("--allow-write");
+}
+
 function configureVsCode(
   root: string,
   launcher: SetupLauncher,
@@ -1101,7 +1126,7 @@ export async function setupWorkspace(options: {
   clients?: readonly TokenLightenSetupClient[];
   launcher?: SetupLauncher;
   rulesOnly?: boolean;
-  /** Generated MCP settings allow writes by default; false selects read-only. */
+  /** Explicit permission override; omitted preserves existing entries, or enables writes on first setup. */
   writeEnabled?: boolean;
   /**
    * Guide profile to inject. Omitted defers to
@@ -1164,6 +1189,12 @@ export async function setupWorkspace(options: {
   for (const client of clients) {
     if (!CLIENTS.has(client)) throw new Error(`Unsupported client: ${client}`);
   }
+  // Resolve every selected client's existing posture before writing any
+  // rules/settings, so unreadable or malformed input cannot enable writes.
+  const permissions = Object.fromEntries(clients.map(client => [client,
+    options.writeEnabled ?? existingClientWriteEnabled(root, client)])) as Partial<Record<TokenLightenSetupClient, boolean>>;
+  const writeEnabled = clients.length > 0 ? clients.every(client => permissions[client] === true) : options.writeEnabled ?? true;
+  const mixedPermissions = clients.some(client => permissions[client] !== writeEnabled);
 
   // P2-3(1): options assembly — the effective profile couples to
   // toolSurface only when the caller left guideProfile unspecified; an
@@ -1218,20 +1249,22 @@ export async function setupWorkspace(options: {
   }
   const configFilesWritten: string[] = [];
   const sessionWarnings: string[] = [];
-  const launcher = options.launcher ?? {
+  const baseLauncher = options.launcher ?? {
     command: "tl",
     argsPrefix: [],
     env: {},
   };
+  const launcher = effectiveGuideProfile === "portable"
+    ? { ...baseLauncher, env: { ...baseLauncher.env, TL_PORTABLE_TOOLS: "1" } }
+    : baseLauncher;
   // Only worth computing when a client config is actually about to be
   // written — a rules-only setup (or an empty client list) never calls
   // configureVsCode/configureCodex/configureClaude, so skip the spawn.
   const schemaStamp = clients.length > 0
-    ? (options.schemaStamp !== undefined ? options.schemaStamp() : currentMcpSchemaStamp(options.toolSurface))
+    ? (options.schemaStamp !== undefined ? options.schemaStamp() : currentMcpSchemaStamp(options.toolSurface, effectiveGuideProfile === "portable"))
     : undefined;
   const installHomeDefault = options.installHomeDefault ?? isDefaultInstallHome();
   const platform = options.platform ?? process.platform;
-  const writeEnabled = options.writeEnabled ?? true;
 
   // Resolved once, before configureVsCode runs, so its result can gate the
   // TOKENLIGHTEN_TASK_PACK_MAX_BYTES link in the SAME write. `not-applicable`
@@ -1249,7 +1282,7 @@ export async function setupWorkspace(options: {
 
   for (const client of clients) {
     if (client === "vscode") {
-      configFilesWritten.push(configureVsCode(root, launcher, schemaStamp, options.toolSurface, installHomeDefault, platform, linkTaskPackCeiling, writeEnabled));
+      configFilesWritten.push(configureVsCode(root, launcher, schemaStamp, options.toolSurface, installHomeDefault, platform, linkTaskPackCeiling, permissions[client]!));
       if (options.copilotSessionContext !== "keep") {
         const sessionHook = installCopilotSessionHook(root);
         configFilesWritten.push(...sessionHook.files);
@@ -1257,10 +1290,10 @@ export async function setupWorkspace(options: {
       }
     }
     if (client === "codex") {
-      configFilesWritten.push(configureCodex(root, launcher, schemaStamp, options.toolSurface, writeEnabled));
+      configFilesWritten.push(configureCodex(root, launcher, schemaStamp, options.toolSurface, permissions[client]!));
     }
     if (client === "claude-code") {
-      configFilesWritten.push(configureClaude(root, launcher, schemaStamp, options.toolSurface, installHomeDefault, platform, writeEnabled));
+      configFilesWritten.push(configureClaude(root, launcher, schemaStamp, options.toolSurface, installHomeDefault, platform, permissions[client]!));
     }
   }
   return {
@@ -1268,6 +1301,7 @@ export async function setupWorkspace(options: {
     workspaceRoot: root,
     clients,
     writeEnabled,
+    ...(mixedPermissions ? { writeEnabledByClient: permissions } : {}),
     usageLoggingEnabled: true,
     rulesWritten,
     configFilesWritten,
@@ -1330,10 +1364,19 @@ function parseWorkspaceSummary(value: unknown): TokenLightenWorkspaceSummary | n
   ) {
     return null;
   }
+  const permissions = raw["writeEnabledByClient"];
+  if (permissions !== undefined && (
+    !permissions || typeof permissions !== "object" || Array.isArray(permissions)
+    || !Object.entries(permissions).every(([client, enabled]) =>
+      CLIENTS.has(client as TokenLightenSetupClient)
+      && (raw["clients"] as string[]).includes(client)
+      && typeof enabled === "boolean")
+  )) return null;
   return {
     workspaceRoot: raw["workspaceRoot"],
     clients: raw["clients"] as TokenLightenSetupClient[],
     writeEnabled: raw["writeEnabled"],
+    ...(permissions !== undefined ? { writeEnabledByClient: { ...permissions as Partial<Record<TokenLightenSetupClient, boolean>> } } : {}),
     usageLoggingEnabled: raw["usageLoggingEnabled"],
     configFilesWritten: raw["configFilesWritten"] as string[],
     updatedAt: raw["updatedAt"],
@@ -1521,8 +1564,9 @@ export function workspaceStatus(
       guidePresent,
     };
   }
+  const writeEnabled = entry.writeEnabledByClient?.vscode ?? entry.writeEnabled;
   if (
-    !hasValidVsCodeServer(root, entry.writeEnabled, entry.usageLoggingEnabled)
+    !hasValidVsCodeServer(root, writeEnabled, entry.usageLoggingEnabled)
   ) {
     return {
       schemaVersion: 1,
@@ -1537,7 +1581,7 @@ export function workspaceStatus(
     workspaceRoot: root,
     configured: true,
     reason: "ready",
-    writeEnabled: entry.writeEnabled,
+    writeEnabled,
     usageLoggingEnabled: entry.usageLoggingEnabled,
     guidePresent,
   };
@@ -1569,6 +1613,7 @@ export function recordWorkspaceSetup(
     workspaceRoot: result.workspaceRoot,
     clients: [...result.clients],
     writeEnabled: result.writeEnabled,
+    ...(result.writeEnabledByClient !== undefined ? { writeEnabledByClient: { ...result.writeEnabledByClient } } : {}),
     usageLoggingEnabled: result.usageLoggingEnabled,
     configFilesWritten: [...result.configFilesWritten],
     updatedAt,
@@ -1595,6 +1640,7 @@ export function recordWorkspaceSetup(
       workspaceRoot: parsed.workspaceRoot,
       clients: [...parsed.clients],
       writeEnabled: parsed.writeEnabled,
+      ...(parsed.writeEnabledByClient !== undefined ? { writeEnabledByClient: { ...parsed.writeEnabledByClient } } : {}),
       usageLoggingEnabled: parsed.usageLoggingEnabled,
       configFilesWritten: [...parsed.configFilesWritten],
       updatedAt: parsed.updatedAt,
@@ -1750,6 +1796,11 @@ export async function runWorkspace(
     return;
   }
   const rawClients = valueAfter(rest, "--clients");
+  if (rest.includes("--clients") && (rawClients === undefined || rawClients.trim() === "" || rawClients.startsWith("--"))) {
+    process.stderr.write("tl workspace: --clients requires a value (vscode,codex,claude-code)\n");
+    process.exitCode = 1;
+    return;
+  }
   const clients = rawClients
     ? rawClients.split(",").map((item) => item.trim()) as TokenLightenSetupClient[]
     : undefined;
@@ -1826,7 +1877,7 @@ export async function runWorkspace(
     ...(clients ? { clients } : {}),
     launcher,
     rulesOnly,
-    writeEnabled: !readOnly,
+    ...(readOnly ? { writeEnabled: false } : rest.includes("--allow-write") ? { writeEnabled: true } : {}),
     ...(guideProfile !== undefined ? { guideProfile } : {}),
     ...(toolSurface !== undefined ? { toolSurface } : {}),
     ...(copilotInlineResults !== undefined ? { copilotInlineResults } : {}),
@@ -1865,6 +1916,8 @@ export async function runWorkspace(
       + `AI rules: ${result.rulesWritten.length} file(s)\n`
       + `MCP settings: ${result.configFilesWritten.length} file(s)\n`
       + (rulesOnly ? "Write tools: not configured (--rules-only)\n"
+        : result.writeEnabledByClient !== undefined
+          ? `Write tools: ${Object.entries(result.writeEnabledByClient).map(([client, enabled]) => `${client}=${enabled ? "enabled" : "disabled"}`).join(", ")}\n`
         : result.writeEnabled
           ? "Write tools: enabled in generated MCP settings (--allow-write); use --read-only to disable\n"
           : "Write tools: disabled in generated MCP settings (--read-only)\n")

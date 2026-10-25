@@ -17,30 +17,30 @@
 
 It exposes exactly three tools: `tl_read_file`, `tl_search_files`, and `tl_edit_file`.
 
-## v0.15.3 release
+## v0.16.0 release
 
-**Public Beta.** TokenLighten v0.15.3 improves compound code questions, source ranges and continuation, and line-range editing. Workspace setup now lets you choose write permission explicitly. Interfaces and supported workflows may change as feedback is incorporated.
+**Public Beta.** TokenLighten v0.16.0 improves discovery, follow-up reads and edit context, and adds configurable local analysis engines. Interfaces and supported workflows may change as feedback is incorporated.
 
-The main changes in v0.15.3 are:
+The main changes in v0.16.0 are:
 
-- questions about a call's return value and computation order retain both requirements and request the relevant helper implementations;
-- Japanese explanations of functions named `add` or similar English edit verbs remain read-only questions;
-- symbol bodies use their original source line numbers, with supplementary scope information in `note`;
-- budgeted symbol reads and multi-target reads continue through the remaining requested lines;
-- line-range replacements preserve the newline before an untouched following line; and
-- `tl workspace setup --read-only` disables writes in generated settings, while `--allow-write` selects them explicitly. Setup reports the choice.
+- code questions and change requests retain their named members, multiple requirements and protected files;
+- follow-up reads return the requested new ranges, while repeated reads acknowledge content already delivered;
+- edit packs include relevant declarations and artifact-consuming code, with runnable verification guidance where available;
+- Claude Code, GitHub Copilot CLI and Codex CLI receive compact tool descriptions by default; Claude Code and Codex CLI also receive line-numbered answer content, while Copilot CLI receives exact contiguous source slices without line-number prefixes (their line range is given) and keeps other answer content numbered;
+- searches accept up to ten literal queries, and changed-scope continuations return a usable restart call; and
+- optional typed symbol resolution and local multilingual semantic search can be configured from the CLI or VS Code. Compound request composition is enabled by default.
 
-The three MCP tools remain `tl_read_file`, `tl_search_files`, and `tl_edit_file`. A manually started server is read-only unless passed `--allow-write`; workspace setup enables writes by default.
+The three MCP tools remain `tl_read_file`, `tl_search_files`, and `tl_edit_file`. A manually started server is read-only unless passed `--allow-write`; first workspace setup enables writes by default.
 
-The public release includes four platform install archives (win-x64, darwin-arm64, darwin-x64, linux-x64) with the CLI, MCP server and a bundled Node.js runtime, source code with public package tests, and a self-contained VS Code VSIX. The desktop application is not included.
+The public release includes four platform install archives (win-x64, darwin-arm64, darwin-x64, linux-x64) with the CLI, MCP server and a bundled Node.js runtime, source code with public package tests, and a self-contained VS Code VSIX. Model weights are downloaded separately when requested. The desktop application is not included.
 
-**Upgrade:** install the v0.15.3 archive or VSIX, re-run `tl workspace setup` or **Set up this workspace**, then start a new agent session or reconnect your MCP client. To keep CLI workspace settings read-only, run `tl workspace setup --read-only` when refreshing them. The canonical request fields and tool names are unchanged from v0.15.2. See the [v0.15.3 release notes](release-docs/github-release-v0.15.3.md) for upgrade steps and known limitations.
+**Upgrade:** install the v0.16.0 archive or VSIX, refresh workspace setup, then start a new agent session or reconnect your MCP client. CLI workspace refresh preserves existing per-client write permissions; use `--read-only` or `--allow-write` to change them explicitly. The extension's **Set up this workspace** enables writes. The three tool names and canonical top-level request fields are unchanged from v0.15.3. See the [v0.16.0 release notes](release-docs/github-release-v0.16.0.md) and [Local analysis engines](release-docs/local-analysis.md).
 
 ## Why TokenLighten
 
 Coding agents often spend multiple turns locating files, reading broad sections, and reopening context before making a small change. TokenLighten performs local repository discovery and returns compact structure, symbols, exact ranges, and bounded edit handles.
 
-Repository indexing and context selection run locally on the CPU. TokenLighten does not add an AI model or upload repository contents on its own. Your editor, MCP client, and AI provider continue to operate under their own configuration and terms.
+Repository indexing and context selection run locally on the CPU. Optional semantic search uses a separately downloaded local embedding model; it is disabled by default. TokenLighten does not send repository contents to a model service. Your editor, MCP client, and AI provider continue to operate under their own configuration and terms.
 
 Savings vary by repository, task, client, and model behavior. Usage and cost figures shown by TokenLighten are local estimates, not provider billing records.
 
@@ -50,40 +50,26 @@ TokenLighten is designed to deliver its largest advantage when an agent must ide
 
 Symbol and reference search can return relevant definitions and call sites directly. Document readers can extract structured content from spreadsheets and other supported formats without loading each entire file. Together, these capabilities can reduce repeated search and rereading while the agent gathers the context required for repository-wide or cross-document work.
 
-### Indicative savings (v0.15.0)
-
-These observations are from v0.15.0; they are not new measurements of v0.15.3.
+### Indicative savings (v0.16.0)
 
 #### Sonnet comparison
 
-During preparation for v0.15.0, we compared the same Sonnet model using native file-reading and search tools alone with the model using TokenLighten. Six tasks were attempted three times each. In the 11 pairs with verified outcomes in both configurations and complete billing records, **total task cost was 33.7% lower**, calculated from recorded usage and token prices.
+On 20 October 2026, we compared a v0.16.0 prerelease candidate at its default settings in Claude Code with the same Sonnet 5 model using native file-reading and search tools alone. Six tasks were attempted three times per configuration. In the **12 pairs with verified outcomes in both configurations and complete usage records**, **total task cost was 37.8% lower**, calculated from recorded input, cached and output tokens and their prices.
 
 | Task pattern | Task-cost reduction (comparison of median costs) | Comparable pairs |
 |---|---:|---:|
-| Fix related bugs across control and mode transitions | **53.2%** | 2 |
-| Explain a localized decision and its downstream effect | **43.6%** | 1 |
-| Implement priority behavior across related feature paths | **35.9%** | 3 |
-| Make a narrow calculation or data-integrity fix | **21.5%** | 2 |
-| Build rating rules from a spreadsheet specification | **9.4%** | 3 |
+| Fix related bugs across control and mode transitions | **67.7%** | 1 |
+| Build rating rules from a spreadsheet specification | **47.4%** | 2 |
+| Make a narrow calculation or data-integrity fix | **40.5%** | 2 |
+| Implement priority behavior across related feature paths | **30.3%** | 2 |
+| Connect estimator health to outbound telemetry | **23.0%** | 2 |
+| Explain order-processing flow and its dependencies | **19.7%** | 3 |
 
-Unfinished tasks and trials with incomplete billing records are excluded. The table compares each configuration's median cost and includes an explanation task with only one pair, so these are reference observations rather than typical savings. The spreadsheet task had a lower median cost but a slightly higher total cost across its three pairs.
+The headline compares summed costs; the table compares each configuration's median cost on the retained pairs. Six of the 18 attempted pairs are excluded from this primary comparison because at least one usage record is incomplete. The largest task-level reduction has only one comparable pair. These small samples are reference observations, not typical or guaranteed savings.
 
-#### GitHub Copilot experiment
+A complementary estimate retained **16 pairs** by charging missing TokenLighten output at a conservative upper bound inferred from the following request's input, while keeping the baseline cost as recorded. Its conservative result was **35.2% lower cost**; two pairs without usable bounds remain excluded. This estimate is separate from the complete-record comparison above.
 
-During preparation for v0.15.0, we compared code-reading and explanation tasks in GitHub Copilot's normal **Agent** mode in VS Code. Across 24 trials with and without TokenLighten, Auto model selection and standard tools remained enabled, and we checked the calculated answers and Copilot's recorded billed credits. The table compares **mean billed-credit reductions** for the same task and model.
-
-| Task pattern | Model | Reduction | Trials (native / TL) |
-|---|---|---:|---:|
-| Trace discount, shipping, and tax rules and explain totals for several orders | GPT-6 Luna | **9.8%** | 2 / 2 |
-| Explain a retry delay sequence and its dependencies without a source location | GPT-6 Luna | **11.9%** | 2 / 2 |
-| Explain a retry delay sequence and its dependencies with a source location | MAI-Code-1.1-Flash | 6.8% (no clear difference) | 5 / 6 |
-| Explain a retry delay sequence and its dependencies without a source location | MAI-Code-1.1-Flash | 54.5% (strongly affected by caching) | 2 / 2 |
-
-Copilot used TokenLighten without selecting a custom Agent. On the short MAI reading tasks, model round trips fell from three or four to two. However, the samples are small, and Auto's model allocation and cache conditions were not controlled. The billed-cost ranges overlap in the 6.8% example, and the 54.5% example should not be treated as a typical saving.
-
-**These percentages describe cost savings, not token-count reductions.** Input, output, and cached tokens have different prices, so a cost reduction cannot be converted directly into the same token reduction. The amount of context avoided depends on how much source material the agent would otherwise read and reread.
-
-Use these results as a guide, not a guaranteed saving. The Copilot comparison covers reading and explanation only; its models, tasks, and measurement conditions differ from the Sonnet comparison, so the figures cannot be combined. Results vary by repository, task, client, model behavior, and pricing. For your own workspace, the CLI and VS Code usage views show locally measured usage and estimates; these are not provider billing records.
+The Sonnet candidate preceded the final request-handling fixes, which were not separately remeasured on Sonnet.
 
 ### Tasks that may benefit less
 
@@ -92,9 +78,9 @@ TokenLighten is less likely to help when little discovery or rereading is needed
 - **Small edits at one known location**, such as replacing a value or fixing a short calculation.
 - **Localized explanations**, such as explaining a short function whose code has already been provided.
 
-For these tasks, the additional context needed for tool definitions, guidance, and calls can outweigh the reading that TokenLighten avoids. Earlier comparisons included small fixes and localized explanations with similar or higher task cost. The examples above do not establish that every small task will cost less.
+For these tasks, the additional context needed for tool definitions, guidance, and calls can outweigh the reading that TokenLighten avoids. The comparison above does not establish that every small task will cost less.
 
-TokenLighten also does not provide full type-aware semantic analysis. Cross-file renames that depend on types, imports, or overload resolution still require language-aware tools and verification. See [Language and file support](release-docs/language-support.md) for the supported boundaries.
+Optional typed symbol resolution improves supported definition and reference lookup; it does not make every edit type-aware. Cross-file renames that depend on types, imports, or overload resolution still require language-aware tools and verification. See [Language and file support](release-docs/language-support.md) for the supported boundaries.
 
 ## Install an archive (no editor, no build)
 
@@ -111,7 +97,7 @@ Prefer VS Code's own extension instead? See the next section.
 
 ## Install the VS Code extension (no build required)
 
-Download **[tokenlighten-vscode-extension-0.15.3.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.3/tokenlighten-vscode-extension-0.15.3.vsix)** from the v0.15.3 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
+Download **[tokenlighten-vscode-extension-0.16.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.16.0/tokenlighten-vscode-extension-0.16.0.vsix)** from the v0.16.0 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
 
 Then:
 
@@ -122,7 +108,7 @@ Then:
 Or install it from a terminal:
 
 ```sh
-code --install-extension tokenlighten-vscode-extension-0.15.3.vsix
+code --install-extension tokenlighten-vscode-extension-0.16.0.vsix
 ```
 
 Open a trusted project folder, select the TokenLighten view, and choose **Set up this workspace**. The packaged VSIX includes the CLI, MCP server, parsers, and required assets; a separate global installation is not required. This performs the same machine install as the archive above (`tl install --from-extension`) and sets up the current workspace, but leaves other hosts on the machine — Claude Code, Codex — unregistered (`--clients none`); register them separately with `tl clients activate`, or with an archive's `tl-setup`.
@@ -162,7 +148,7 @@ The shared agent guides default to `compact` for all tool surfaces. They tell Co
 
 VS Code setup also creates a SessionStart hook that gives ordinary Agent local chats the TL first-read and no-reread workflow. It requires a trusted workspace, enabled `chat.useHooks`, and `node` on PATH. It leaves tools and approval settings unchanged and preserves existing hooks and user edits. Use `tl workspace setup --clients vscode --copilot-session-context keep` to leave these hook files untouched.
 
-Workspace setup enables writes in generated MCP settings by default. Use `tl workspace setup --read-only` to omit `--allow-write` for every selected client, or `--allow-write` to select writes explicitly. Setup reports the actual choice in its text and JSON output.
+First workspace setup enables writes by default. Re-running `tl workspace setup` preserves each existing client's write permission; `--read-only` or `--allow-write` explicitly changes it. Text and JSON output report the effective permissions.
 
 A manually started MCP server is read-only unless you pass `--allow-write`:
 

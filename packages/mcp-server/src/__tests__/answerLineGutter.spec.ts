@@ -28,8 +28,7 @@
 // entirely.
 
 import { afterAll, afterEach, describe, expect, it } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
-import { createRequire } from "node:module";
+import { type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -39,6 +38,8 @@ import { waitForExit } from "./helpers/rmDirWithRetry.js";
 import { applyAnswerLineGutter, stripAnswerLineGutter } from "../protocol/lineGutter.js";
 import { elideDocCommentsWithWindows } from "../util/formatCompress.js";
 import { killServerGroup } from "./helpers/killServerGroup.js";
+import { TSX_NODE_ARGS } from "./helpers/tsxNode.js";
+import { pooledSpawn } from "./helpers/serverPool.js";
 
 const FLAG = "TL_ANSWER_LINE_GUTTER";
 const UMBRELLA = "TL_TURN_ECONOMY";
@@ -120,8 +121,6 @@ afterEach(async () => {
 // trimmed from rangedBatchNextPreservation.spec.ts).
 // ---------------------------------------------------------------------------
 
-const nodeRequire = createRequire(import.meta.url);
-const TSX_CLI = nodeRequire.resolve("tsx/cli");
 const BIN_TS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "bin.ts");
 
 interface ServerHandle {
@@ -133,7 +132,7 @@ interface ServerHandle {
 const spawnedServers: ServerHandle[] = [];
 
 function startServer(cwd: string, env: Record<string, string>): ServerHandle {
-  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, "--liftoff-only", BIN_TS, cwd], {
+  const child: ChildProcess = pooledSpawn(process.execPath, [...TSX_NODE_ARGS, BIN_TS, cwd], {
     cwd,
     stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32",
     env: { ...process.env, ...env },

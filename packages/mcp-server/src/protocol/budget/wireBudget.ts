@@ -437,6 +437,13 @@ const BUDGET_BY_KIND: Readonly<Record<Kind, number>> = {
    * (`READ_SYMBOL_CAP_BYTES` / `SLICE_RANGES_TOTAL_CAP_BYTES = 24576`,
    * `readCodeModes.ts:49`, `:62`) are an order of magnitude below the binding
    * operand.
+   *
+   * THIS ROW IS A BACKSTOP, NOT THE BOUND A CLIENT SEES. A client whose profile
+   * carries a `responseByteCeiling` (Copilot CLI, VS Code) holds every
+   * `read.text` / `read.batch` reply to that ceiling instead
+   * (`bindToResponseCeiling` below; `emit.ts`'s `pageCeiling`), which is a
+   * tighter bound than the largest producer cap (24 KiB of body, 25.7-28.6 KB on
+   * the wire). Only a client without one is bounded by this row alone.
    */
   "read.text": 524288,
   /** Family fallback = the `files` form's row. See `BUDGET_BY_FORM`. */
@@ -708,6 +715,49 @@ export const BYTES_PER_TOKEN_ESTIMATE = 4;
 export function estimateBytesFromTokens(tokens: unknown): number | undefined {
   if (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens <= 0) return undefined;
   return Math.floor(tokens * BYTES_PER_TOKEN_ESTIMATE);
+}
+
+// ---------------------------------------------------------------------------
+// 2026-10-24 (read-page ceiling) — the ONE rule that binds a `read.text` /
+// `read.batch` reply to the client profile's response ceiling.
+//
+// A task pack is bound to `ClientProfile.responseByteCeiling` by the pack
+// builder (`readCodeTaskPack.ts`'s `clampToActiveCeiling`) and a find page by
+// `findText.ts`'s `findResponseCapBytes`; a read PAGE — the first reply of a
+// line-addressed read, every `limit.next` / cursor page after it, a batch of
+// windows — was bound to neither, only to the producer caps (24 KiB of body, so
+// 25.7-28.6 KB on the wire) and the 512 KiB / 128 KiB rows above. The Copilot
+// CLI spills a reply of 23,466 B or more into a temporary file the agent has to
+// read back as another turn (clientProfile.ts), and VS Code does the same above
+// ~17 KB, so a 290 KB class read through its own `limit.next` chain arrived as
+// eight 25.8 KB spills.
+//
+// THE RULE, in one place so the funnel (`emit.ts`) and the dispatcher
+// (`server.ts`'s sizing sites) cannot disagree on it:
+//
+//   bound = min(declared, ceiling)      both present
+//         = ceiling                     nothing declared
+//         = declared                    no ceiling (claude-code, generic, env 0)
+//
+// An explicit budget BELOW the ceiling therefore still wins (it is the tighter
+// ask), and one ABOVE it is clamped: the ceiling is the client's transport
+// limit, not a default the caller can outbid. `undefined` for a client without
+// a ceiling and no declared budget keeps every such call byte-identical to
+// before this rule existed.
+// ---------------------------------------------------------------------------
+
+/**
+ * `declaredBytes` (a caller's `budget.bytes`/`budget.tokens`, already reduced
+ * to bytes) tightened to the client's response `ceilingBytes`. See the section
+ * banner above for the rule and its reason.
+ */
+export function bindToResponseCeiling(
+  declaredBytes: number | undefined,
+  ceilingBytes: number | undefined,
+): number | undefined {
+  if (ceilingBytes === undefined || !Number.isFinite(ceilingBytes) || ceilingBytes <= 0) return declaredBytes;
+  const ceiling = Math.floor(ceilingBytes);
+  return declaredBytes === undefined ? ceiling : Math.min(declaredBytes, ceiling);
 }
 
 // ---------------------------------------------------------------------------

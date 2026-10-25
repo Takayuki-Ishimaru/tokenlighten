@@ -13,7 +13,17 @@
 // file) — exactly the boundary the coordinator drew.
 
 import { describe, it, expect } from "vitest";
-import { tokenizeQuery } from "../util/queryShape.js";
+import { fileNamesInPathSpans, stripPathSpans, tokenizeQuery } from "../util/queryShape.js";
+
+describe("path scanning in long replacement requests", () => {
+  it("preserves long literal payloads and whitespace while stripping only path spans", () => {
+    const before = "a".repeat(7800);
+    const after = "b".repeat(7800);
+    const query = `Replace \`${before}\` with \`${after}\` in src/large.txt\n\tand C:\\src\\other.ts`;
+    expect(stripPathSpans("", query)).toBe(`Replace \`${before}\` with \`${after}\` in  \n\tand  `);
+    expect(fileNamesInPathSpans(query)).toEqual(["large.txt", "other.ts"]);
+  }, 5000);
+});
 
 const IDENTIFIER_STOP_WORDS = new Set(["the", "and", "for", "with"]);
 const SIMPLE_STOP_WORDS = new Set(["the", "and", "for", "with"]);

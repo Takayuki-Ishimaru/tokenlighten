@@ -22,15 +22,13 @@
  */
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { killServerGroup } from "./helpers/killServerGroup.js";
+import { TSX_NODE_ARGS } from "./helpers/tsxNode.js";
 
-const require = createRequire(import.meta.url);
-const tsx = require.resolve("tsx/cli");
 const here = path.dirname(fileURLToPath(import.meta.url));
 const bin = path.resolve(here, "..", "bin.ts");
 
@@ -43,7 +41,7 @@ const spawned: RpcServer[] = [];
 const tmpDirs: string[] = [];
 
 function startServer(root: string, env: Record<string, string>): RpcServer {
-  const child: ChildProcess = spawn(process.execPath, [tsx, "--liftoff-only", bin, "--workspace", root, "--allow-write"], {
+  const child: ChildProcess = spawn(process.execPath, [...TSX_NODE_ARGS, bin, "--workspace", root, "--allow-write"], {
     cwd: root,
     // TL_EFF_SLIM_EDIT=0 restores the ±20 / enclosing-symbol after-window these
     // cases' exact spans were measured against (the default since 2026-10-01

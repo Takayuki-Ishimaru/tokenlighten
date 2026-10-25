@@ -57,7 +57,7 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -68,6 +68,8 @@ import { getSession, tokenizeForEpoch } from "../state/session.js";
 import { queryServedSurfaces } from "../util/packServeLog.js";
 import { resetAll as resetAllSessions } from "../util/session.js";
 import { killServerGroup } from "./helpers/killServerGroup.js";
+import { TSX_NODE_ARGS } from "./helpers/tsxNode.js";
+import { pooledSpawn } from "./helpers/serverPool.js";
 
 // ---------------------------------------------------------------------------
 // Fixture — round-15's `r15_k` corpus: eight 40-function pricing modules (so
@@ -314,7 +316,6 @@ describe("FX-K: the cap-overflow sweep — the default path books only what it s
 // ---------------------------------------------------------------------------
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const TSX_CLI = path.resolve(HERE, "../../../../node_modules/tsx/dist/cli.mjs");
 const BIN_TS = path.resolve(HERE, "../bin.ts");
 
 interface RawResponse { isError: boolean; body: Record<string, unknown>; text: string }
@@ -325,9 +326,9 @@ interface ServerHandle {
 }
 
 function startServer(cwd: string, env: NodeJS.ProcessEnv): ServerHandle {
-  const child: ChildProcess = spawn(
+  const child: ChildProcess = pooledSpawn(
     process.execPath,
-    [TSX_CLI, "--liftoff-only", BIN_TS, cwd, "--allow-write"],
+    [...TSX_NODE_ARGS, BIN_TS, cwd, "--allow-write"],
     { cwd, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", env },
   );
   let stdout = "";

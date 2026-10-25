@@ -23,7 +23,9 @@ describe("medium guide profile (E8)", () => {
       "next",
       "read.receipt",
       "hints are advisory",
-      "verification kit",
+      // v128 medium: "run returned command/cwd; read only omitted kit bodies via next before tests"
+      // (was "run the returned verification kit").
+      "omitted kit bodies",
       "create:true",
       "queries=[",
       "cwd",

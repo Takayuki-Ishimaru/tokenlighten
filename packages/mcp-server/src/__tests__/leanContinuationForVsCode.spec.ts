@@ -16,6 +16,7 @@
 
 import { describe, expect, it } from "vitest";
 import { canonicalToolCall, runWithProtocolCall } from "../protocol/envelope.js";
+import { omitConfiguredRootCwdOnNext } from "../protocol/readCallContinuation.js";
 
 const ROOT = "/workspace/root";
 
@@ -31,7 +32,7 @@ function readCallUnder(
     else process.env[key] = value;
   }
   try {
-    return runWithProtocolCall({ tool: "tl_read_file", args: { cwd: ROOT }, workspace: ROOT, clientId }, build);
+    return runWithProtocolCall({ tool: "tl_read_file", args: { cwd: ROOT }, workspace: ROOT, configuredRoot: ROOT, clientId }, build);
   } finally {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
@@ -40,11 +41,20 @@ function readCallUnder(
   }
 }
 
+function shippedNext(
+  call: ReturnType<typeof canonicalToolCall>,
+  workspace = ROOT,
+): ReturnType<typeof canonicalToolCall> {
+  const projected = omitConfiguredRootCwdOnNext(workspace, ROOT, { decision: { next: call } });
+  return (projected["decision"] as { next: ReturnType<typeof canonicalToolCall> }).next;
+}
+
 describe("WP-V1: leanContinuationForVsCode — cwd", () => {
-  it("vscode + TL_LEAN_CALLS=1: drops cwd from a tl_read_file continuation targeting the same workspace", () => {
+  it("vscode + TL_LEAN_CALLS=1: keeps root cwd for sizing, then the transport projection drops it", () => {
     const call = readCallUnder("Visual Studio Code", { TL_LEAN_CALLS: "1" }, () =>
       canonicalToolCall("tl_read_file", { cwd: ROOT, targets: [{ path: "src/a.ts" }] }));
-    expect(call.arguments["cwd"]).toBeUndefined();
+    expect(call.arguments["cwd"]).toBe(ROOT);
+    expect(shippedNext(call).arguments["cwd"]).toBeUndefined();
   });
 
   it("vscode + TL_LEAN_CALLS=1: keeps cwd when the continuation targets a DIFFERENT (continuationWorkspace) tree", () => {
@@ -54,12 +64,14 @@ describe("WP-V1: leanContinuationForVsCode — cwd", () => {
         () => canonicalToolCall("tl_read_file", { targets: [{ path: "src/a.ts" }] }),
       ));
     expect(call.arguments["cwd"]).toBe("/other/root");
+    expect(shippedNext(call, "/other/root").arguments["cwd"]).toBe("/other/root");
   });
 
-  it("vscode + TL_LEAN_CALLS=1: tl_search_files continuations also drop cwd", () => {
+  it("vscode + TL_LEAN_CALLS=1: search root cwd stays through canonicalization, then is omitted on the wire", () => {
     const call = readCallUnder("Visual Studio Code", { TL_LEAN_CALLS: "1" }, () =>
       canonicalToolCall("tl_search_files", { cwd: ROOT, action: "find", queries: ["thing"] }));
-    expect(call.arguments["cwd"]).toBeUndefined();
+    expect(call.arguments["cwd"]).toBe(ROOT);
+    expect(shippedNext(call).arguments["cwd"]).toBeUndefined();
   });
 
   // Regression: `context.workspace` is populated by the EDIT dispatcher
@@ -76,10 +88,11 @@ describe("WP-V1: leanContinuationForVsCode — cwd", () => {
   it("drops cwd when only codecTraceWorkspace (the real tl_read_file/tl_search_files dispatch field) is set, workspace absent", () => {
     const call = readCallUnder("Visual Studio Code", { TL_LEAN_CALLS: "1" }, () =>
       runWithProtocolCall(
-        { tool: "tl_read_file", args: { cwd: ROOT }, codecTraceWorkspace: ROOT, clientId: "Visual Studio Code" },
+        { tool: "tl_read_file", args: { cwd: ROOT }, codecTraceWorkspace: ROOT, configuredRoot: ROOT, clientId: "Visual Studio Code" },
         () => canonicalToolCall("tl_search_files", { cwd: ROOT, action: "find", queries: ["cancelReservation"] }),
       ));
-    expect(call.arguments["cwd"]).toBeUndefined();
+    expect(call.arguments["cwd"]).toBe(ROOT);
+    expect(shippedNext(call).arguments["cwd"]).toBeUndefined();
   });
 
   it("keeps cwd when it differs from codecTraceWorkspace (a genuinely different tree), workspace absent", () => {
@@ -89,6 +102,7 @@ describe("WP-V1: leanContinuationForVsCode — cwd", () => {
         () => canonicalToolCall("tl_search_files", { cwd: "/other/root", action: "find", queries: ["cancelReservation"] }),
       ));
     expect(call.arguments["cwd"]).toBe("/other/root");
+    expect(shippedNext(call, "/other/root").arguments["cwd"]).toBe("/other/root");
   });
 
   it("tl_edit_file continuations NEVER drop cwd, even under vscode + TL_LEAN_CALLS=1", () => {
@@ -109,10 +123,11 @@ describe("WP-V1: leanContinuationForVsCode — cwd", () => {
     expect(call.arguments["cwd"]).toBe(ROOT);
   });
 
-  it("vscode + TL_TURN_ECONOMY=1 (umbrella, no member override) also leans", () => {
+  it("vscode + TL_TURN_ECONOMY=1: root cwd remains for sizing and is omitted by the transport", () => {
     const call = readCallUnder("Visual Studio Code", { TL_LEAN_CALLS: undefined, TL_TURN_ECONOMY: "1" }, () =>
       canonicalToolCall("tl_read_file", { cwd: ROOT, targets: [{ path: "src/a.ts" }] }));
-    expect(call.arguments["cwd"]).toBeUndefined();
+    expect(call.arguments["cwd"]).toBe(ROOT);
+    expect(shippedNext(call).arguments["cwd"]).toBeUndefined();
   });
 
   it("vscode + TL_TURN_ECONOMY=1 with an explicit TL_LEAN_CALLS=0 keeps cwd (member override wins)", () => {

@@ -45,6 +45,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { shortTmpDir } from "./helpers/shortTmpDir.js";
+import { expandedReadNextArguments } from "./helpers/readNext.js";
 import { rmDirWithRetry } from "./helpers/rmDirWithRetry.js";
 import { followNextToEnd, startDevServer, type ChainResult, type ServerHandle } from "./helpers/qualityFirstScenarios.js";
 import { callTool } from "../server.js";
@@ -553,15 +554,39 @@ describe("recall controls: what fits, what is short, and a long focal's value qu
 
   it("RULED COST: a long focal's CONDITION question at the default config no longer certifies a partial body; ONE extra hop reads the rest and ends act.answer with every branch", async () => {
     const focalPath = "src/policy/resend.ts";
-    const ws = makeWorkspace("cost", { [CODES_PATH]: CODES_FILE, [focalPath]: longCallable("canResend", 300) });
-    const walked = await walk(ws, { query: questionFor("condition", "canResend"), task: { epoch: "new", profile: "answer" } });
-    expectHonestChain("default-300-condition", walked, focalPath, 300, "condition");
-    // The rest of the focal is larger than one follow-up surface carries
-    // whole; the facet `next` names it as surface-sized pieces, so one hop
-    // reads all of it (measured before the split: a third hop for the tail).
-    expect(walked.hops.map((hop) => hop.body["decision"]?.kind)).toEqual(["discover", "act.answer"]);
-    const next = nextOf(walked.hops[0]!.body);
-    const targets = (next?.arguments["targets"] ?? []) as Array<{ path?: string; range?: string }>;
-    expect(targets.filter((target) => target.path === focalPath).length, JSON.stringify(next)).toBeGreaterThan(1);
+    const files = { [CODES_PATH]: CODES_FILE, [focalPath]: longCallable("canResend", 300) };
+    const first = { query: questionFor("condition", "canResend"), task: { epoch: "new", profile: "answer" } };
+    // Default (TL_EFF_AUTOFOLLOW, ON since 2026-10-19): the discover pack's
+    // one `next` re-issues the request, so the server takes that extra hop
+    // itself and the client gets ONE act.answer with every branch. One hop
+    // also shows the `next` read all of the rest: had it named only a part,
+    // the merged reply would still be a discover.
+    const merged = await walk(makeWorkspace("cost", files), first);
+    expectHonestChain("default-300-condition", merged, focalPath, 300, "condition");
+    expect(merged.hops.map((hop) => hop.body["decision"]?.kind)).toEqual(["act.answer"]);
+    expect(merged.hops[0]!.body["auto_followed"]).toBeDefined();
+    // The rollback shows that hop on the wire. The rest of the focal is larger
+    // than one follow-up surface carries whole; the facet `next` names it as
+    // surface-sized pieces, so one hop reads all of it (measured before the
+    // split: a third hop for the tail).
+    resetAll();
+    handleTable.reset();
+    const saved = process.env["TL_EFF_AUTOFOLLOW"];
+    process.env["TL_EFF_AUTOFOLLOW"] = "0";
+    try {
+      const walked = await walk(makeWorkspace("cost-off", files), first);
+      expectHonestChain("rollback-300-condition", walked, focalPath, 300, "condition");
+      expect(walked.hops.map((hop) => hop.body["decision"]?.kind)).toEqual(["discover", "act.answer"]);
+      const next = nextOf(walked.hops[0]!.body);
+      // v0.16.0 (release note: "Clients follow a short reference instead of
+      // repeating the full arguments"): a long read `next` is a `{cwd, cursor}`
+      // reference. Expand it -- without consuming its once-only plan, which the
+      // walk already ran -- to see how it splits the rest of the focal.
+      const targets = (expandedReadNextArguments(next?.arguments)?.["targets"] ?? []) as Array<{ path?: string; range?: string }>;
+      expect(targets.filter((target) => target.path === focalPath).length, JSON.stringify(next)).toBeGreaterThan(1);
+    } finally {
+      if (saved === undefined) delete process.env["TL_EFF_AUTOFOLLOW"];
+      else process.env["TL_EFF_AUTOFOLLOW"] = saved;
+    }
   }, 120_000);
 });

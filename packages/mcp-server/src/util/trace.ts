@@ -91,6 +91,7 @@ import {
 import { deriveServerBuildId } from "./serverBuild.js";
 import { workspaceRefOf } from "../state/handleCodec.js";
 import { resolveProtocolEra } from "../mcp/transport/index.js";
+import { engineConfigurationSha256 } from "../features/engines/config.js";
 
 // ---------------------------------------------------------------------------
 // V10-02 Telemetry v2 — per-call trace context
@@ -286,6 +287,16 @@ const RUN_NONCE_RE = /^[A-Za-z0-9_.-]{1,200}$/;
  */
 const canonicalRootCache = new Map<string, string>();
 
+/** Test-only session reset: every per-process trace counter and cache back to
+ *  its startup value (testing/sessionReset.ts). */
+export function resetTraceStateForTests(): void {
+  callIdClock = 0;
+  tsClock = 0;
+  dirCreated.clear();
+  attestedTracePaths.clear();
+  canonicalRootCache.clear();
+}
+
 export function canonicalizeWorkspaceRoot(workspaceRoot: string): string {
   const cached = canonicalRootCache.get(workspaceRoot);
   if (cached !== undefined) return cached;
@@ -329,7 +340,9 @@ export function canonicalizeWorkspaceRoot(workspaceRoot: string): string {
  * D10 (2026-08-14): the fifteen permanent-on flags left this list with their
  * readers. They are no longer configuration — an unconditional behaviour
  * contributes nothing to a digest of what the operator chose — so the digest
- * now covers exactly the out-of-contract (B)/(C) flags that can still vary.
+ * now covers the out-of-contract (B)/(C) flags that can still vary, plus a
+ * digest of effective user-scoped local-engine settings. Executable arguments
+ * and model cache paths are hashed before entering this input.
  */
 function resolvedFlagValues(): ReadonlyArray<readonly [string, string]> {
   const bool = (on: boolean): string => (on ? "1" : "0");
@@ -353,6 +366,7 @@ function resolvedFlagValues(): ReadonlyArray<readonly [string, string]> {
     // The raw env-resolved value, NOT the test override: an override is not
     // configuration and must not move a production digest.
     ["TL_TRACE", bool(traceEnabled())],
+    ["TOKENLIGHTEN_ENGINE_CONFIGURATION", engineConfigurationSha256()],
   ];
 }
 
@@ -416,8 +430,8 @@ const SERVER_BUILD_IDENTITY: string = (() => {
  * EXCLUDED BY CONSTRUCTION: `TL_MCP_CONFIG_SHA256` (including it would make
  * the digest self-referential) and `TL_P1_CAUSAL_RUN_NONCE` (it changes every
  * run, which would destroy the across-run comparability the digest exists
- * for). Neither is reachable: the input is built from the flags.ts allowlist,
- * not from `process.env` iteration.
+ * for). Neither is reachable: the input is built from the flag allowlist and
+ * the effective engine-settings digest, not from `process.env` iteration.
  *
  * Deterministic across restarts of identical code and configuration; changes
  * when any effective flag changes or the server build changes.

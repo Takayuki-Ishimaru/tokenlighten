@@ -543,7 +543,8 @@ export function maskNonCode(text: string, hashComment: boolean, relPath?: string
   const rustFile = ext !== undefined && RUST_EXTENSIONS.has(ext);
   const phpFile = ext !== undefined && PHP_ATTRIBUTE_EXTENSIONS.has(ext);
   const nestingComments = ext !== undefined && NESTING_BLOCK_COMMENT_EXTENSIONS.has(ext);
-  const out = [...text];
+  // The scanner indexes UTF-16 code units; preserve them after astral text.
+  const out = text.split("");
   let quote: string | undefined;
   let interpolating = false; // this quote run supports `${…}` (backtick) / `{…}` (f-string/C#) fields
   let fieldDepth = 0; // >0 while inside such a field -- code, left un-blanked

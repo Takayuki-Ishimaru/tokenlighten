@@ -29,7 +29,7 @@
 // renamed to `content.form` (A.9.2 row 7).
 // ---------------------------------------------------------------------------
 
-import type { ProtocolVersion, Evidence, FreshEvidence, Limit, ToolCall } from "./protocol.js";
+import type { ProtocolVersion, Evidence, FreshEvidence, GroupedEvidence, Limit, ToolCall } from "./protocol.js";
 import type { TaskRef, TaskDecision } from "./decision.js";
 import type { Receipt } from "./receipts.js";
 import type { ImpactSurface } from "./locate-impact.js";
@@ -50,7 +50,13 @@ export type ReadTaskPackResult = {
   kind: "read.task_pack";
   task: TaskRef;
   profile: "answer" | "generic";
-  evidence: Evidence[];
+  evidence: Evidence[] | GroupedEvidence[];
+  /**
+   * Present exactly when `evidence` is grouped (TL_EFF_EVIDENCE_PATH_GROUPS,
+   * default OFF): the text "a row without path or handle repeats the one
+   * above". See `GroupedEvidence` for the rule it announces.
+   */
+  evidence_note?: string;
   decision: TaskDecision;
   /** Unresolved obligations, emitted only while `task.coverage` is `partial`. */
   missing?: string[];
@@ -366,6 +372,15 @@ export type BatchEntry =
   | {
       form: "file-downgraded";
       path: string;
+      /**
+       * `reason: "already-served"` only (2026-10-18, DESIGN-v0.14-plan.md
+       * §20.17): the window this entry answers, in line numbers as the read
+       * normalized it (`full` and `N-end` arrive as `1-<last>` / `N-<last>`).
+       * Two windows of one file in the same batch differ here. No other class
+       * carries it: the symbol-over-cap downgrade's `content` is a trimmed
+       * head, not its symbol's whole range.
+       */
+      range?: string;
       /** Absent on the office-redirect class, which mints no handle. */
       handle?: string;
       /** Absent on the office-redirect class. */
@@ -425,7 +440,21 @@ export type FullDowngradeReason =
    * (`protocol/readFamily.ts::projectBatch`) needed one new closed-enum
    * value, never a new array or a new required key.
    */
-  | "not-decodable-text";
+  | "not-decodable-text"
+  /**
+   * 2026-10-18 (DESIGN-v0.14-plan.md §20.17): a `read.batch` window this
+   * session already served in full at the file's current content. The entry
+   * carries the window as `range`, `code_unchanged: true`, the file's
+   * served-range `summary` and a `note` naming the call that served it, in
+   * place of the bytes — the batch counterpart of the single-target
+   * `code-unchanged` receipt. Before it, a re-asked batch went to the task-pack route, whose
+   * `prior` rows know only windows an earlier PACK served, so a batch first
+   * answered as `read.batch` (or by plain reads) came back with every body
+   * resent. Same additive pattern as `not-decodable-text`: one closed-enum
+   * value, no new array or required key; `task.force_serve:true` still
+   * resends the bytes.
+   */
+  | "already-served";
 
 // ---------------------------------------------------------------------------
 // A.5.5 `read.artifact`

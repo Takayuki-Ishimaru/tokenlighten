@@ -661,6 +661,16 @@ function reclassificationReceipt(body: Body): EditReclassification | undefined {
  *      SHEDDABLE, not deletable — the same reasoning that keeps `hint` on
  *      `Refusal`'s advisory allowlist, so one field means one thing on both
  *      sides of the outcome.
+ *   `review_note`  2026-10-22 (codex-copilot-proxy r18 T07): a source-order
+ *      fact per edited Go file (two files at most, one per line) whose edit
+ *      changed the code of a function above a final write its return still
+ *      reads, in a place that reaches the call before that write (its signature,
+ *      the call, what the call's arguments or the returned local are given;
+ *      never a comment, a blank line or an unrelated statement, 2026-10-24),
+ *      and left that write unchanged (`goReturnedLocalReview.ts`'s
+ *      `goPostEditReview`, attached by server.ts's `augmentEdit`). Absent unless
+ *      that holds. It names no defect and asks for no edit; it is not `review`,
+ *      the opt-in touched-surfaces object, which has a different producer.
  *   `changes`, `encrypted`, `warnings`, `artifact`, `members`  the
  *      artifact/ZIP edit path's result and disclosures (`ArtifactEditResult`,
  *      `write/artifactEdit.ts:22-30`). `changes` is that path's own
@@ -681,7 +691,7 @@ const KEPT_ON_APPLIED = [
   "path", "lines", "delta", "handle", "sha",
   "bytes", "total_lines", "read_back", "create_target", "cwd_source",
   "from", "to", "changed_files", "total_replacements", "skipped",
-  "review", "verification", "verify_note", "closure", "change_contract", "unread_note",
+  "review", "review_note", "verification", "verify_note", "closure", "change_contract", "unread_note",
   "changes", "replacements", "encrypted", "warnings", "artifact", "members", "form", "hint",
   // `warning`, `leftoverLines` — B4.2's ORPHAN-TAIL disclosure
   // (server.ts's `attachOrphanTailWarning`). A `{handle, content}` replace on a

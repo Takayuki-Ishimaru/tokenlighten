@@ -8,7 +8,30 @@
  */
 
 import { basename } from "node:path";
+import {createPriorBodyRestoration} from "./priorBodyRestoration.js";
+import {makeSourceBodyCapsule, sourceCapsuleCovers, type SourceBodyCapsule} from "./sourceBodyCapsule.js";
+import {clearSourceCapsules, sourceCapsulePrior, stageSourceCapsules} from "./sourceCapsuleCallScope.js";
+import {rehydrateHandleEntry} from "../../state/stateHandles.js";
 import { AsyncLocalStorage } from "node:async_hooks";
+import {protocolCallContext} from "../../protocol/envelope.js";
+import {estimateAnswerBody, isExactContiguousBody, preferExactAnswerBody} from "../../protocol/answerBodyPolicy.js";
+import {goReturnedLocalReview, bindGoReviewOrigin} from "../../goReturnedLocalReview.js";
+import {analyzeJavaLoopGuards, javaLoopGuardReview, bindJavaLoopGuardOrigin} from "../../javaLoopGuardReview.js";
+import {enumStyleReview, bindEnumStyleReviewOrigin} from "../../enumStyleReview.js";
+import {
+  taskPackSizePreview,
+  TASK_PACK_PREVIEW_DISCOVER_RESERVE_BYTES,
+  TASK_PACK_PREVIEW_PREPARED_RESERVE_BYTES,
+} from "../../protocol/taskPackSizePreview.js";
+import {auxiliaryEnumAttachmentSizePreview} from "../../protocol/auxiliaryEnumAttachmentSizePreview.js";
+import {
+  attachAuxiliaryEnumContexts, auxiliaryEnumPool, carryAuxiliaryEnumPool, captureAuxiliaryEnumCandidate,
+  isAuxiliaryEnumSurface, primaryEnumContextRows, publishAuxiliaryEnumPool,
+  restoreAuxiliaryEnumPool, shedAuxiliaryEnumContexts,
+} from "./auxiliaryEnumContextIntegration.js";
+import {measureResponseBytes} from "../../protocol/budget/measure.js";
+import { resolveTypedCallee } from "../typed-symbols/calleeClosure.js";
+import { contentHash } from "../typed-symbols/index.js";
 import {
   artifactQueryTokenVariants,
   buildBasenameFrequency,
@@ -30,6 +53,7 @@ import {
   anyWalkOmission,
   createWalkOmissions,
   genericTextDiscoveryEnabled,
+  isWalkIgnoredPath,
   isSourceOnlyExcludedPath,
   walkCodeFiles,
 } from "../../tools/walkRepo.js";
@@ -52,7 +76,28 @@ import {
 } from "../../util/lineClassify.js";
 import { elideDocComments, elideDocCommentsWithWindows } from "../../util/formatCompress.js";
 import { isEnumLikeQuery, stripPathSpans, tokenizeQuery } from "../../util/queryShape.js";
+import { memberReferenceNames, packageMemberPairs } from "../../util/memberReferences.js";
+import { maskCitationFormatFields } from "../../util/citationFormat.js";
+import { maskEvaluationInputRecords } from "../../util/evaluationInputs.js";
 import { maskCommentsAndStrings } from "./sfCodeMask.js";
+import { coalesceBlankGapWindows } from "./blankWindowBundles.js";
+import {coalesceAnswerRows} from "./coalesceAnswerRows.js";
+import { cppHeaderHasSafeUnqualifiedTypeReference, cppNamespacePathAt, cppOutOfLineMembers, ownLinesBridge, ownRegionsOf } from "./structureMapMembers.js";
+import {appendAdvisoryLine, structureMapElsewhereNote} from "./structureMapElsewhere.js";
+import {declarationFramedNames} from "./declarationFraming.js";
+import {advisoryWireBytes, answerFirstFacts, composeAnswerFirst, composeAnswerFirstAdvisory, type AnswerFirstFacts} from "./answerFirstFacts.js";
+import {changeScopeFollowupTarget, recordBudgetDeferredSurface, isRequiredEnumReview, REQUIRED_ENUM_REVIEW_PURPOSE} from "./changeScopeContinuation.js";
+import {createPackFingerprintBinding} from "./packFingerprintBinding.js";
+import {
+  ARTIFACT_CONSUMER_RESERVE_BYTES,
+  ARTIFACT_CONSUMER_TOTAL_BYTES,
+  artifactSectionText,
+  commonDirectory,
+  isArtifactConsumerSurface,
+  markArtifactConsumerSurface,
+  packageRootOf,
+  planArtifactConsumers,
+} from "./artifactConsumers.js";
 import { expandOneHop } from "./openUniverseExpansion.js";
 import { containsWholeIdentifier, nearMissIdentifiersIn, wholeIdentifierOffsets } from "./wholeIdentifier.js";
 import {
@@ -74,12 +119,15 @@ import { resolveSemanticWiring, type SemanticWiringResolution } from "../../tool
 import {
   buildVerificationManifest,
   findBuildEntry,
+  nativeSyntaxCheck,
   nodeModulesReachableFrom,
   probeToolchain,
+  pythonSyntaxCheck,
   surfaceToolchainDomain,
   type VerificationManifest,
 } from "../../util/verificationPack.js";
 import { classifyNodeTestRunnability, type NodePackageManifestLike } from "../../util/nodeTestRunnability.js";
+import {goVerificationEntry, goVerificationHint, goTestInvokesFocal, samePackageGoTest} from "../../util/goVerification.js";
 import { isNativeExtPath, widenNativeRangeString } from "../../util/nativeSymbolRange.js";
 import { dominantRoot } from "../../util/dominantRoot.js";
 import { countLines, sliceLinesToText } from "../../util/countLines.js";
@@ -114,11 +162,27 @@ import {
   nextStringToCall,
   type ContinuationPlan,
 } from "../../util/continuation.js";
-import { collectSymbols, type CollectedSymbol, type CollectedSymbolKind } from "../../symbols/collectSymbols.js";
+import { collectSymbols, symbolCollectorSupports, type CollectedSymbol, type CollectedSymbolKind } from "../../symbols/collectSymbols.js";
+import {
+  answerFirstCover,
+  answerFormFree,
+  asksForStructureMap,
+  headerEndOf,
+  headerTypeNames,
+  mergeSpans,
+  planStructureMap,
+  structureMapCallTerms,
+  structureMapTypeOf,
+  STRUCTURE_MAP_MIN_MEMBERS,
+  type StructureMapMember,
+  type StructureMapPlanOptions,
+  type StructureMapType,
+} from "./structureMap.js";
+import { resolveImportsOf } from "./importResolution.js";
 import { recordPackChecks, getPackChecks, tokenizeForEpoch, deriveCheckId, recordConcernTokens, recordServedEditAdmissibility, recordWithheldEditAddresses, isCandidateListPackPending, recordServedRange, beginServeCall, servedFindWindowHasUnservedLines, servedClusterRanges, servedRangeReceipt, servedRangeCoverage, getIntentEditObserved, getSession, type PackCheckRecord } from "../../state/session.js";
 import {
-  extractRequestItems,
   createRequestItemIndexView,
+  stripDelegationActorSpans,
   // SHOULD-FIX 55 (AB1, round 11): the ONE mutation-verb vocabulary, declared in
   // requestItems.ts beside the edit-lead set it must stay a superset of.
   MUTATION_VERBS_EN,
@@ -141,6 +205,8 @@ import {
   isGenericJapaneseAbsenceTerm,
   explicitMultiEditRequestPaths,
   explicitMixedEditReadRequestPaths,
+  explicitSingleEditRequestPath,
+  queryAsksForChange,
   queryHasQuotedLiteral,
   requestItemLeads,
   splitIntoLeadClauses,
@@ -187,8 +253,18 @@ import {
   // Copilot retest r4 (2026-10-02): a citation clause's own subject words —
   // see `citationClauseNamesOnlyServedThings`.
   topicNounPhraseWords,
+  // 2026-10-16 simple bench: a path the request protects is never a candidate edit target.
+  protectedNamedPaths,
   type RequestItem,
+  type RequestItemIndexView,
 } from "./requestItems.js";
+import {
+  extractCompoundRequestItems,
+  extractCompoundFacetRequirements,
+  planCompoundRequest,
+  type CompoundRequestPlan,
+} from "./compoundRequests.js";
+import { activeEngineConfiguration, activeEngineDiscoveryGaps, withEngineConfiguration } from "../engines/config.js";
 // H-1/H-2 (2026-09-19, narrow false-completion fix): whole-word,
 // variant-aware absence veto — see salientWordMatch.ts's own module doc
 // comment for the const/constant false-positive this replaces.
@@ -237,6 +313,7 @@ import {
   concernRecoveryEnabled,
   coveragePackerEnabled,
   coveragePackerV2Enabled,
+  editContextEnabled,
   effLightAnswerEnabled,
   foldSmallRemainderEnabled,
   graphEvidenceEnabled,
@@ -245,6 +322,7 @@ import {
   literalFirstRoutingEnabled,
   namedTargetResolutionEnabled,
   noteProofCompletionPack,
+  packContainmentDedupEnabled,
   packFairTrimEnabled,
   packGuideElideEnabled,
   proofCompletionEnabled,
@@ -324,7 +402,6 @@ import {
 // FIX-C1 (2026-09-27, eval-0927 P0-1/P0-2): the two new pure modules the
 // facet-closure hook (below) drives.
 import {
-  extractFacetRequirements,
   framedCodeNamesIn,
   isFacetDescriptorTerm,
   isStructuralOnlyRequest,
@@ -336,6 +413,7 @@ import {
 } from "./requestFacets.js";
 import {
   calleeNamesIn,
+  qualifiedCalleePositionsIn,
   COMMON_BUILTIN_CALLEES,
   constantLikeReferencesIn,
   constructionOnlyInitializer,
@@ -373,6 +451,7 @@ import {
 // once each, at the tail of buildAnswerTaskPack and of buildSeededTaskPack.
 import { attachFrontierNeighbourIndex, type PlanAidOptions } from "./frontierNeighbours.js";
 import { attachUsageInventory } from "./usageInventory.js";
+import { resolveGoImports } from "./importResolveGo.js";
 // FIX-G (2026-09-27, eval-0927 P0): the answer-sufficiency gate over the
 // facet-closure plan the hook records (see `buildFacetReadiness`).
 import {
@@ -394,6 +473,7 @@ import {
   type FacetFacts,
   type FacetLineSpan,
   type FacetMentionLine,
+  type FacetPlan,
   type FacetPlanEntry,
   type FacetPlanWindow,
 } from "./facetGate.js";
@@ -467,13 +547,22 @@ import {
   taskContractDischargeCertificate,
   taskContractDigest,
   taskContractGapProjection,
+  taskContractProjectionForSnapshot,
   recordEvidenceExpansion,
   recordServedConcernEvidence,
   recordServedRoleEvidence,
   recordTaskContract,
   resetTaskContractStoreForTest,
+  type TaskContractObservationUpdate,
 } from "./taskContractStore.js";
 import { hasOpenUniverseIntent, isAdditiveEnumIntent } from "./openUniverseIntent.js";
+import {
+  LISTED_ITEM_DERIVED_WHY,
+  enclosingDeclaration,
+  enumNamesDeclaredWith,
+  listedScopeItems,
+  wholeEnumAccessor,
+} from "./listedScopeItems.js";
 import { trace, isTraceEnabled, currentTraceCallId } from "../../util/trace.js";
 import {
   jaBridgeExpansionTokens,
@@ -589,9 +678,9 @@ function deriveNextFromPlan(plan: ContinuationPlan): ContinuationCall | undefine
 }
 
 import { applySemanticFrontierDemotion, attachSfDemotionResidency, deriveCanonicalTaskDecision, hasCertificateBinding, isSupportingEvidenceWhy, reapplySemanticFrontierDecision } from "./canonicalDecision.js";
-import { markSemanticFrontierNamedJoin, markCallerRangeSurface, isCallerRangeSurface, markExplicitRangeSurface, markSurfaceProvenance, surfaceProvenance, wasSemanticFrontierBodyWithheld } from "./sfWithholdingMarks.js";
+import { markSemanticFrontierNamedJoin, markCallerRangeSurface, isCallerRangeSurface, isExplicitRangeSurface, markExplicitRangeSurface, markSurfaceProvenance, surfaceProvenance, wasSemanticFrontierBodyWithheld } from "./sfWithholdingMarks.js";
 import { withdrawProvisionalServedRanges } from "../../state/session.js";
-import { decisionInvariantStrictEnabled, effHubWholeEnabled } from "../../util/flags.js";
+import { decisionInvariantStrictEnabled, effEvidencePathGroupsEnabled, effHubWholeEnabled, effMapAnswerFirstEnabled, effStructureMapEnabled } from "../../util/flags.js";
 import {
   breachedCitations,
   certificateCitations,
@@ -791,6 +880,61 @@ const MAX_TASK_PACK_BYTES_ARTIFACT_BUNDLE = 32768;
 // rawCapForResult below).
 // ---------------------------------------------------------------------------
 const packByteCeilingStorage = new AsyncLocalStorage<number | undefined>();
+
+// One configuration and pure-parser cache per async pack build. Concurrent
+// requests never inherit another client's flag or partially parsed query.
+const compoundParsingStorage = new AsyncLocalStorage<{
+  enabled: boolean;
+  facets: Map<string, FacetRequirement[]>;
+  items: Map<string, RequestItem[]>;
+  plans: Map<string, CompoundRequestPlan>;
+}>();
+const COMPOUND_REQUEST_CLAUSE_CAP = 8;
+
+function compoundParserOptions(): { enabled: boolean; maxClauses: number } {
+  return {
+    enabled: compoundParsingStorage.getStore()?.enabled ?? activeEngineConfiguration().compoundRequests.enabled,
+    maxClauses: COMPOUND_REQUEST_CLAUSE_CAP,
+  };
+}
+
+function extractRequestItems(query: string, index?: RequestItemIndexView): RequestItem[] {
+  const cache = index === undefined ? compoundParsingStorage.getStore()?.items : undefined;
+  let items = cache?.get(query);
+  if (items === undefined) {
+    items = extractCompoundRequestItems(query, index, compoundParserOptions());
+    // The centralized composition-budget obligation below owns the omitted
+    // tail. Do not run literal-absence heuristics over its synthetic fallback.
+    if (compoundPlanForQuery(query)?.outstanding.length) {
+      items = items.filter((item) => !(item.text === query && !item.bindable && item.terms.length === 0));
+    }
+    cache?.set(query, items);
+  }
+  // markFacetOwnedPoints annotates its own items; never mutate a cached parse.
+  return items.map((item) => ({ ...item }));
+}
+
+function extractFacetRequirements(query: string): FacetRequirement[] {
+  const cache = compoundParsingStorage.getStore()?.facets;
+  let requirements = cache?.get(query);
+  if (requirements === undefined) {
+    requirements = extractCompoundFacetRequirements(query, compoundParserOptions());
+    cache?.set(query, requirements);
+  }
+  return requirements;
+}
+
+function compoundPlanForQuery(query: string): CompoundRequestPlan | undefined {
+  const options = compoundParserOptions();
+  if (!options.enabled) return undefined;
+  const cache = compoundParsingStorage.getStore()?.plans;
+  let plan = cache?.get(query);
+  if (plan === undefined) {
+    plan = planCompoundRequest(query, undefined, options);
+    cache?.set(query, plan);
+  }
+  return plan;
+}
 
 /** The active caller/env/profile byte ceiling for the buildTaskPack() call in progress, or undefined outside one (or when nothing constrained it) -- see packByteCeilingStorage's doc comment. */
 function activePackByteCeiling(): number | undefined {
@@ -1149,6 +1293,8 @@ function sliceCode(
   cache?: FileReadCache,
   /** WP-S2: overridden ONLY by `centeredSliceForCap`'s `wholeFileParity` opt-in; every other caller keeps the shared per-surface cap. */
   maxBytes = MAX_SURFACE_CODE_BYTES,
+  /** The slice with its comments, unelided: an artifact consumer's stub member (artifactConsumers.ts `whole`). */
+  keepComments = false,
 ): string | undefined {
   const m = range.match(/^(\d+)-(\d+)$/);
   if (!m) return undefined;
@@ -1167,6 +1313,7 @@ function sliceCode(
   const slice = sliceLinesToText(raw, start, end);
   if (slice.length === 0) return undefined;
   if (Buffer.byteLength(slice, "utf8") > maxBytes) return undefined;
+  if (keepComments) return slice;
   // item 11: pass the slice's true file start line so elision markers carry
   // file line numbers, not slice-relative ones.
   const elided = elideDocComments(slice, languageForPath(relPath), start);
@@ -2526,6 +2673,17 @@ function discoverGenericTaskPackFallback(
  * synchronous pack exit can serve them as content, then builds the pack.
  */
 export async function buildTaskPack(
+  args: TaskPackArgs,
+  workspace: string,
+): Promise<TaskPackResult> {
+  const configuration = activeEngineConfiguration();
+  return withEngineConfiguration(configuration, () => compoundParsingStorage.run({
+    enabled: configuration.compoundRequests.enabled,
+    facets: new Map(), items: new Map(), plans: new Map(),
+  }, () => buildTaskPackWithEngineConfiguration(args, workspace)), args.query ?? args.symbol ?? args.path ?? "");
+}
+
+async function buildTaskPackWithEngineConfiguration(
   args: TaskPackArgs,
   workspace: string,
 ): Promise<TaskPackResult> {
@@ -3966,15 +4124,36 @@ function applySfContinuationBundle(result: TaskPackResult, workspace: string): v
 const SINGLE_SITE_SHORT_CIRCUIT_MAX_CODE_BYTES = 700;
 const SINGLE_SITE_SHORT_CIRCUIT_PATH_RE = /(?:[A-Za-z]:)?(?:[\w.-]+[/\\])+[\w.-]+\.[A-Za-z][A-Za-z0-9]{0,9}\b/g;
 
+/**
+ * The query carries a second, independent change or a rename relation, so
+ * seeding the one file it names would hide the rest of the request (T2's
+ * fail-open rule, shared by `explicitSingleEditRequestPath`'s seed).
+ */
+function asksBeyondOneNamedSite(query: string): boolean {
+  if (hasIndependentEditConcernClauses(query) || hasExplicitIndependentConcernMarker(query)) return true;
+  if (/(?:,|;|\n)\s*(?:and\s+)?(?:also\s+)?(?:fix|add|implement|change|replace|rename|refactor|wire|connect|update|create)\b/iu.test(query)
+    || /(?:、|。|\n)\s*(?:さらに|加えて)?[^\n]{0,80}(?:修正|追加|実装|変更|置換|改名|接続|作成)/u.test(query)) return true;
+  return /\b(?:rename|renamed|renaming)\b/iu.test(query) || /(?:改名|リネーム)/u.test(query);
+}
+
+/** True when `relPath` resolves, through its realpath, to a regular file inside `workspace`. */
+function isExistingWorkspaceFile(relPath: string, workspace: string): boolean {
+  const abs = safeResolve(relPath, workspace);
+  if (abs === undefined) return false;
+  try {
+    const real = fs.realpathSync(abs);
+    return isWithin(real, resolveReal(workspace)) && fs.statSync(real).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function singleSiteShortCircuitSeed(
   query: string,
   workspace: string,
 ): TaskPackPathEntry | undefined {
   if (query.trim().length === 0) return undefined;
-  if (hasIndependentEditConcernClauses(query) || hasExplicitIndependentConcernMarker(query)) return undefined;
-  if (/(?:,|;|\n)\s*(?:and\s+)?(?:also\s+)?(?:fix|add|implement|change|replace|rename|refactor|wire|connect|update|create)\b/iu.test(query)
-    || /(?:、|。|\n)\s*(?:さらに|加えて)?[^\n]{0,80}(?:修正|追加|実装|変更|置換|改名|接続|作成)/u.test(query)) return undefined;
-  if (/\b(?:rename|renamed|renaming)\b/iu.test(query) || /(?:改名|リネーム)/u.test(query)) return undefined;
+  if (asksBeyondOneNamedSite(query)) return undefined;
 
   const candidates: Array<{ relPath: string; real: string }> = [];
   const seenRelPaths = new Set<string>();
@@ -4514,12 +4693,12 @@ async function buildTaskPackCore(
   // wiring consumers in this function; `query` itself is untouched and
   // still feeds create-target resolution (dedupeTrimAndPersist's
   // effectiveQuery -> resolveCreateTargetFromQuery), the wire task.query
-  // echo, profile binding, and the pack fingerprint/dedupe ledger. A
-  // non-create query or a create query with no fenced block leaves
-  // locatingQuery === query (byte-identical).
-  const locatingQuery = queryNamesCreateTarget(query, workspace)
+  // echo, profile binding, and the pack fingerprint/dedupe ledger.
+  // Explicit delegation actors are also omitted from retrieval; their work
+  // instructions and any quoted source literals remain intact.
+  const locatingQuery = stripDelegationActorSpans(queryNamesCreateTarget(query, workspace)
     ? stripFencedBlocksForLocating(query)
-    : query;
+    : query);
 
   // Guard 2 (2026-07-12b decoy-fix forensics): harvest this query's FIX-A-
   // filtered concern-anchor tokens into the session's rolling set so a later
@@ -5008,8 +5187,15 @@ async function buildTaskPackCore(
   // required-role, style, closure, and change-contract machinery.
   // D10 (2026-08-14): `TL_EVIDENCE_RELATIONS` is deleted; relation-backed
   // propagation is unconditional.
+  // A validated same-task qref continuation names exact source windows.
+  // Re-running propagation discovery would replace them with path-only seeds.
+  const replayedRangedScope = args.taskQueryRefReplay === true
+    && typeof args.taskBinding === "string" && args.taskBinding.length > 0
+    && suppliedPathEntries.length > 0
+    && suppliedPathEntries.some(entry => parseSurfaceSpan(entry.range ?? "") !== undefined)
+    && suppliedPathEntries.every(entry => !directoryLike(entry.path));
   if (
-    initialProfile === "change_propagation"
+    (initialProfile === "change_propagation" && !replayedRangedScope)
     // Directed relations are propagation work even when profile inference does
     // not know the verb (notably Japanese リネーム); still fully flag-gated.
     || (literalFirstRoutingEnabled() && literalFirstRelation(query, args.symbol) !== undefined)
@@ -5052,6 +5238,16 @@ async function buildTaskPackCore(
   // -------------------------------------------------------------------------
   if (args.paths && args.paths.length > 0) {
     return buildSeededTaskPack(args, query, workspace);
+  }
+
+  // 2026-10-17 (DESIGN-v0.14-plan §20.8): one named, existing workspace file
+  // carrying an edit lead of its own is the request's target, with the same
+  // standing as a caller's paths[] above (`explicitSingleEditRequestPath`).
+  if (!args.path && !args.symbol && literalFirstRoutingEnabled() && !hasCreateOrPlacementIntent(query) && !asksBeyondOneNamedSite(query)) {
+    const single = explicitSingleEditRequestPath(query);
+    if (single !== undefined && isExistingWorkspaceFile(single, workspace)) {
+      return buildSeededTaskPack({ ...args, paths: [{ path: single }], autoDiscoveredLocation: true }, query, workspace);
+    }
   }
 
   // DESIGN-v0.9 §8 WS3: specialized profiles branch before generic locator
@@ -5339,6 +5535,8 @@ async function buildTaskPackCore(
   // DESIGN-v0.8 coverage-honesty (Part 5 B-1): promote a config/data/doc
   // surface whose already-read content already names the enum's new value.
   promoteVariantSurfaces(surfaces, locatingQuery, workspace, cache);
+  // Edit context (2026-10-16 bench): the located edit target's dependencies.
+  if (profile !== "answer") await augmentEditContextSurfaces(surfaces, locatingQuery, workspace, requiredRoles, cache, profile === "generic");
   finalizePrimarySurface(surfaces);
 
   const missingRequired = requiredRoles.filter((role) => !surfaces.some((s) => s.role === role));
@@ -5369,7 +5567,7 @@ async function buildTaskPackCore(
   // Issue #3 dominance tie-break: computed once, reused below (after `result`
   // exists) to serve the winner's body — see `applyDominancePromotion`.
   const dominantSurfaceIndex = resolveDominantSurfaceIndex(surfaces);
-  const { coverage: coverageStr, reason: coverageReason, dominancePromoted } = deriveCoverage(
+  const derivedCoverage = deriveCoverage(
     {
       completeness: locateResult.completeness,
       confidence: locateResult.confidence,
@@ -5380,6 +5578,41 @@ async function buildTaskPackCore(
     unmatchedConcern,
     dominantSurfaceIndex,
   );
+  // A locator HIT whose ONE primary defines the callable the request names
+  // (`(Sum)`, `meter.Sum`), which no other workspace file defines, is the
+  // request's target rather than a one-entry candidate list (deriveCoverage
+  // rule 6's residual; the answer route settles a uniquely named FILE the same
+  // way, TL-REVIEW-3). Gauge fixture, 2026-10-17: 「gauge の集計 (Sum) …修正して」
+  // located meter/sum.go alone at the filename-match 0.625 and still asked
+  // the caller to name it. Only for a request that asks for the change: a
+  // bare name ("parseConfig function") stays a candidate to confirm, and an
+  // implement-from-document request whose document was not found keeps its
+  // low-confidence fall-through (artifact_build, WS3).
+  //
+  // When OTHER files define that callable too (`meter.Sum` and `stats.Sum`,
+  // neither qualified), the choice is between them: each is served as a
+  // candidate beside the located one, and the located one's edit context is
+  // dropped until the caller has chosen (gauge fixture, 2026-10-17: the
+  // await_input listed the located file alone, "1 candidate target(s)").
+  const namedDefinitions = derivedCoverage.reason === "candidate-list"
+    && profile !== "artifact_build"
+    && locateResult.hit
+    && locateResult.primary.length === 1
+    && surfaces[0] !== undefined
+    && surfaces[0].path === locateResult.primary[0]!.path
+    && hasServedCode(surfaces[0])
+    ? await namedCallableDefinitions(locatingQuery, workspace, surfaces[0].path, cache)
+    : undefined;
+  const definedSinglePrimary = namedDefinitions !== undefined
+    && namedDefinitions.complete
+    && namedDefinitions.paths.length === 1
+    && requestAsksForChange(locatingQuery);
+  if (namedDefinitions !== undefined && namedDefinitions.paths.length > 1) {
+    await addSameNameDefinitionCandidates(surfaces, namedDefinitions, workspace, requiredRoles, locatingQuery, cache);
+  }
+  const { coverage: coverageStr, reason: coverageReason, dominancePromoted } = definedSinglePrimary
+    ? { coverage: "focused" as const, reason: "single-site" as const, dominancePromoted: undefined }
+    : derivedCoverage;
 
   const route = buildRoute(surfaces, missingRequired, coverageStr, allMissing, locatingQuery, coverageReason);
 
@@ -6089,6 +6322,20 @@ async function buildAnswerTaskPack(
       for (const path of callerMerge.appliedPaths) concernRecoveredPaths.add(path);
     }
   }
+  // v0.16 6t-7 T03: a short, map-shaped question about a type too large for
+  // one surface is answered from the type's STRUCTURE MAP (structureMap.ts).
+  // Decided here, on the candidate the pack serves first, so the facet hook
+  // just below plans the flow facets against the same windows the surface
+  // then serves (`renderStructureMapSurface`).
+  const structureMapChoice = await structureMapForAnswer(query, candidates[0], workspace, cache);
+  // The map the pack serves. TL_EFF_MAP_ANSWER_FIRST: the ordinary one — the reply of the
+  // request without the flag — unless the answer-first candidate's first page holds
+  // everything the facets plan against it, which the facet hook seat just below decides
+  // BEFORE anything is built or booked (`answerFirstPageHolds`).
+  let structureMap: AnswerStructureMap | undefined = structureMapChoice.ordinary;
+  // …and, when the answer-first page is adopted, what puts the chain back on the ordinary
+  // map's requirements should the pack not ship as the answer after all (`restoreOrdinaryFacetPlan`).
+  let restoreOrdinaryFacetPlan: (() => Promise<void>) | undefined;
   // FIX-C1 (2026-09-27, eval-0927 P0-1/P0-2): a facet-driven bounded evidence
   // closure. Beside the caller-expansion hook above, same seat (after every
   // selection mechanism has settled, first pack of the task only -- no
@@ -6115,24 +6362,77 @@ async function buildAnswerTaskPack(
   // (missing, or invalidated by a mismatched file sha). A replay whose plan
   // is still valid (no named file changed) takes neither branch below and
   // stays byte-identical to before this fix -- the recall control.
-  if (
-    args.taskQueryRefReplay !== true
-    || facetPlanFor(facetPlanWorkspaceKey(workspace), query, (relPath) => {
+  const replayedFacetPlan = args.taskQueryRefReplay === true
+    ? facetPlanFor(facetPlanWorkspaceKey(workspace), query, (relPath) => {
       const content = readCached(workspace, relPath, cache);
       return content === undefined ? undefined : shaOfText(content);
-    }) === undefined
-  ) {
+    })
+    : undefined;
+  // The selection the hook plans against, as it stands before the hook widens any of it: what
+  // `restoreOrdinaryFacetPlan` plans the ordinary map against again (only answer-first needs it).
+  const pristineFacetWindow = structureMapChoice.answerFirst === undefined
+    ? []
+    : candidates.slice(0, Math.min(candidates.length, selectionLimit)).map((entry) => ({ ...entry }));
+  const sourceLinesOf = (relPath: string): string[] | undefined => readCached(workspace, relPath, cache)?.split(/\r?\n/);
+  /** The plan the hook recorded for this request just now, remembered as the plan of an adopted answer-first page or of the ordinary map (a replay decides the same again). */
+  const rememberAnswerFirstDecision = (adopted: boolean): void => {
+    const recorded = facetPlanFor(facetPlanWorkspaceKey(workspace), query, (relPath) => {
+      const content = readCached(workspace, relPath, cache);
+      return content === undefined ? undefined : shaOfText(content);
+    });
+    if (recorded !== undefined) answerFirstPlanDecisions.set(recorded, adopted);
+  };
+  const planOrdinaryFacets = async (): Promise<void> => {
+    await recoverFacetClosureCandidates(args, query, workspace, cache, pristineFacetWindow, extractFacetRequirements(query), true, structureMapChoice.ordinary);
+    rememberAnswerFirstDecision(false);
+  };
+  if (replayedFacetPlan !== undefined) {
+    // TL_EFF_MAP_ANSWER_FIRST: this replay runs no hook, so the plan the first call recorded
+    // decides again which map the pack is — the decision that call made, remembered with the
+    // plan, or (a plan recorded by no answer-first decision) what the plan itself says.
+    const candidate = structureMapChoice.answerFirst;
+    if (candidate !== undefined && (answerFirstPlanDecisions.get(replayedFacetPlan) ?? answerFirstPageHolds(candidate.map, replayedFacetPlan.entries, [], sourceLinesOf).holds)) {
+      structureMap = candidate.map;
+      restoreOrdinaryFacetPlan = planOrdinaryFacets;
+    }
+  }
+  if (replayedFacetPlan === undefined) {
     const facetRequirements = extractFacetRequirements(query);
     if (facetRequirements.length > 0) {
       const facetWindow = candidates.slice(0, Math.min(candidates.length, selectionLimit));
+      // TL_EFF_MAP_ANSWER_FIRST: a DRY RUN of this very hook against the answer-first page decides
+      // whether the page is adopted. It is the real hook on COPIES of the selection: the windows it
+      // serves and widens are the copies', it does not count as a run of the hook and it records no
+      // plan; when the page holds every window the facets require (and every window the run served),
+      // the real hook below runs once against it (with the requirements it was planned against),
+      // and otherwise once against the ordinary map with the request's own requirements — the run
+      // a request without the flag gets.
+      let hookRequirements: readonly FacetRequirement[] = facetRequirements;
+      const candidate = structureMapChoice.answerFirst;
+      if (candidate !== undefined) {
+        const trial: FacetClosureTrial = { served: [] };
+        try {
+          await recoverFacetClosureCandidates(args, query, workspace, cache, facetWindow.map((entry) => ({ ...entry })), candidate.requirements, false, candidate.map, trial);
+          if (trial.plan !== undefined && answerFirstPageHolds(candidate.map, trial.plan.entries, trial.served, sourceLinesOf).holds) {
+            structureMap = candidate.map;
+            hookRequirements = candidate.requirements;
+            restoreOrdinaryFacetPlan = planOrdinaryFacets;
+          }
+        } catch {
+          // A dry run that fails decides nothing: the run below meets what the same request meets without the flag.
+        }
+      }
       const { additions: facetAdditions, widenedPaths } = await recoverFacetClosureCandidates(
         args,
         query,
         workspace,
         cache,
         facetWindow,
-        facetRequirements,
+        hookRequirements,
+        false,
+        structureMap,
       );
+      if (candidate !== undefined) rememberAnswerFirstDecision(structureMap === candidate.map);
       // A widened path's candidate object was mutated IN PLACE (it was
       // already one of `candidates`' own elements — see
       // `recoverFacetClosureCandidates`'s own `tryAddWindow` doc comment for
@@ -6214,13 +6514,33 @@ async function buildAnswerTaskPack(
       typeof surface.code === "string" && surface.code.length > 0,
   );
   if (surfaces.length === 0) return undefined;
+  // v0.16 6t-7 T03: the structure map replaces the primary type's centered
+  // slice, and the enum types its header is declared in (the state a
+  // transition table maps) ride beside it. The query-focused member excerpts
+  // below then add nothing: the map already carries every member's signature
+  // and every call of the named concerns.
+  const structureMapRendered = structureMap !== undefined && surfaces[0] !== undefined
+    && renderStructureMapSurface(surfaces[0], structureMap, workspace, cache);
+  if (structureMap?.answerFirst !== undefined && !structureMapRendered) {
+    // The pack's primary surface is not the mapped type's: the answer-first page was adopted for a pack that cannot carry it.
+    await restoreOrdinaryFacetPlan?.();
+    restoreOrdinaryFacetPlan = undefined;
+    structureMap = structureMapChoice.ordinary;
+  }
+  if (structureMap !== undefined && structureMapRendered) {
+    const memberSurfaces = await structureMapMemberSurfaces(structureMap, query, workspace, cache);
+    surfaces.splice(1, 0, ...memberSurfaces);
+    const stateSurfaces = await structureMapStateTypeSurfaces(structureMap, query, workspace, cache, surfaces);
+    surfaces.splice(1 + memberSurfaces.length, 0, ...stateSurfaces);
+  }
 
   const materializeNamedAnswer = responsibilityResolved || exactLocatedAnswer || explicitAnswerNames.has(normIdent(path.basename(
     surfaces[0]!.path,
     path.extname(surfaces[0]!.path),
   )));
   if (
-    materializeNamedAnswer
+    !structureMapRendered
+    && materializeNamedAnswer
     && (
       surfaces[0]?.content_completeness === "partial"
       || requiredQueryFacets(query).some((facet) =>
@@ -6637,6 +6957,13 @@ async function buildAnswerTaskPack(
   // modules document. Flags OFF (default): both calls return on their first
   // line, byte-identical to pre-V15-NBR/FUI output.
   attachPlanAids(finalResult, workspace, query);
+  const answerFirstShip = attachAnswerFirstAdvisory(finalResult, structureMap);
+  if (answerFirstShip === "not-answer" || answerFirstShip === "no-room") {
+    // The page was adopted for an answer it did not become: the rest of the chain runs under the ordinary map's requirements.
+    await restoreOrdinaryFacetPlan?.();
+    if (answerFirstShip === "no-room") rederiveAfterPlanRestore(finalResult, args, workspace);
+  }
+  attachStructureMapElsewhereNote(finalResult, structureMap, structureMapRendered, workspace, cache);
   // FIX-ORIG (2026-09-27, orchestrator ruling — see sfBookingOrderFence.spec.ts's
   // PRODUCERS entries for both producers below, "buildAnswerTaskPack, post-answer-
   // augmenters" site): every serve-booking producer (the edit gate's admissible
@@ -6751,6 +7078,1287 @@ async function buildAnswerTaskPack(
   // shipped, not what an internal pre-cap draft once held.
   persistPackFingerprints(workspace, finalResult, args.taskBinding);
   return finalResult;
+}
+
+// ---------------------------------------------------------------------------
+// v0.16 6t-7 T03 (2026-10-20): the STRUCTURE MAP answer. structureMap.ts holds
+// the projection and its selection wording; these wire it into the answer
+// pack: `structureMapForAnswer` decides it (before the facet hook, which plans
+// the flow facets against it), `renderStructureMapSurface` serves it on the
+// primary surface, and `structureMapStateTypeSurfaces` adds the enum types the
+// type's header is declared in.
+// ---------------------------------------------------------------------------
+
+interface LineWindow {
+  readonly start: number;
+  readonly end: number;
+  readonly path?: string;
+}
+
+interface StructureMapFileLayout {
+  readonly path: string;
+  readonly type: StructureMapType;
+  readonly rows: readonly LineWindow[];
+  readonly requiredWindows: readonly LineWindow[];
+  readonly owed: readonly LineWindow[];
+  readonly header?: LineWindow;
+}
+
+/** The structure map an answer pack serves for its primary type. */
+interface AnswerStructureMap {
+  readonly type: StructureMapType;
+  /**
+   * The words whose call statements the map serves: every flow facet's own
+   * call terms plus the request's named concerns (`requiredQueryFacets`) — a
+   * superset of what any facet's plan requires (`flowStepWindowsForNonCallableFocal`).
+   */
+  readonly terms: readonly string[];
+  /** The rows the primary surface serves, in source order (`structureMapRows`). */
+  readonly rows: readonly LineWindow[];
+  /** Full map evidence requirements, independent of the selected wire page. */
+  readonly requiredWindows: readonly LineWindow[];
+  readonly stateWindows: readonly NamedWindow[];
+  /** Every other line of the type: the planner's remainder and the comment blocks the rows were split at. */
+  readonly owed: readonly LineWindow[];
+  /** The map's header window, whose type names find the enum types. */
+  readonly header?: LineWindow;
+  /** The reply's estimated bytes with the map (`estimateStructureMapReplyBytes`)… */
+  readonly replyBytes: number;
+  /** …and the pack's byte cap it was admitted under; the enum types take only what is left. */
+  readonly capBytes: number;
+  /** TL_EFF_MAP_ANSWER_FIRST: set when the map is the CORE evidence alone (`answerFirstStructureMap`). */
+  readonly answerFirst?: AnswerFirstPlan;
+  /** Stage 2: one separately grounded map layout per source file. */
+  readonly fileLayouts?: readonly StructureMapFileLayout[];
+  /** Matching definitions in safely examined but unselected C++ source files. */
+  readonly otherMemberFiles?: ReadonlyArray<{ readonly path: string; readonly count: number }>;
+}
+
+/**
+ * The maps an answer pack may serve its primary type, decided BEFORE the pack is built
+ * and booked. `ordinary` is the map the pack serves where TL_EFF_MAP_ANSWER_FIRST is
+ * unset — whatever `structureMapForAnswer` decided for it, none included. `answerFirst`
+ * is the core-only map the request could be answered from first, with the facet
+ * requirements it was planned against; it is a CANDIDATE: `buildAnswerTaskPack` adopts it
+ * only when the flow facets planned against it require nothing outside its first page
+ * (`answerFirstPageHolds`), and otherwise serves `ordinary`, so that every reply of the
+ * chain is the flag-unset reply.
+ */
+interface AnswerStructureMapChoice {
+  readonly ordinary: AnswerStructureMap | undefined;
+  readonly answerFirst: AnswerFirstCandidate | undefined;
+}
+
+interface AnswerFirstCandidate {
+  readonly map: AnswerStructureMap;
+  /** The request's facet requirements as answer-first plans them: a file name it spells is a file name (`withoutNamedFileArtifacts`), not `Owner.member`. */
+  readonly requirements: readonly FacetRequirement[];
+}
+
+const NO_STRUCTURE_MAP: AnswerStructureMapChoice = { ordinary: undefined, answerFirst: undefined };
+
+/** What an answer-first map served and what it left owed (the source of the reply's advisory). */
+interface AnswerFirstPlan {
+  /** The members whose whole bodies are the page (`coverMembers`). */
+  readonly cover: readonly StructureMapMember[];
+  /** The constructors' bodies were left owed to make room (`StructureMapPlanOptions.constructorsLast`). */
+  readonly constructorsLast: boolean;
+  /** What the reply states about the unserved bodies, before it is fitted to the room the pack has left. */
+  readonly facts: AnswerFirstFacts;
+  /** The pack as planned, in bytes (rows, enum types and the envelope reserve): what stands for its size where the size preview does not apply. */
+  readonly estimateBytes: number;
+}
+
+/** Bytes a structure-map reply needs beside its rows: task, decision and certificate, and the other envelope members. */
+const STRUCTURE_MAP_ENVELOPE_RESERVE_BYTES = 2048;
+/** Wire bytes an evidence row takes beside its body and path: handle, range and the JSON keys. */
+const STRUCTURE_MAP_ROW_ADDRESS_BYTES = 64;
+/**
+ * …and what two owed rows must differ by before a row is worth addressing over the lines between them
+ * (`coalesceAnswerRows`): a row served as its own surface (the owed rows of a continuation) takes about
+ * 77 B beside its path and body (T03's 38-row page: handle, range, role "api", the JSON keys), more with a
+ * `why` note or a longer role. The size of a page is NOT estimated with this number: it is read off the
+ * serialized row (`estimateStructureMapReplyBytes`, "owed-row").
+ */
+const STRUCTURE_MAP_OWED_ROW_ADDRESS_BYTES = 96;
+/** A handle as the wire spells it: `h` and ten base-36 characters. */
+const STRUCTURE_MAP_OWED_ROW_HANDLE = `h${"0".repeat(10)}`;
+/** The role of an owed row in the skeleton the estimate serializes: longer than any role the pack assigns today ("unknown", "contract"), for a role is free-form. */
+const STRUCTURE_MAP_OWED_ROW_ROLE = "x".repeat(12);
+/**
+ * Headroom `owedRowsFitOnePage` keeps under the cap. The estimate is an upper
+ * bound of the owed rows themselves (their notes included), but not of the
+ * act.answer that carries them: that reply also re-sends the type's head (the
+ * file and class header rows), and the pack builder admits a reply only while
+ * its own size preview (protocol/taskPackSizePreview.ts: a placeholder task id
+ * and a reserve of up to 2,048 B beside the body) stays under the cap, and
+ * sheds rows when it does not. Measured on helpers/owedRowsDesk.ts under the
+ * Copilot CLI ceiling (18,432 B): the one-page act.answer was 0.55-0.61 KB
+ * above the estimate at 12 to 21 steps (0.42-0.46 KB with four loop-guard notes
+ * counted); 20 owed steps estimated 15.7 KB and were one 16.0 KB act.answer; 22
+ * estimated 17.6 KB and the preview cut the page, four calls in all. The margin
+ * is the swing of that reserve between a pack whose decision is derived later
+ * (`TASK_PACK_PREVIEW_DISCOVER_RESERVE_BYTES`, 2,048 B) and one whose contract is
+ * built (`TASK_PACK_PREVIEW_PREPARED_RESERVE_BYTES`, 512 B): the 1,536 B this
+ * measurement found, now read off the preview's own constants instead of copied.
+ */
+const STRUCTURE_MAP_FIT_MARGIN_BYTES = TASK_PACK_PREVIEW_DISCOVER_RESERVE_BYTES - TASK_PACK_PREVIEW_PREPARED_RESERVE_BYTES;
+/**
+ * TL_EFF_EVIDENCE_PATH_GROUPS: headroom the first page's admission keeps under
+ * the cap when the rows are priced as they ship grouped. The estimate admits a
+ * plan, but it is not an upper bound of the pack that gets built from it: a
+ * measured pack outweighed its estimate by up to 320 B (the restated `next` that
+ * ships where no cursor can be issued, the contract the rebuild adds, the row
+ * addresses the constant undercounts), and a map cannot be trimmed row by row, so
+ * a plan admitted within that error of the cap leaves the shed ladder nothing but
+ * the map itself (T03, state store off: 1.6 KB where the ungrouped page was 17.6).
+ * The planner admits the first source allowance, in steps of 1 KB, whose estimate
+ * fits; ungrouped, T03's steps landed 595 B under the cap with the optional
+ * content (`gaps`) for the trim ladder to shed, and grouped pricing moves the same
+ * steps up by about two thousand bytes, to 78 B under it. The margin is the one the
+ * continuation page keeps (`STRUCTURE_MAP_FIT_MARGIN_BYTES`: the swing of the
+ * preview's reserve between a prepared and a discover pack); with the flag off
+ * nothing changes.
+ */
+const STRUCTURE_MAP_GROUPED_ADMISSION_MARGIN_BYTES = STRUCTURE_MAP_FIT_MARGIN_BYTES;
+/**
+ * Headroom the first page's admission keeps under an active cap when the builder
+ * has no exact wire preview. The estimate prices the wire. The size preview that sizes a pack as
+ * it ships (protocol/taskPackSizePreview.ts) is the builder's measure for an
+ * exact-body host only; for any other the builder holds the INTERNAL result to the
+ * ceiling, adds the decision, certificate and `next` the contract builds after it,
+ * and gives the tail of the map back (`reduceServedBodyTail`) until the pack fits
+ * again — or strips the map's body when even that is not enough. Measured with the
+ * ladder forced onto each of its pages under 14,336 B (T03, and Python types in
+ * files of 400-1,900 lines): a page estimated 941, 767 and 491 B under the ceiling
+ * shipped 10 of 12, 16 of 20 and 9 of 14 of its rows, T03's skeleton page,
+ * estimated 710 B over it, a 1.6 KB reply whose rows carry no body, and no page
+ * with 1,380 B or more to spare lost a row.
+ * This is a measured envelope allowance, not a bound derived from the preview
+ * reserve: sampled post-build overhead was at most 1,380 B. Row shedding is
+ * traced as structure_map_rows_shed so an insufficient allowance is visible.
+ */
+const STRUCTURE_MAP_UNBATCHED_ADMISSION_MARGIN_BYTES = STRUCTURE_MAP_FIT_MARGIN_BYTES;
+/** TL_EFF_MAP_ANSWER_FIRST applies under a pack ceiling below this (`includeDoc`'s own threshold: the compact hosts). */
+const STRUCTURE_MAP_ANSWER_FIRST_MAX_CAP_BYTES = 20 * 1024;
+// The advisory is not sized by a tuned constant: `attachAnswerFirstAdvisory` attaches it
+// to the finished pack and measures the pack with the advisory on it (the size preview, the
+// first measurement of the shed ladder's `packWireBytes`), taking tiers and calls off the end
+// until the pack fits. What the decision time uses for the room it will have
+// (`answerFirstStructureMap`) is the finished pack's preview reserve
+// (`TASK_PACK_PREVIEW_PREPARED_RESERVE_BYTES`) beside the planned page.
+/** The most windows a continuation call can carry and still ship as one cursor (protocol/readCallContinuation.ts `compactableReadNext`). */
+const STRUCTURE_MAP_MAX_OWED_WINDOWS = 64;
+/** At most this many enum types ride beside a structure map. */
+const STRUCTURE_MAP_MAX_STATE_TYPES = 2;
+/** An enum type rides beside a map only when its whole declaration is at most this many source bytes. */
+const STRUCTURE_MAP_STATE_TYPE_MAX_BYTES = 4096;
+/** Stage 2 inspects only a bounded number and aggregate byte size of C++ candidates. */
+const STRUCTURE_MAP_CPP_COUNTERPART_MAX_FILES = 32;
+const STRUCTURE_MAP_CPP_COUNTERPART_MAX_FILE_BYTES = 1_048_576;
+const STRUCTURE_MAP_CPP_COUNTERPART_MAX_SCAN_BYTES = 4_194_304;
+
+/**
+ * The structure map for an answer whose first candidate is `candidate`
+ * (`ordinary`), or none unless the request asks for a short or map-shaped
+ * answer (`asksForStructureMap`), names a flow facet, and the candidate is a type
+ * with direct members whose comment-elided body does not fit one surface
+ * (MAX_SURFACE_CODE_BYTES) — a type that fits is still served whole. A map
+ * is paged to fit the pack's own cap (the code-bearing tier, under any
+ * caller, environment or client-profile ceiling). Unserved map windows
+ * remain required by the ordinary facet gate and get executable follow-ups.
+ * `ordinary` is what the pack serves without TL_EFF_MAP_ANSWER_FIRST and is
+ * computed exactly as it is without it; `answerFirst` is the flag's candidate, a
+ * core-only map that `buildAnswerTaskPack` adopts only when the request's facets
+ * require nothing outside its first page (`answerFirstPageHolds`).
+ * A capped builder without exact wire preview additionally admits only a
+ * page carrying the type's full skeleton; smaller ceilings keep the
+ * whole-member route.
+ */
+/** A capped builder without an exact wire preview needs skeleton admission. */
+function packHeldToCeilingWithoutPreview(): boolean {
+  return activePackByteCeiling() !== undefined && !preferExactAnswerBody(protocolCallContext()?.clientId);
+}
+
+async function structureMapForAnswer(
+  query: string,
+  candidate: ImpactCandidate | undefined,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<AnswerStructureMapChoice> {
+  if (!effStructureMapEnabled() || candidate?.symbol === undefined || !asksForStructureMap(query)) return NO_STRUCTURE_MAP;
+  const flows = extractFacetRequirements(query).filter((requirement) => requirement.facet === "flow");
+  if (flows.length === 0) return NO_STRUCTURE_MAP;
+  const lang = languageForPath(candidate.path);
+  const content = readCached(workspace, candidate.path, cache);
+  if (!lang || content === undefined) return NO_STRUCTURE_MAP;
+  const parsed = await cache.parsedSymbols(content, lang, candidate.path);
+  if (!parsed) return NO_STRUCTURE_MAP;
+  const bounds = /^(\d+)-(\d+)$/.exec(candidate.range ?? "");
+  const lines = content.split(/\r?\n/);
+  // Go, Rust, C and C++ types also have the members they declare OUTSIDE their
+  // own range (structureMapMembers.ts) — the same file's; a C++ class whose
+  // definitions are in the counterpart .cpp, and the Go methods of the package's
+  // other files, are the multi-path map of the design's Stage 2 (the latter are
+  // disclosed in the reply's advisory: `attachStructureMapElsewhereNote`).
+  let type = structureMapTypeOf(
+    parsed,
+    candidate.path,
+    candidate.symbol,
+    bounds ? Number(bounds[1]) : candidate.line,
+    bounds ? Number(bounds[2]) : candidate.line,
+    lines,
+    lang,
+    lang === "cpp" ? 0 : undefined,
+  );
+  if (type === undefined) return NO_STRUCTURE_MAP;
+  const headerType = type;
+  let cppTypeNamespacePath: readonly string[] | undefined;
+  let otherMemberFiles: Array<{ path: string; count: number }> = [];
+  if (lang === "cpp") {
+    const typeSymbol = parsed.find((symbol) =>
+      symbol.kind === "class"
+      && unqualifiedSymbolTail(symbol.name) === headerType.name
+      && symbol.signatureStartLine === headerType.signatureStart);
+    const namespacePath = typeSymbol === undefined
+      ? undefined
+      : Number.isSafeInteger(typeSymbol.signatureStartIndex)
+        ? cppNamespacePathAt(lines, typeSymbol.signatureStartLine, typeSymbol.signatureStartIndex)
+        : undefined;
+    cppTypeNamespacePath = namespacePath;
+    if (namespacePath !== undefined) {
+      const includeEdges = resolveImportsOf(workspace, headerType.path, content);
+      const edgePaths = includeEdges
+        .filter((edge) => edge.kind === "counterpart" && edge.path.toLowerCase().endsWith(".cpp"))
+        .map((edge) => edge.path);
+      const sourceDirs = new Set<string>();
+      const pathParts = headerType.path.split("/");
+      for (let index = pathParts.length - 2; index >= 0; index -= 1) {
+        if (pathParts[index] !== "include" && pathParts[index] !== "inc") continue;
+        const sourceName = pathParts[index] === "include" ? "src" : "source";
+        sourceDirs.add([...pathParts.slice(0, index), sourceName, ...pathParts.slice(index + 1, -1)].join("/"));
+        break;
+      }
+      sourceDirs.add(headerType.path.slice(0, Math.max(0, headerType.path.lastIndexOf("/"))));
+      const boundedSiblingPaths: string[] = [];
+      let scanIncomplete = false;
+      const orderedSourceDirs = [...sourceDirs].sort();
+      for (const [directoryIndex, directory] of orderedSourceDirs.entries()) {
+        const absolute = workspaceBodyPath(workspace, directory);
+        if (absolute === undefined) continue;
+        try {
+          const entries = fs.readdirSync(absolute, { withFileTypes: true })
+            .filter((entry) => (entry.isFile() || entry.isSymbolicLink()) && entry.name.toLowerCase().endsWith(".cpp"))
+            .map((entry) => path.posix.join(directory, entry.name).replace(/^\.\//u, ""))
+            .sort();
+          const available = Math.max(0, STRUCTURE_MAP_CPP_COUNTERPART_MAX_FILES - boundedSiblingPaths.length);
+          if (entries.length > available) scanIncomplete = true;
+          boundedSiblingPaths.push(...entries.slice(0, available));
+        } catch { scanIncomplete = true; }
+        if (boundedSiblingPaths.length >= STRUCTURE_MAP_CPP_COUNTERPART_MAX_FILES) {
+          if (directoryIndex + 1 < orderedSourceDirs.length) scanIncomplete = true;
+          break;
+        }
+      }
+      const sourcePaths = [...new Set([...edgePaths, ...boundedSiblingPaths])].sort((left, right) =>
+        (edgePaths.includes(left) ? 0 : 1) - (edgePaths.includes(right) ? 0 : 1) || left.localeCompare(right));
+      let selected: { path: string; members: StructureMapMember[] } | undefined;
+      if (sourcePaths.length > STRUCTURE_MAP_CPP_COUNTERPART_MAX_FILES) scanIncomplete = true;
+      let inspectedFiles = 0;
+      let inspectedBytes = 0;
+      for (const sourcePath of sourcePaths.slice(0, STRUCTURE_MAP_CPP_COUNTERPART_MAX_FILES)) {
+        if (sourcePath === headerType.path) continue;
+        if (isWalkIgnoredPath(workspace, sourcePath, { respectGitignore: true })) {
+          scanIncomplete = true;
+          continue;
+        }
+        const sourceAbsolute = workspaceBodyPath(workspace, sourcePath);
+        if (sourceAbsolute === undefined) {
+          scanIncomplete = true;
+          continue;
+        }
+        let sourceSize: number;
+        try {
+          const stat = fs.statSync(sourceAbsolute);
+          if (!stat.isFile()) { scanIncomplete = true; continue; }
+          sourceSize = stat.size;
+        } catch { scanIncomplete = true; continue; }
+        if (sourceSize > STRUCTURE_MAP_CPP_COUNTERPART_MAX_FILE_BYTES
+          || inspectedBytes + sourceSize > STRUCTURE_MAP_CPP_COUNTERPART_MAX_SCAN_BYTES
+          || inspectedFiles >= STRUCTURE_MAP_CPP_COUNTERPART_MAX_FILES) {
+          scanIncomplete = true;
+          continue;
+        }
+        inspectedFiles += 1;
+        inspectedBytes += sourceSize;
+        const sourceText = readCached(workspace, sourcePath, cache);
+        if (sourceText === undefined || Buffer.byteLength(sourceText, "utf8") > STRUCTURE_MAP_CPP_COUNTERPART_MAX_FILE_BYTES) {
+          scanIncomplete = true;
+          continue;
+        }
+        const relatesToHeader = resolveImportsOf(workspace, sourcePath, sourceText).some((edge) => edge.path === headerType.path);
+        if (!relatesToHeader) continue;
+        const sourceLines = sourceText.split(/\r?\n/u);
+        const sourceSymbols = await cache.parsedSymbols(sourceText, "cpp", sourcePath);
+        if (sourceSymbols === null) { scanIncomplete = true; continue; }
+        const members = cppOutOfLineMembers(headerType.name, { symbols: sourceSymbols, lines: sourceLines }, {
+          path: sourcePath,
+          namespacePath,
+          requireNamespaceMatch: true,
+        });
+        if (members.length === 0) continue;
+        if (selected === undefined) selected = { path: sourcePath, members };
+        else otherMemberFiles.push({ path: sourcePath, count: members.length });
+      }
+      if (scanIncomplete) {
+        // An incomplete bounded scan cannot certify that the selected source
+        // contains every requested out-of-line member. Keep Stage 1 behavior.
+        selected = undefined;
+        otherMemberFiles = [];
+      }
+      if (selected !== undefined) {
+        const memberStart = Math.min(...selected.members.map((member) => member.start));
+        const memberEnd = Math.max(...selected.members.map((member) => member.end));
+        type = {
+          ...type,
+          members: [...type.members, ...selected.members],
+          memberFiles: [{ path: selected.path, start: memberStart, end: memberEnd }],
+        };
+      }
+    }
+    if (type.members.length < STRUCTURE_MAP_MIN_MEMBERS) return NO_STRUCTURE_MAP;
+  }
+  const mapPaths = [type.path, ...(type.memberFiles ?? []).map((file) => file.path)];
+  let ownBytes = 0;
+  for (const mapPath of mapPaths) {
+    const mapType = structureMapTypeForPath(type, mapPath);
+    const mapText = mapPath === type.path ? content : readCached(workspace, mapPath, cache);
+    if (mapText === undefined) return NO_STRUCTURE_MAP;
+    ownBytes += structureMapOwnBytes(mapType, mapText.split(/\r?\n/u), lang);
+  }
+  if (ownBytes <= MAX_SURFACE_CODE_BYTES) return NO_STRUCTURE_MAP;
+  const terms = new Set(structureMapCallTerms(requiredQueryFacets(query), type.name, [], true));
+  for (const flow of flows) {
+    for (const term of structureMapCallTerms(flow.subjectTerms, type.name, flow.nonPointTerms ?? [])) terms.add(term);
+  }
+  const capBytes = clampToActiveCeiling(MAX_TASK_PACK_BYTES_HIGH_CONFIDENCE);
+  // Under a compact host ceiling, spend the first page on executable
+  // structure and state evidence. Explicit documentation requests retain it.
+  const includeDoc = capBytes > 20 * 1024 || /\b(?:javadoc|documentation|doc\s*comment|comments?|docstrings?)\b|ドキュメント|説明文|コメント/iu.test(query);
+  // What the map REQUIRES of a member the first page does not hold is one of
+  // two things (structureMap.ts `StructureMapBodies`): its ROWS — the lines that
+  // call a requested concern, the statements that write state, save and audit,
+  // the failure handling of external calls, the control lines around them
+  // (memberRows.ts) — or, when those rows would not fit ONE continuation page
+  // (`owedRowsFitOnePage`), the member's WHOLE body, as every map required
+  // before rows existed. What a reply CARRIES (the page selected below) is
+  // filled with whole bodies in both, so a member the first page holds is
+  // served whole. A Java loop guard's review note needs its loop, guard and
+  // call lines served in one window, so those lines are required whole.
+  const guards = candidate.path.endsWith(".java") ? (await analyzeJavaLoopGuards(candidate.path, content)) ?? [] : [];
+  const anchors = guards.map(guard => ({ start: guard.firstLine, end: guard.lastLine }));
+  // …and each such note rides as the `why` of the row that serves its lines (javaLoopGuardReview): bytes the continuation carries.
+  const notes: StructureMapRowNote[] = guards.map(guard => ({ start: guard.firstLine, end: guard.lastLine, text: guard.text }));
+  const mapFilePaths = [type.path, ...(type.memberFiles ?? []).map((file) => file.path)];
+  const mapFiles = mapFilePaths.map((mapPath) => {
+    const fileType = structureMapTypeForPath(type, mapPath);
+    const text = mapPath === type.path ? content : readCached(workspace, mapPath, cache);
+    return { path: mapPath, type: fileType, lines: text?.split(/\r?\n/u) ?? [] };
+  });
+  if (mapFiles.some((file) => file.lines.length === 0)) return NO_STRUCTURE_MAP;
+  const header = { start: type.signatureStart, end: headerEndOf(type) };
+  const requiredOf = (
+    file: typeof mapFiles[number],
+    rows: readonly LineWindow[],
+  ): LineWindow[] => {
+    const { type: fileType, lines: sourceLines, path: mapPath } = file;
+    const isHeader = mapPath === type.path;
+    const headerCode: LineWindow[] = [];
+    if (isHeader) {
+      const elisions = elideDocCommentsWithWindows(sourceLines.slice(header.start - 1, header.end).join("\n"), lang, header.start).elided;
+      for (let line = header.start; line <= header.end; line++) {
+        if ((sourceLines[line - 1] ?? "").trim() === "" || elisions.some(([start, end]) => start <= line && line <= end)) continue;
+        headerCode.push({ start: line, end: line });
+      }
+    }
+    const spans = mergeSpans([
+      ...rows,
+      ...headerCode,
+      ...(fileType.containerHeaders ?? []),
+      ...fileType.members.map((member) => ({ start: member.signatureStart, end: member.signatureEnd })),
+    ]);
+    const code = spans.flatMap((span) => {
+      const out: LineWindow[] = [];
+      for (let line = span.start; line <= span.end; line++) {
+        if ((sourceLines[line - 1] ?? "").trim() !== "") out.push({ start: line, end: line });
+      }
+      return out;
+    });
+    const merged = mergeSpans(code);
+    return mapPath === type.path ? merged : merged.map((span) => ({ ...span, path: mapPath }));
+  };
+  const pathWindows = (mapPath: string, windows: readonly LineWindow[]): LineWindow[] =>
+    mapPath === type.path ? [...windows] : windows.map((span) => ({ ...span, path: mapPath }));
+  const rowsLayouts = mapFiles.map((file) => ({
+    file,
+    rowsLayout: structureMapRows(file.type, file.lines, [...terms], lang, Number.MAX_SAFE_INTEGER, includeDoc, { bodies: "rows", anchors: file.path === type.path ? anchors : [] }),
+  }));
+  const rowsWindows = rowsLayouts.flatMap(({ file, rowsLayout }) => requiredOf(file, rowsLayout.rows));
+  const wholeWindows = (): LineWindow[] => rowsLayouts.flatMap(({ file }) =>
+    requiredOf(file, structureMapRows(file.type, file.lines, [...terms], lang, Number.MAX_SAFE_INTEGER, includeDoc).rows));
+  const stateWindows: NamedWindow[] = [];
+  const edges = resolveImportsOf(workspace, type.path, content);
+  for (const name of headerTypeNames(lines, header, type.name)) {
+    if (stateWindows.length >= STRUCTURE_MAP_MAX_STATE_TYPES) break;
+    const found = await locateStructureMapStateType(name, lang, edges, workspace, cache, cppTypeNamespacePath, lines, header);
+    if (found === undefined || stateWindows.some(window => window.path === found.edge.path)) continue;
+    const declarationText = found.text.split(/\r?\n/).slice(found.declaration.startLine - 1, found.declaration.endLine).join("\n");
+    if (Buffer.byteLength(declarationText, "utf8") > STRUCTURE_MAP_STATE_TYPE_MAX_BYTES) continue;
+    stateWindows.push({ path: found.edge.path, start: found.declaration.startLine, end: found.declaration.endLine, name });
+  }
+  // Preserve the ordinary full map when it fits. Under a host ceiling, plan
+  // a smaller page of atomic map windows instead of abandoning the map and
+  // expanding whole member bodies. Required flow windows are still computed
+  // from the full type by flowStepWindowsForNonCallableFocal.
+  // A smaller source allowance can admit different later windows, so this
+  // finite descending search deliberately makes no monotonicity assumption.
+  //
+  // A builder without an exact wire preview keeps a measured envelope margin
+  // and admits only a page holding the full header and every signature. This
+  // depends on the builder's sizing behavior, not on a particular client's cap.
+  // Once a map has been served, its entire same-query continuation chain is
+  // batched; a ceiling too small for the skeleton keeps the whole-member route.
+  const heldWithoutPreview = packHeldToCeilingWithoutPreview();
+  const skeletons = heldWithoutPreview
+    ? mapFiles.map((file) => ({ file, windows: structureMapSkeleton(file.type, file.lines, lang) }))
+    : [];
+  let ordinary: AnswerStructureMap | undefined;
+  for (let sourceBytes = 16_384; sourceBytes >= 2_048; sourceBytes -= 1_024) {
+    const fileLayouts = mapFiles.map((file) => {
+      const original = structureMapRows(file.type, file.lines, [...terms], lang, sourceBytes, includeDoc);
+      const compact = coalesceMapRows(file.type, file.lines, original.rows, original.owed,
+        measureResponseBytes(JSON.stringify(file.path)) + STRUCTURE_MAP_ROW_ADDRESS_BYTES);
+      const pathify = (spans: readonly LineWindow[]): LineWindow[] => pathWindows(file.path, spans);
+      return {
+        path: file.path,
+        type: file.type,
+        rows: pathify(compact.rows),
+        owed: pathify(compact.owed),
+        requiredWindows: requiredOf(file, compact.rows),
+        ...(original.header === undefined ? {} : { header: pathify([original.header])[0] }),
+      } satisfies StructureMapFileLayout;
+    });
+    if (fileLayouts.some((layout) => layout.rows.length === 0)) continue;
+    const replyBytes = fileLayouts.reduce((total, layout, index) => {
+      const file = mapFiles[index]!;
+      return total + estimateStructureMapReplyBytes(
+        layout.path,
+        file.lines,
+        layout.rows,
+        layout.owed,
+        undefined,
+        undefined,
+        heldWithoutPreview ? false : effEvidencePathGroupsEnabled(),
+        index === 0,
+      );
+    }, 0) + (heldWithoutPreview
+      ? STRUCTURE_MAP_UNBATCHED_ADMISSION_MARGIN_BYTES
+      : effEvidencePathGroupsEnabled() ? STRUCTURE_MAP_GROUPED_ADMISSION_MARGIN_BYTES : 0);
+    const skeletonFits = skeletons.every(({ file, windows }) => {
+      const layout = fileLayouts.find((candidate) => candidate.path === file.path);
+      return layout !== undefined && windowsNotCovered(windows, layout.rows).length === 0;
+    });
+    if (replyBytes <= capBytes && skeletonFits) {
+      ordinary = {
+        type, terms: [...terms],
+        rows: fileLayouts.flatMap((layout) => layout.rows),
+        owed: fileLayouts.flatMap((layout) => layout.owed),
+        fileLayouts,
+        ...(otherMemberFiles.length === 0 ? {} : { otherMemberFiles }),
+        stateWindows,
+        header,
+        requiredWindows: owedMapFilesFitOnePage(mapFiles, rowsLayouts, fileLayouts, capBytes, notes) ? rowsWindows : wholeWindows(),
+        replyBytes,
+        capBytes,
+      };
+      break;
+    }
+  }
+  // TL_EFF_MAP_ANSWER_FIRST (default OFF): under a compact host ceiling the map
+  // may be the CORE evidence alone, answered at once — but only where the map
+  // above would not answer on its first page (a map whose required windows the
+  // page holds is `act.answer` today, with more of the type than the core, and
+  // is left as it is). Whatever the core cannot be admitted for is the map above.
+  // The core is only a CANDIDATE here: the facet requirements of the request
+  // decide, in `buildAnswerTaskPack`, whether it is adopted (`answerFirstPageHolds`).
+  let answerFirst: AnswerFirstCandidate | undefined;
+  if (effMapAnswerFirstEnabled() && type.memberFiles === undefined && capBytes < STRUCTURE_MAP_ANSWER_FIRST_MAX_CAP_BYTES
+    && (ordinary === undefined || windowsNotCovered(ordinary.requiredWindows, ordinary.rows).length > 0)) {
+    try {
+      // The request as answer-first reads it: the type's own file name, spelled in the
+      // request, is a file name (not `Owner.member`), and the words that describe the
+      // answer's form are no concern (`answerFormFree`). The ordinary map keeps its terms.
+      const requirements = withoutNamedFileArtifacts(extractFacetRequirements(query), query, type.path);
+      const answerTerms = new Set(structureMapCallTerms(requiredQueryFacets(query), type.name, [], true));
+      for (const flow of requirements.filter((requirement) => requirement.facet === "flow")) {
+        for (const term of structureMapCallTerms(answerFormFree(flow.subjectTerms), type.name, flow.nonPointTerms ?? [])) answerTerms.add(term);
+      }
+      const namedMembers = [...explicitCodeIdentifiers(query), ...subjectCallableNamesIn(query), ...requirements.flatMap((requirement) => requirement.subjectCallables ?? [])];
+      const map = await answerFirstStructureMap({ query, type, path: candidate.path, lines, lang, terms: [...answerTerms], namedMembers, capBytes, includeDoc, header, stateWindows, workspace, cache, guards });
+      if (map !== undefined) answerFirst = { map, requirements };
+    } catch {
+      // A candidate that cannot be built is no candidate: the request is served as it is without the flag.
+    }
+  }
+  return { ordinary, answerFirst };
+}
+
+/**
+ * The comment-elided bytes of the lines a type OWNS (`ownRegionsOf`): its whole
+ * range when its members are inside it — the figure `structureMapForAnswer` has
+ * always judged by — and, for a type with out-of-line members, its declaration
+ * and its members only, the code of other types between them not counted.
+ */
+function structureMapOwnBytes(type: StructureMapType, lines: readonly string[], lang: string): number {
+  const regions = ownRegionsOf(type);
+  let bytes = 0;
+  for (const [index, region] of regions.entries()) {
+    const body = lines.slice(region.start - 1, region.end).join("\n");
+    bytes += Buffer.byteLength(elideDocComments(body, lang, region.start), "utf8") + (index > 0 ? 1 : 0);
+  }
+  return bytes;
+}
+
+/** `coalesceAnswerRows` over a type's rows: the lines between two rows ride along only when they are the type's own (structureMapMembers.ts `ownLinesBridge`), never the code of another type. */
+function coalesceMapRows(
+  type: StructureMapType,
+  lines: readonly string[],
+  rows: readonly LineWindow[],
+  owed: readonly LineWindow[],
+  addressBytes: number,
+): { rows: LineWindow[]; owed: LineWindow[] } {
+  return coalesceAnswerRows(lines, rows, owed, addressBytes, undefined, ownLinesBridge(type, lines));
+}
+
+interface AnswerFirstInput {
+  readonly query: string;
+  readonly type: StructureMapType;
+  readonly path: string;
+  readonly lines: readonly string[];
+  readonly lang: string;
+  readonly terms: readonly string[];
+  /** The names the request writes for callables and code identifiers: the members of the type among them are the ones it names (`membersNamed`). */
+  readonly namedMembers: readonly string[];
+  readonly capBytes: number;
+  readonly includeDoc: boolean;
+  readonly header: LineWindow;
+  readonly stateWindows: readonly NamedWindow[];
+  readonly workspace: string;
+  readonly cache: FileReadCache;
+  readonly guards: readonly { readonly firstLine: number; readonly lastLine: number; readonly text: string }[];
+}
+
+/**
+ * TL_EFF_MAP_ANSWER_FIRST: the structure map as the CORE evidence alone — the
+ * header, every member's signature, the state enums and the whole bodies of
+ * the members that cover the named concerns (structureMap.ts `coverMembers`) —
+ * or undefined when it does not apply to this pack (then the map is planned as
+ * it is without the flag).
+ *
+ * It applies only when the core, as the page ships it, fits the pack's cap with
+ * the same headroom a grouped first page keeps
+ * (STRUCTURE_MAP_GROUPED_ADMISSION_MARGIN_BYTES) and the room left holds at least
+ * the first tier of facts about the bodies it leaves owed. The constructors'
+ * bodies are the last thing the page spends bytes on: a plan that keeps them is
+ * preferred, and one that gives them up (`constructorsLast`) is taken only when
+ * the room it makes lets more of the facts ride. The facts are assembled
+ * (answerFirstFacts.ts) here and fitted to the room the finished pack has left
+ * when they are attached (`attachAnswerFirstAdvisory`).
+ *
+ * WHAT A CONCERN CALL IS (the cover, the members the facts list, the call index —
+ * one rule for all, structureMap.ts `ConcernCallRule`): a call on one of the type's
+ * collaborator fields (`collaboratorFields`: injected, built in the constructor,
+ * conventionally declared) when that yields a cover — T03's rule, which names no
+ * record accessor on a parameter — and otherwise a call whose receiver chain or callee
+ * names a concern, except a data accessor on a parameter or a local of the member
+ * (`namedConcernRule`). The members the request NAMES that call a concern are in the
+ * cover (`coverMembers` `required`); when the cover cannot hold them all, the core is
+ * not an answer to this request and the result is undefined.
+ */
+async function answerFirstStructureMap(input: AnswerFirstInput): Promise<AnswerStructureMap | undefined> {
+  const { query, type, path: relPath, lines, lang, terms, capBytes, includeDoc, header, stateWindows, workspace, cache, guards } = input;
+  const chosen = answerFirstCover(type, lines, terms, input.namedMembers);
+  if (chosen === undefined) return undefined;
+  const { rule, cover } = chosen;
+  // The enum types ride beside the map (`structureMapStateTypeSurfaces`) and are part of the core.
+  let stateBytes = 0;
+  for (const window of stateWindows) {
+    const text = readCached(workspace, window.path, cache);
+    if (text === undefined) return undefined;
+    stateBytes += estimateStructureMapReplyBytes(window.path, text.split(/\r?\n/), [window], []) - STRUCTURE_MAP_ENVELOPE_RESERVE_BYTES;
+  }
+  const addressBytes = measureResponseBytes(JSON.stringify(relPath)) + STRUCTURE_MAP_ROW_ADDRESS_BYTES;
+  let best: { readonly map: AnswerStructureMap; readonly tiers: number } | undefined;
+  for (const constructorsLast of [false, true]) {
+    // Giving the constructors up changes nothing for a type with none in its header.
+    if (constructorsLast && !type.members.some((member) => member.constructor && member.start <= header.end)) continue;
+    const original = structureMapRows(type, lines, terms, lang, Number.MAX_SAFE_INTEGER, includeDoc, { cover, constructorsLast });
+    const compact = coalesceMapRows(type, lines, original.rows, original.owed, addressBytes);
+    const layout = { ...original, ...compact };
+    if (layout.rows.length === 0) continue;
+    const replyBytes = estimateStructureMapReplyBytes(relPath, lines, layout.rows, layout.owed);
+    if (replyBytes + stateBytes + STRUCTURE_MAP_GROUPED_ADMISSION_MARGIN_BYTES > capBytes) continue;
+    const facts = answerFirstFacts({ type, lines, terms, cover, served: layout.rows, guards, lang, rule });
+    // The room the facts will have once the pack is built: what the finished pack's size preview (the plan and the
+    // reserve it keeps for a decision it already counts) leaves under the ceiling. `attachAnswerFirstAdvisory` then
+    // measures the pack with the advisory on it and takes off the end of the facts what does not fit.
+    const composed = composeAnswerFirst(facts, capBytes - replyBytes - stateBytes - TASK_PACK_PREVIEW_PREPARED_RESERVE_BYTES);
+    // Owed bodies are named, or this is no answer to give first.
+    if (facts.notServed.length > 0 && composed.text === "") continue;
+    const map: AnswerStructureMap = {
+      type, terms: [...terms], ...layout, stateWindows, header,
+      requiredWindows: codeLineWindows(lines, layout.rows), replyBytes, capBytes,
+      answerFirst: { cover, constructorsLast, facts, estimateBytes: replyBytes + stateBytes },
+    };
+    // The page has to PROVE what the pack's contract asks of it (`answerFirstPageProves`): a plan that does not is not an answer.
+    if (!(await answerFirstPageProves(map, query, workspace, cache))) continue;
+    if (best === undefined || composed.tiers > best.tiers) best = { map, tiers: composed.tiers };
+  }
+  return best?.map;
+}
+
+/**
+ * TL_EFF_MAP_ANSWER_FIRST: whether the pack's CONTRACT will find what it asks of the page `map`
+ * serves, before the pack is built. The facet plan is one thing the page must hold
+ * (`answerFirstPageHolds`); the readiness obligations are the others, and a page that
+ * fails one is shipped as a discover, not as the answer — the reply a request without
+ * the flag would never have been given:
+ *
+ *   `identifier:X`   each code identifier the request names (the first six, as the
+ *                    contract takes them) is present in what the page serves, or the
+ *                    file is named for it;
+ *   `behavior-body`  for a question about behavior (`BEHAVIOR_QUERY_RE`), the page is
+ *                    callable evidence that carries every concern the request lists
+ *                    (`requiredQueryFacets`) and shows a line of the body of every
+ *                    callable the request names that is declared in the file. A
+ *                    constructor is named like its class: a page that serves its
+ *                    signature and none of its body (the constructors-last plan of
+ *                    a type whose constructor is one line) leaves `behavior-body`
+ *                    open — `callable evidence shows the declaration of X but no
+ *                    line of its body` — which is the finding of the ceiling sweep.
+ *
+ * The page is rendered as the pack renders it (`renderStructureMapSurface`) into a
+ * surface that is never built, booked or sent, and the contract's own functions
+ * (`hasCallableBody`, `callableBodiesNotShown`, `exactIdentifierEvidence`) are asked.
+ */
+async function answerFirstPageProves(map: AnswerStructureMap, query: string, workspace: string, cache: FileReadCache): Promise<boolean> {
+  const page = { role: "domain", handle: "h0000000000", path: map.type.path, range: "", symbol: map.type.name, required: true } as TaskPackSurface;
+  if (!renderStructureMapSurface(page, map, workspace, cache)) return false;
+  const served: TaskPackSurface[] = [page];
+  for (const window of map.stateWindows) {
+    const text = readCached(workspace, window.path, cache);
+    if (text === undefined) return false;
+    served.push({ role: "domain", handle: "h0000000000", path: window.path, range: `${window.start}-${window.end}`, symbol: window.name, code: text.split(/\r?\n/).slice(window.start - 1, window.end).join("\n") } as TaskPackSurface);
+  }
+  for (const identifier of explicitCodeIdentifiers(query).slice(0, 6)) {
+    if (exactIdentifierEvidence(served, identifier).length === 0) return false;
+  }
+  if (!BEHAVIOR_QUERY_RE.test(query)) return true;
+  if (!hasCallableBody(page)) return false;
+  if (requiredQueryFacets(query).some((facet) => !surfaceContainsToken(page, facet))) return false;
+  return (callableBodiesNotShown([page], served, query, workspace, "named") ?? []).length === 0;
+}
+
+/**
+ * The non-blank lines of `spans` as one-line windows, as `structureMapForAnswer`
+ * writes its required windows: trailing whitespace can be trimmed from a
+ * displayed row, so a blank line is not independent evidence to require.
+ */
+function codeLineWindows(lines: readonly string[], spans: readonly LineWindow[]): LineWindow[] {
+  const code: LineWindow[] = [];
+  for (const span of mergeSpans(spans)) {
+    for (let line = span.start; line <= span.end; line++) {
+      if ((lines[line - 1] ?? "").trim() !== "") code.push({ start: line, end: line });
+    }
+  }
+  return code;
+}
+
+/**
+ * TL_EFF_MAP_ANSWER_FIRST: `requirements` as answer-first plans them — the type's OWN
+ * file name, written in the request (`OrderOrchestrator (OrderOrchestrator.java) っていう…`,
+ * `OrderOrchestrator.java の OrderOrchestrator クラスについて…`, `… class (in
+ * OrderOrchestrator.java) …`), is a file name and not two words of the question.
+ *
+ * Why it matters (the root cause of the file-name finding of the 2026-10-24
+ * generality audit): requestFacets.ts reads `Stem.ext` as the qualified member `ext`
+ * of an owner `Stem` (`qualifiedMemberPairsIn`; only a path of three segments or more is
+ * stripped as a path) and adds `ext` to the clause's concern terms. `resolveFacetFocal`
+ * then looks for a member `java` of `OrderOrchestrator`, finds none, and — the P0-1 rule,
+ * "a class is never the subject of a facet that names one of its members" — leaves the
+ * owner out of every identifier tier. The flow facet's focal falls through to the
+ * concept and mention tiers and settles on the callable that carries the class's name,
+ * its CONSTRUCTOR (144-162), whose flow is the callees of the constructor, not the
+ * structure map. Without the flag that plan is met by the ordinary map's page (one
+ * act.answer that serves fewer rows of the type than the same request without the file
+ * name); under answer-first the page is the CORE, which does not hold what that plan
+ * requires: `missing-evidence` on `request-item:facet-1:flow` and `facet-2:flow`, a
+ * discover, and a second reply of 1.8 KB that serves the constructor body (153-162).
+ * The default path's behavior for a request that names a file is unchanged here (the
+ * flag-unset reply of such a request is what it was); this function only keeps
+ * answer-first from inheriting the plan, by planning against the requirements of the
+ * same request without the file name: the pair `Stem.ext` is dropped, and so is the term
+ * `ext` unless the request uses that word elsewhere.
+ */
+export function withoutNamedFileArtifacts(requirements: readonly FacetRequirement[], query: string, typePath: string): FacetRequirement[] {
+  const base = path.posix.basename(typePath.replace(/\\/g, "/"));
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0) return [...requirements];
+  const stem = base.slice(0, dot);
+  const extension = base.slice(dot + 1);
+  const nameRe = new RegExp(`(?<![A-Za-z0-9_$])${escapeRegExp(base)}(?![A-Za-z0-9_$])`, "gu");
+  if (!nameRe.test(query)) return [...requirements];
+  const rest = query.replace(nameRe, " ");
+  const extensionStaysAWord = new RegExp(`(?<![A-Za-z0-9_$])${escapeRegExp(extension)}(?![A-Za-z0-9_$])`, "iu").test(rest);
+  return requirements.map((requirement) => {
+    const pairs = requirement.qualifiedMembers ?? [];
+    const kept = pairs.filter((pair) => !(pair.owner === stem && pair.member === extension));
+    const terms = extensionStaysAWord ? requirement.subjectTerms : requirement.subjectTerms.filter((term) => term.toLowerCase() !== extension.toLowerCase());
+    if (kept.length === pairs.length && terms.length === requirement.subjectTerms.length) return requirement;
+    return { ...requirement, qualifiedMembers: kept, subjectTerms: terms };
+  });
+}
+
+/** What `answerFirstPageHolds` found. */
+export interface AnswerFirstVerdict {
+  readonly holds: boolean;
+  /** `path:start-end` of each window the planned facets require (or would serve) that the answer-first page does not hold; or the reason there is no plan to judge. */
+  readonly outside: readonly string[];
+}
+
+/** The facet plans recorded under an answer-first decision (true: adopted, the plan of the core; false: the ordinary map's): a replay that finds the plan still valid decides as the first call did. */
+const answerFirstPlanDecisions = new WeakMap<object, boolean>();
+
+/**
+ * TL_EFF_MAP_ANSWER_FIRST: whether the FIRST PAGE of the answer-first map `map` — the
+ * rows of the type's file and the enum declarations beside them — holds everything the
+ * facet plan (`entries`: what the hook recorded, or would record, for the request planned
+ * against `map`) requires, and everything the hook would serve (`wouldServe`). When it
+ * does, the page can be the answer; when a flow facet requires a window anywhere else (a
+ * call site of the type in a top-level function of the same file or in another file, the
+ * callees of a member the core does not hold, a constant another facet reads, the focal
+ * of a second subject) the reply that holds the core alone would be a discover, and the
+ * chain after it would run under the core's requirements instead of the ordinary map's:
+ * a silent relaxation. Then the request is served the ordinary map, as it is without the
+ * flag. The page must also be the plan of a flow over the type (an entry whose focal is
+ * the mapped type); without one, the map was planned for a question this plan does not ask.
+ *
+ * A window is held when it lies inside one row (`map.rows`, the lines the page serves) of
+ * the type's file, or inside a state window (the enum declaration served beside the
+ * map). Exported for mapAnswerFirst.spec.ts.
+ */
+export function answerFirstPageHolds(
+  map: { readonly type: { readonly path: string; readonly name: string }; readonly rows: readonly LineWindow[]; readonly stateWindows: readonly NamedWindow[] },
+  entries: readonly FacetPlanEntry[],
+  wouldServe: readonly { readonly path: string; readonly start: number; readonly end: number }[] = [],
+  /** The source lines of a file: a focal is required without the blank and comment-only lines at its ends (facetGate.ts `focalRequiredSpan`). */
+  fileLines: (windowPath: string) => readonly string[] | undefined = () => undefined,
+): AnswerFirstVerdict {
+  const held = (windowPath: string, start: number, end: number): boolean =>
+    (windowPath === map.type.path && windowsNotCovered([{ start, end }], map.rows).length === 0)
+    || map.stateWindows.some((window) => window.path === windowPath && window.start <= start && end <= window.end);
+  const outside: string[] = [];
+  const note = (windowPath: string, start: number, end: number): void => {
+    if (!held(windowPath, start, end)) outside.push(`${windowPath}:${start}-${end}`);
+  };
+  let flowOverType = false;
+  for (const entry of entries) {
+    const focal = entry.focal;
+    const ofType = focal !== undefined && focal.path === map.type.path && focal.name === map.type.name;
+    if (ofType && entry.facet === "flow") flowOverType = true;
+    // The focal of any other subject is required (whole, when short enough) by the gate, unless the facet asks for its callers: it has to be on the page too.
+    if (focal !== undefined && !ofType && entry.resolution === "resolved" && entry.facet !== "callers") {
+      const source = fileLines(focal.path);
+      let first = focal.start;
+      let last = focal.end;
+      const noise = (line: number): boolean => /^(?:$|\/\/|#|\/\*|\*|""")/u.test((source?.[line - 1] ?? "x").trim());
+      while (source !== undefined && first < last && noise(first)) first += 1;
+      while (source !== undefined && last > first && noise(last)) last -= 1;
+      note(focal.path, first, last);
+    }
+    for (const window of entry.windows) note(window.path, window.start, window.end);
+    for (const site of entry.callSites ?? []) note(site.path, site.line, site.line);
+    for (const mention of entry.unclassifiedMentions ?? []) note(mention.path, mention.line, mention.line);
+  }
+  for (const window of wouldServe) note(window.path, window.start, window.end);
+  if (!flowOverType) outside.push("(no flow facet planned over the mapped type)");
+  return { holds: outside.length === 0, outside };
+}
+
+/**
+ * The skeleton of `type`: what a page must hold to be its map and not the first
+ * slice of its source — the code lines of its header (the declaration, fields,
+ * constants and tables, the constructors that wire its collaborators) and of
+ * every member's signature, as the planner takes them first and in full on a
+ * page with room to spare (`planStructureMap`: no concern term, so no member
+ * body, no doc comment, the header as far as STRUCTURE_MAP_HEADER_MAX_BYTES
+ * allows, comment blocks the default policy elides left out). A page whose rows
+ * hold all of these lines is a map whatever else it carries or leaves owed; a
+ * page that holds fewer shows part of a table of contents and owes the rest.
+ */
+function structureMapSkeleton(type: StructureMapType, lines: readonly string[], lang: string): LineWindow[] {
+  return codeLineWindows(lines, structureMapRows(type, lines, [], lang, Number.MAX_SAFE_INTEGER, false).rows);
+}
+
+/**
+ * The rows that serve `type`'s structure map (structureMap.ts
+ * `planStructureMap`), each the verbatim source of its own range so the
+ * answer-line gutter numbers it and sourceFidelity.ts leaves it whole: the
+ * type's own doc comment is one row as written, and every other window is
+ * split at the comment blocks the default comment policy elides, which stay
+ * owed beside the planner's remainder.
+ */
+function structureMapTypeForPath(type: StructureMapType, relPath: string): StructureMapType {
+  const members = type.members.filter((member) => (member.path ?? type.path) === relPath);
+  if (relPath === type.path) return { ...type, members };
+  const extent = type.memberFiles?.find((file) => file.path === relPath);
+  if (extent === undefined) return { ...type, path: relPath, members: [] };
+  const { containerHeaders: _containerHeaders, ...withoutContainerHeaders } = type;
+  return {
+    ...withoutContainerHeaders,
+    path: relPath,
+    start: extent.start,
+    end: extent.end,
+    signatureStart: extent.start,
+    signatureEnd: extent.start - 1,
+    declarationEnd: extent.start - 1,
+    docStart: extent.start,
+    members,
+  };
+}
+
+function structureMapRows(
+  type: StructureMapType,
+  lines: readonly string[],
+  terms: readonly string[],
+  lang: string,
+  maxSourceBytes?: number,
+  includeDoc = true,
+  options?: StructureMapPlanOptions,
+): { rows: LineWindow[]; owed: LineWindow[]; header?: LineWindow } {
+  const plan = planStructureMap(type, lines, terms, maxSourceBytes, includeDoc, options);
+  const docRows: LineWindow[] = [];
+  const codeRows: LineWindow[] = [];
+  const owed: LineWindow[] = [...plan.remaining];
+  for (const window of plan.windows) {
+    if (window.kind === "doc") {
+      docRows.push({ start: window.start, end: window.end });
+      continue;
+    }
+    let cursor = window.start;
+    const text = lines.slice(window.start - 1, window.end).join("\n");
+    for (const [blockStart, blockEnd] of elideDocCommentsWithWindows(text, lang, window.start).elided) {
+      if (blockStart > cursor) codeRows.push({ start: cursor, end: blockStart - 1 });
+      owed.push({ start: blockStart, end: blockEnd });
+      cursor = blockEnd + 1;
+    }
+    if (cursor <= window.end) codeRows.push({ start: cursor, end: window.end });
+  }
+  const header = plan.windows.find((window) => window.kind === "header");
+  // Nearby control labels and calls cost less as one source row than as many
+  // addressed rows. Preserve the intervening original lines too; remove them
+  // from the owed set so the wire and served ledger describe the same bytes.
+  let compactRows: LineWindow[] = [];
+  // Rows (a member the first page does not hold, owed as the lines that call a
+  // concern and decide whether it runs) are many small windows, each of which
+  // is addressed on the wire by its path, handle and range: lines between two
+  // of them ride along when their serialized bytes cost less than that address.
+  if (options?.bodies === "rows") {
+    compactRows = coalesceMapRows(type, lines, mergeSpans(codeRows), [],
+      measureResponseBytes(JSON.stringify(type.path)) + STRUCTURE_MAP_OWED_ROW_ADDRESS_BYTES).rows;
+  } else for (const row of mergeSpans(codeRows)) {
+    const previous = compactRows[compactRows.length - 1];
+    const sameMember = previous && type.members.some(member =>
+      member.signatureStart <= previous.start && row.end <= member.end);
+    const sameHeader = previous && header && header.start <= previous.start && row.end <= header.end;
+    if (previous && row.start - previous.end <= 3 && row.end - previous.start < 64 && (sameMember || sameHeader)) {
+      compactRows[compactRows.length - 1] = { start: previous.start, end: row.end };
+    } else compactRows.push(row);
+  }
+  const rows = [...docRows, ...compactRows].sort((left, right) => left.start - right.start);
+  const unserved = owed.flatMap(span => {
+    const gaps: LineWindow[] = [];
+    let cursor = span.start;
+    for (const row of rows) {
+      if (row.end < cursor || row.start > span.end) continue;
+      if (row.start > cursor) gaps.push({ start: cursor, end: row.start - 1 });
+      cursor = Math.max(cursor, row.end + 1);
+    }
+    if (cursor <= span.end) gaps.push({ start: cursor, end: span.end });
+    return gaps;
+  });
+  return {
+    rows,
+    owed: unserved.sort((left, right) => left.start - right.start),
+    ...(header === undefined ? {} : { header: { start: header.start, end: header.end } }),
+  };
+}
+
+/**
+ * An upper bound on the reply bytes a structure map needs: every row's
+ * JSON-escaped body as the answer-line gutter numbers it, its path and
+ * addressing, the owed list, and STRUCTURE_MAP_ENVELOPE_RESERVE_BYTES for the
+ * rest of the envelope.
+ *
+ * Under TL_EFF_EVIDENCE_PATH_GROUPS (2026-10-23) it prices the rows as they
+ * ship: the rows are consecutive rows of one file, so only the first pays its
+ * path, and a later row also leaves off its handle when the rows are the
+ * windows of one surface (the numeric `rowAddressBytes` form: a structure map
+ * and its appended windows share one handle). The owed rows of a continuation
+ * (`"owed-row"`) are a surface each and keep their handles. With the flag off
+ * every row pays both, as before. The estimate is not an upper bound of the pack
+ * built from it (T03: the pack outweighed its estimate by up to 320 B), which
+ * the first page's admission covers with STRUCTURE_MAP_GROUPED_ADMISSION_MARGIN_BYTES
+ * (`structureMapForAnswer`).
+ */
+function estimateStructureMapReplyBytes(
+  relPath: string,
+  lines: readonly string[],
+  rows: readonly LineWindow[],
+  owed: readonly LineWindow[],
+  /**
+   * What a row costs beside its path and body: a number of bytes, or "owed-row" to read it off the row as a
+   * continuation serializes it (`{"handle":"h…","path":"","range":"a-b","body":"","role":"…"},`, with this
+   * row's own range and the longest role), so that a wide range or a long role cannot be undercounted.
+   */
+  rowAddressBytes: number | "owed-row" = STRUCTURE_MAP_ROW_ADDRESS_BYTES,
+  /** Review notes that ride as the `why` of a row holding the lines they name (a Java loop guard's); each is counted on every row that holds its lines. */
+  notes: readonly StructureMapRowNote[] = [],
+  /** Whether the rows are priced as they ship grouped (TL_EFF_EVIDENCE_PATH_GROUPS). False prices the internal result a builder without the size preview measures, which is never grouped. */
+  grouped: boolean = effEvidencePathGroupsEnabled(),
+  /** A multi-file map has one response envelope total, not one reserve per source path. */
+  includeEnvelopeReserve = true,
+): number {
+  // One Class-C pre-shed admission measurement (wireBudgetG8Fence.spec.ts):
+  // it decides whether the map is built at all, before any response exists.
+  const wireJsonBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
+  const pathBytes = wireJsonBytes(relPath);
+  // `"path":` and its comma, and `"handle":"h…",`, as a row that leaves them off no longer pays.
+  const pathKeyBytes = wireJsonBytes({ path: "" }) - 4 + 1;
+  const handlePairBytes = wireJsonBytes({ handle: STRUCTURE_MAP_OWED_ROW_HANDLE }) - 2 + 1;
+  // The quotes of the skeleton's empty path and body are counted with the real ones; the comma goes between rows.
+  const addressOf = (row: LineWindow, later: boolean): number => {
+    if (rowAddressBytes !== "owed-row") return rowAddressBytes - (later ? pathKeyBytes + handlePairBytes : 0);
+    const skeleton = { handle: STRUCTURE_MAP_OWED_ROW_HANDLE, ...(later ? {} : { path: "" }), range: `${row.start}-${row.end}`, body: "", role: STRUCTURE_MAP_OWED_ROW_ROLE };
+    return wireJsonBytes(skeleton) - (later ? 2 : 4) + 1;
+  };
+  const noted = (row: LineWindow): number => notes.reduce((sum, note) =>
+    note.start >= row.start && note.end <= row.end ? sum + wireJsonBytes(note.text) + ",\"why\":".length : sum, 0);
+  let bytes = (includeEnvelopeReserve ? STRUCTURE_MAP_ENVELOPE_RESERVE_BYTES : 0)
+    + wireJsonBytes(owed.map((window) => `${window.start}-${window.end}`));
+  rows.forEach((row, index) => {
+    const later = grouped && index > 0;
+    const numbered = estimateAnswerBody(lines.slice(row.start - 1, row.end), row.start, protocolCallContext()?.clientId);
+    bytes += wireJsonBytes(numbered) + (later ? 0 : pathBytes) + addressOf(row, later) + noted(row);
+  });
+  return bytes;
+}
+
+/** A review note and the lines it is about: it rides as `why` on a row that holds all of them. */
+export interface StructureMapRowNote {
+  readonly start: number;
+  readonly end: number;
+  readonly text: string;
+}
+
+/** The parts of `windows` that no span of `covering` (sorted by start) holds. */
+function windowsNotCovered(windows: readonly LineWindow[], covering: readonly LineWindow[]): LineWindow[] {
+  const out: LineWindow[] = [];
+  for (const window of windows) {
+    let cursor = window.start;
+    for (const span of covering) {
+      if (span.end < cursor || span.start > window.end) continue;
+      if (span.start > cursor) out.push({ start: cursor, end: span.start - 1 });
+      cursor = Math.max(cursor, span.end + 1);
+    }
+    if (cursor <= window.end) out.push({ start: cursor, end: window.end });
+  }
+  return out;
+}
+
+/**
+ * Whether `owed`, the rows of the members the first page does not hold, are
+ * ONE continuation page: at most STRUCTURE_MAP_MAX_OWED_WINDOWS windows (the
+ * most a read call's `next` compacts to a cursor, readCallContinuation.ts), and
+ * a reply — each window as its own addressed surface, beside the envelope of the
+ * act.answer that closes the chain — that stays under `capBytes`, the cap the
+ * first page was admitted under, with STRUCTURE_MAP_FIT_MARGIN_BYTES to spare
+ * (the same estimate, with each owed row's address read off its serialization
+ * and the `why` of a loop guard's review note counted on the row that holds
+ * the guard). When they are
+ * more, the members are owed whole, exactly as before rows existed: the
+ * planner's own whole bodies, no options. Exported for owedRowsFit.spec.ts.
+ */
+export function owedRowsFitOnePage(
+  relPath: string,
+  lines: readonly string[],
+  owed: readonly { readonly start: number; readonly end: number }[],
+  capBytes: number,
+  /** The review notes (a Java loop guard's, ~200 B each) that ride as `why` on the owed rows holding the lines they name. */
+  notes: readonly StructureMapRowNote[] = [],
+): boolean {
+  if (owed.length === 0) return true;
+  if (owed.length > STRUCTURE_MAP_MAX_OWED_WINDOWS) return false;
+  return estimateStructureMapReplyBytes(relPath, lines, owed, [], "owed-row", notes) + STRUCTURE_MAP_FIT_MARGIN_BYTES <= capBytes;
+}
+
+/** Whether every uncovered row of a multi-file map can ride one continuation reply. */
+function owedMapFilesFitOnePage(
+  files: readonly { readonly path: string; readonly lines: readonly string[] }[],
+  planned: readonly { readonly rowsLayout: { readonly rows: readonly LineWindow[] } }[],
+  layouts: readonly StructureMapFileLayout[],
+  capBytes: number,
+  notes: readonly StructureMapRowNote[],
+): boolean {
+  const owed = files.map((file, index) => {
+    const layout = layouts.find((candidate) => candidate.path === file.path);
+    return layout === undefined ? [] : windowsNotCovered(planned[index]?.rowsLayout.rows ?? [], layout.rows);
+  });
+  const windowCount = owed.reduce((count, windows) => count + windows.length, 0);
+  if (windowCount > STRUCTURE_MAP_MAX_OWED_WINDOWS) return false;
+  if (windowCount === 0) return true;
+  let bytes = STRUCTURE_MAP_ENVELOPE_RESERVE_BYTES + STRUCTURE_MAP_FIT_MARGIN_BYTES;
+  for (const [index, file] of files.entries()) {
+    const windows = owed[index] ?? [];
+    if (windows.length === 0) continue;
+    bytes += estimateStructureMapReplyBytes(
+      file.path,
+      file.lines,
+      windows,
+      [],
+      "owed-row",
+      index === 0 ? notes : [],
+    ) - STRUCTURE_MAP_ENVELOPE_RESERVE_BYTES;
+    if (bytes > capBytes) return false;
+  }
+  return bytes <= capBytes;
+}
+
+/**
+ * Re-renders `surface`, the primary answer surface, as `map`'s structure map:
+ * its first row is the head, every later row ships as its own row on the same
+ * handle (`appended_windows`), `range` spans the type from the head, and
+ * `remaining_ranges` lists every line of it no row serves — so the served
+ * ledger (`packServedSpans`), the facet gate and the wire all read exactly
+ * the map's lines. False when `surface` is not the mapped type's.
+ */
+function renderStructureMapSurface(
+  surface: TaskPackSurface,
+  map: AnswerStructureMap,
+  workspace: string,
+  cache: FileReadCache,
+): boolean {
+  const layout = map.fileLayouts?.find((file) => file.path === surface.path)
+    ?? (surface.path === map.type.path ? { type: map.type, rows: map.rows, owed: map.owed } : undefined);
+  if (layout === undefined) return false;
+  const content = readCached(workspace, surface.path, cache);
+  const head = layout.rows[0];
+  if (content === undefined || head === undefined) return false;
+  const lines = content.split(/\r?\n/);
+  const text = (span: LineWindow): string => lines.slice(span.start - 1, span.end).join("\n");
+  delete surface.appended_windows;
+  let code = text(head);
+  for (const row of layout.rows.slice(1)) {
+    const range = `${row.start}-${row.end}`;
+    const marker = `\n\n/* structure map (${range}) */\n`;
+    code += marker + text(row);
+    recordAppendedWindow(surface, marker, range);
+  }
+  surface.code = code;
+  surface.range = `${head.start}-${layout.type.end}`;
+  // The map is the answer's primary evidence, and the code-bearing tier it was
+  // admitted under (`structureMapForAnswer`) is the one a required surface
+  // gives the pack (`rawCapForResult`).
+  surface.required = true;
+  const remaining = layout.owed
+    .filter((span) => span.end >= head.start)
+    .map((span) => `${Math.max(span.start, head.start)}-${span.end}`);
+  if (remaining.length > 0) {
+    surface.remaining_ranges = remaining;
+    surface.content_completeness = "partial";
+  } else {
+    delete surface.remaining_ranges;
+    delete surface.content_completeness;
+  }
+  delete surface.outline;
+  return true;
+}
+
+/** Resolve a named imported enum; C++ include inference is separately namespace-proven and bounded. */
+async function locateStructureMapStateType(
+  name: string,
+  sourceLanguage: string,
+  edges: ReturnType<typeof resolveImportsOf>,
+  workspace: string,
+  cache: FileReadCache,
+  expectedCppNamespace?: readonly string[],
+  headerLines?: readonly string[],
+  header?: LineWindow,
+) {
+  const named = edges.find((edge) => edge.names.includes(name));
+  if (sourceLanguage !== "cpp") {
+    // Keep the existing named-import path unchanged for Java, TypeScript,
+    // Python and C#: no C++ discovery limits or lexical fallback apply there.
+    if (named === undefined) return undefined;
+    const language = languageForPath(named.path);
+    const text = readCached(workspace, named.path, cache);
+    if (!language || text === undefined) return undefined;
+    const declaration = (await cache.parsedSymbols(text, language, named.path))
+      ?.find((symbol) => symbol.kind === "enum" && unqualifiedSymbolTail(symbol.name) === name);
+    return declaration === undefined ? undefined : { edge: named, declaration, text };
+  }
+
+  if (expectedCppNamespace === undefined || expectedCppNamespace.includes("")
+    || headerLines === undefined || header === undefined
+    || !cppHeaderHasSafeUnqualifiedTypeReference(headerLines, header.start, header.end, name)) return undefined;
+  const candidates = edges.filter((edge) => edge.kind === "include" && /\.(?:h|hh|hpp|hxx)$/iu.test(edge.path));
+  if (candidates.length > STRUCTURE_MAP_CPP_COUNTERPART_MAX_FILES) return undefined;
+  let inspectedBytes = 0;
+  const matches: Array<{ edge: (typeof candidates)[number]; declaration: { kind: string; startLine: number; endLine: number; signatureStartIndex?: number }; text: string }> = [];
+  for (const edge of candidates) {
+    const absolute = workspaceBodyPath(workspace, edge.path);
+    if (absolute === undefined) return undefined;
+    let size: number;
+    try {
+      const stat = fs.statSync(absolute);
+      if (!stat.isFile()) return undefined;
+      size = stat.size;
+    } catch { return undefined; }
+    if (size > STRUCTURE_MAP_CPP_COUNTERPART_MAX_FILE_BYTES
+      || inspectedBytes + size > STRUCTURE_MAP_CPP_COUNTERPART_MAX_SCAN_BYTES) return undefined;
+    inspectedBytes += size;
+    const language = languageForPath(edge.path);
+    const text = readCached(workspace, edge.path, cache);
+    if (language === undefined || text === undefined
+      || Buffer.byteLength(text, "utf8") > STRUCTURE_MAP_CPP_COUNTERPART_MAX_FILE_BYTES) return undefined;
+    const symbols = await cache.parsedSymbols(text, language, edge.path);
+    if (symbols === null) return undefined;
+    const parsed = symbols.find((symbol) => symbol.kind === "enum" && unqualifiedSymbolTail(symbol.name) === name);
+    const declaration = parsed !== undefined && Number.isSafeInteger(parsed.signatureStartIndex)
+      ? { kind: "enum", startLine: parsed.startLine, endLine: parsed.endLine, signatureStartIndex: parsed.signatureStartIndex }
+      : language === "cpp" ? cppEnumLineRange(text, name) : undefined;
+    if (declaration === undefined || declaration.signatureStartIndex === undefined) continue;
+    const declarationNamespace = cppNamespacePathAt(
+      text.split(/\r?\n/u), declaration.startLine, declaration.signatureStartIndex,
+    );
+    if (declarationNamespace !== undefined
+      && declarationNamespace.length === expectedCppNamespace.length
+      && declarationNamespace.every((part, index) => part === expectedCppNamespace[index])) {
+      matches.push({ edge, declaration, text });
+    }
+  }
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+/** C++ enum declarations are not emitted by the current symbol collector. */
+function cppEnumLineRange(text: string, name: string): { readonly kind: "enum"; readonly startLine: number; readonly endLine: number; readonly signatureStartIndex: number } | undefined {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const masked = maskCommentsAndStrings(text);
+  const matcher = new RegExp(`\\benum\\s+(?:(?:class|struct)\\s+)?${escaped}\\s*(?::\\s*[^{};]+)?\\s*\\{`, "gu");
+  const matches = [...masked.matchAll(matcher)];
+  if (matches.length !== 1) return undefined;
+  const match = matches[0]!;
+  const open = match.index + match[0].lastIndexOf("{");
+  let depth = 0;
+  let close = -1;
+  for (let index = open; index < masked.length; index += 1) {
+    if (masked[index] === "{") depth += 1;
+    else if (masked[index] === "}" && --depth === 0) { close = index; break; }
+  }
+  if (close < 0) return undefined;
+  const startLine = text.slice(0, match.index).split("\n").length;
+  const endLine = text.slice(0, close).split("\n").length;
+  return { kind: "enum", startLine, endLine, signatureStartIndex: match.index };
+}
+
+async function structureMapMemberSurfaces(
+  map: AnswerStructureMap,
+  query: string,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<TaskPackSurface[]> {
+  const out: TaskPackSurface[] = [];
+  for (const file of map.fileLayouts ?? []) {
+    if (file.path === map.type.path) continue;
+    const surface = await candidateToSurface({
+      path: file.path,
+      line: file.type.start,
+      range: `${file.type.start}-${file.type.end}`,
+      symbol: map.type.name,
+      surface: classifySurface(file.path),
+      why: "answer-structure-map-members",
+      confidence: 0.9,
+    }, workspace, [], query, cache, { answerProfile: true });
+    if (renderStructureMapSurface(surface, map, workspace, cache)) out.push(surface);
+  }
+  return out;
+}
+
+/**
+ * The workspace enum declarations `map`'s header is typed in — the state a
+ * transition table maps (`Map<OrderStatus, Set<OrderStatus>>`) — as surfaces
+ * to serve beside the map: most-named first, found through the type file's
+ * own imports and same-package references (importResolution.ts, never a
+ * workspace-wide name search), each whole and at most
+ * STRUCTURE_MAP_STATE_TYPE_MAX_BYTES, at most STRUCTURE_MAP_MAX_STATE_TYPES,
+ * only while the reply stays under the cap the map was admitted under, and
+ * none for a file `existing` already serves.
+ */
+async function structureMapStateTypeSurfaces(
+  map: AnswerStructureMap,
+  query: string,
+  workspace: string,
+  cache: FileReadCache,
+  existing: readonly TaskPackSurface[],
+): Promise<TaskPackSurface[]> {
+  const content = readCached(workspace, map.type.path, cache);
+  if (content === undefined || map.header === undefined) return [];
+  const edges = resolveImportsOf(workspace, map.type.path, content);
+  let allowance = map.capBytes - map.replyBytes;
+  const out: TaskPackSurface[] = [];
+  for (const declarationWindow of map.stateWindows) {
+    if (out.length >= STRUCTURE_MAP_MAX_STATE_TYPES) break;
+    const edge = edges.find((candidate) => candidate.path === declarationWindow.path);
+    if (edge === undefined || out.some((surface) => surface.path === edge.path)) continue;
+    const alreadyServed = existing.find(surface => surface.path === edge.path);
+    if (alreadyServed !== undefined) {
+      alreadyServed.why = "answer-structure-map-state-type";
+      continue;
+    }
+    const text = readCached(workspace, edge.path, cache);
+    if (text === undefined) continue;
+    const declaration = { startLine: declarationWindow.start, endLine: declarationWindow.end };
+    const declarationLines = text.split(/\r?\n/);
+    const declarationText = declarationLines.slice(declaration.startLine - 1, declaration.endLine).join("\n");
+    if (Buffer.byteLength(declarationText, "utf8") > STRUCTURE_MAP_STATE_TYPE_MAX_BYTES) continue;
+    const cost = estimateStructureMapReplyBytes(edge.path, declarationLines, [{ start: declaration.startLine, end: declaration.endLine }], [])
+      - STRUCTURE_MAP_ENVELOPE_RESERVE_BYTES;
+    if (cost > allowance) continue;
+    const surface = await candidateToSurface({
+      path: edge.path,
+      line: declaration.startLine,
+      range: `${declaration.startLine}-${declaration.endLine}`,
+      symbol: declarationWindow.name,
+      surface: classifySurface(edge.path),
+      why: "answer-structure-map-state-type",
+      confidence: 0.9,
+    }, workspace, [], query, cache, { answerProfile: true });
+    if (typeof surface.code !== "string" || surface.code.length === 0) continue;
+    surface.required = false;
+    allowance -= cost;
+    out.push(surface);
+  }
+  return out;
 }
 
 /**
@@ -8397,6 +10005,8 @@ function traceLiteralFirstRouteDecision(
 
 interface PropagationSeedResolution {
   paths: string[];
+  auxiliaryCandidates?: readonly {path: string; rank: number}[];
+  auxiliaryScopes?: readonly string[];
   literal?: LiteralFirstMeasurement;
 }
 
@@ -8520,9 +10130,20 @@ async function propagationSeedResolution(
     return a.line - b.line || a.path.localeCompare(b.path);
   });
 
+  // Reuse this bounded discovery pool; auxiliary delivery never starts a walk
+  // or changes which six primary paths the ordinary planner admits.
+  const propagationScope = args.path ?? inferQueryProjectScope(workspace, query) ?? null;
+  const auxiliaryScopes = (explicitPathUnion.length > 0 ? explicitPathUnion
+    : propagationScope === null ? [] : [propagationScope])
+    .map(scope => normalizedRequestPath(scope).replace(/\/$/, ""))
+    .filter(scope => scope !== "" && scope !== ".");
+  const auxiliaryCandidates = isEnumLikeQuery(query)
+    ? ranked.filter(hit => auxiliaryScopes.length === 0
+        || auxiliaryScopes.some(scope => hit.path === scope || hit.path.startsWith(scope + "/")))
+      .slice(0, 24).map((hit, rank) => ({path: hit.path, rank}))
+    : undefined;
   const selected: PropagationSeedHit[] = [];
   const selectedPaths = new Set<string>();
-  const propagationScope = args.path ?? inferQueryProjectScope(workspace, query) ?? null;
   // Cross-package enum fan-out with a real stylesheet needs one compact style
   // surface plus enough wire budget for the prepared contract. Keep the code
   // frontier to four edit sites; delegation-only route/review candidates are
@@ -8655,7 +10276,7 @@ async function propagationSeedResolution(
       }
     }
     if (selected.length >= 2) {
-      return { paths: selected.map((hit) => hit.path), ...(literalFirst !== undefined ? { literal: literalFirst } : {}) };
+      return { paths: selected.map((hit) => hit.path), auxiliaryCandidates, auxiliaryScopes, ...(literalFirst !== undefined ? { literal: literalFirst } : {}) };
     }
   }
   for (const token of identifiers) add(ranked.find((hit) => hit.tokens.has(token)));
@@ -8667,6 +10288,8 @@ async function propagationSeedResolution(
   const minimumPaths = literalFirst?.kind === "present" ? 1 : 2;
   return {
     paths: selected.length >= minimumPaths ? selected.map((hit) => hit.path) : [],
+    auxiliaryCandidates,
+    auxiliaryScopes,
     ...(literalFirst !== undefined ? { literal: literalFirst } : {}),
   };
 }
@@ -8920,7 +10543,12 @@ async function buildPropagationTaskPack(
     traceLiteralFirstRouteDecision(resolution.literal, paths, "abstained", workspace);
     return undefined;
   }
-  const result = await buildSeededTaskPack({ ...args, paths, autoDiscoveredLocation: !hadExplicitLocation }, query, workspace);
+  const seededArgs = { ...args, paths, autoDiscoveredLocation: !hadExplicitLocation };
+  if (resolution.auxiliaryCandidates !== undefined) carryAuxiliaryEnumPool(seededArgs, {
+    workspace, query, candidates: resolution.auxiliaryCandidates, subjects: [], primaryPaths: paths,
+    scopes: resolution.auxiliaryScopes,
+  });
+  const result = await buildSeededTaskPack(seededArgs, query, workspace);
   // buildSeededTaskPack captures the internal seeded request. Replace that
   // cache key with the caller's original pathless request so an exact retry
   // still receives the compact pack-unchanged response.
@@ -9913,6 +11541,110 @@ function hasRequiredArtifactSections(result: TaskPackResult, query: string): boo
   );
 }
 
+/** File stems the request names as an artifact pack's implementation target: its module-shaped tokens and code file names. */
+function queryNamedArtifactTargets(query: string): Set<string> {
+  return new Set([
+    ...moduleShapedQueryTokens(query).map(normIdent),
+    ...(query.match(/[A-Za-z_$][A-Za-z0-9_$.-]*\.(?:c|cc|cpp|cxx|go|java|js|jsx|py|rs|ts|tsx)\b/gi) ?? [])
+      .map((fileName) => normIdent(path.basename(fileName, path.extname(fileName)))),
+  ]);
+}
+
+/**
+ * Artifact consumers (artifactConsumers.ts, v0.16 6t-7 T10): the workspace
+ * code that already loads or names this pack's required artifacts, as optional
+ * windows between the implementation target and the artifact stubs, inside the
+ * pack's spare budget. `trimToCap` sheds them first.
+ */
+async function attachArtifactConsumerSurfaces(
+  result: TaskPackResult,
+  workspace: string,
+  cache: FileReadCache,
+  editTarget: string | undefined,
+): Promise<void> {
+  const requirements = result.artifact_requirements ?? [];
+  if (editTarget === undefined || requirements.length === 0) return;
+  if (!symbolCollectorSupports(languageForPath(editTarget) ?? "")) return;
+  const sections = result.artifact_sections
+    ?? (result.section !== undefined
+      ? bundledArtifactPaths(result).slice(0, 1).map((artifactPath) => ({ path: artifactPath, section: result.section! }))
+      : []);
+  if (sections.length === 0) return;
+  // The whole pack is measured with each consumer file added, so the budget
+  // is the pack's own: at most ARTIFACT_CONSUMER_TOTAL_BYTES more, and always
+  // ARTIFACT_CONSUMER_RESERVE_BYTES under the cap.
+  const baseBytes = packWireBytes(result);
+  const ceiling = Math.min(
+    baseBytes + ARTIFACT_CONSUMER_TOTAL_BYTES,
+    capForResult(result) - ARTIFACT_CONSUMER_RESERVE_BYTES,
+  );
+  if (ceiling <= baseBytes) return;
+  const scanRoot = commonDirectory([editTarget, ...requirements]);
+  const taken = new Set([editTarget, ...result.surfaces.map((surface) => surface.path)].map(normalizedRequestPath));
+  const files = walkCodeFiles(workspace, { ...(scanRoot !== "" ? { subPath: scanRoot } : {}), respectGitignore: true })
+    .filter((file) => file.kind === undefined
+      && !taken.has(file.relPath)
+      && symbolCollectorSupports(languageForPath(file.relPath) ?? ""))
+    .map((file) => file.relPath);
+  const plans = await planArtifactConsumers({
+    editTarget,
+    artifacts: requirements,
+    servedTexts: sections.map(({ path: artifactPath, section }) => ({
+      artifact: artifactPath,
+      text: artifactSectionText(section),
+    })),
+    files,
+    packageRoot: packageRootOf(editTarget, scanRoot, (relPath) => {
+      const abs = safeResolve(relPath, workspace);
+      return abs !== undefined && fs.existsSync(abs);
+    }),
+    read: (relPath) => readCached(workspace, relPath, cache),
+    language: (relPath) => languageForPath(relPath),
+    isTest: (relPath) => classifySurface(relPath) === "test",
+    symbols: async (relPath, text, language) => (await cache.parsedSymbols(text, language, relPath)) ?? [],
+    displayBytes: (relPath, start, end, keepComments) => {
+      const code = sliceCode(workspace, relPath, `${start}-${end}`, cache, MAX_SURFACE_CODE_BYTES, keepComments === true);
+      return code === undefined ? undefined : Buffer.byteLength(code, "utf8");
+    },
+  });
+  const consumers: TaskPackSurface[] = [];
+  for (const plan of plans) {
+    const drafts: TaskPackSurface[] = [];
+    for (const window of plan.windows) {
+      const range = `${window.start}-${window.end}`;
+      const code = sliceCode(workspace, plan.path, range, cache, MAX_SURFACE_CODE_BYTES, window.whole === true);
+      if (code === undefined) continue;
+      drafts.push({
+        role: classifySurface(plan.path),
+        // Measured with a placeholder of a real handle's length; minted below
+        // only for the drafts that fit.
+        handle: "h0000000000",
+        path: plan.path,
+        range,
+        required: false,
+        ...(drafts.length === 0 ? { why: plan.why } : {}),
+        code,
+      });
+    }
+    if (drafts.length === 0) continue;
+    if (packWireBytes({ ...result, surfaces: [...result.surfaces, ...consumers, ...drafts] }) > ceiling) continue;
+    for (const draft of drafts) {
+      draft.handle = handleTable.upsert({
+        kind: "range",
+        path: draft.path,
+        range: draft.range,
+        workspaceRoot: workspace,
+      }).id;
+      markArtifactConsumerSurface(draft);
+      consumers.push(draft);
+    }
+  }
+  if (consumers.length === 0) return;
+  const firstArtifact = result.surfaces.findIndex((surface) => isArtifactTaskPackSurface(surface));
+  (result.surfaces as TaskPackResultSurface[])
+    .splice(firstArtifact === -1 ? result.surfaces.length : firstArtifact, 0, ...consumers);
+}
+
 /** DESIGN-v0.9 §8: one artifact extract + one implementation target, no crawl. */
 async function buildArtifactTaskPack(
   args: TaskPackArgs,
@@ -10049,6 +11781,18 @@ async function buildArtifactTaskPack(
         : "artifact sections and implementation frontier are bundled for editing",
       max_additional_tl_calls: 0,
     };
+  }
+
+  // Only for a target the request itself names (or a proved create target):
+  // a locator's guess is still discovery, and its pack stays as small as it was.
+  const primary = codeSurfaces[0];
+  const consumerTarget = createTarget?.path
+    ?? (primary !== undefined
+      && queryNamedArtifactTargets(query).has(normIdent(path.basename(primary.path, path.extname(primary.path))))
+      ? primary.path
+      : undefined);
+  if (consumerTarget !== undefined) {
+    await attachArtifactConsumerSurfaces(result, workspace, cache, consumerTarget);
   }
 
   const finalResult = await dedupeTrimAndPersist(workspace, result, {
@@ -10799,6 +12543,173 @@ function trimLightAnswerWire(result: TaskPackResult, relPath: string): boolean {
   return true;
 }
 
+/** Files one listed item's discharge scan reads at most. */
+const LISTED_ITEM_SCAN_MAX_FILES = 400;
+/** A discharge row spans its declaration's head to the derived line when that is at most this many lines. */
+const LISTED_ITEM_WINDOW_MAX_LINES = 8;
+/** The listed item's text is quoted in the row's `why` up to this many characters. */
+const LISTED_ITEM_WHY_MAX_CHARS = 80;
+
+/**
+ * Listed scope items (2026-10-19, v016 decision 6t-4 T09 rep 1; the case is in
+ * listedScopeItems.ts). Every place the request lists must map to a served
+ * surface, judged by the seeded packs' own clause-coverage test
+ * (`isClauseCoveredBySeededSurfaces`, JA bridge words included). For an item
+ * nothing covers, a value-addition request looks for the one window that
+ * discharges it: a line inside a declaration the item names that enumerates
+ * the extended enum as a whole, so the new value reaches it without an edit
+ * (T09: `IssueCreateSchema`'s `priority: z.enum(Object.values(IssuePriority)
+ * ...)`). That window is appended as a review-only row (`LISTED_ITEM_DERIVED_WHY`,
+ * which `writeAuthorityVeto` keeps out of the edit frontier). Returns the rows
+ * it added, the items left uncovered, and the words of those items no served
+ * surface carries.
+ */
+async function accountForListedScopeItems(
+  query: string,
+  surfaces: TaskPackSurface[],
+  workspace: string,
+  scopeDir: string,
+  cache: FileReadCache,
+): Promise<{ added: TaskPackSurface[]; uncovered: string[]; unmatchedTokens: string[] }> {
+  const added: TaskPackSurface[] = [];
+  const uncovered: string[] = [];
+  const unmatchedTokens: string[] = [];
+  const items = listedScopeItems(query);
+  if (items.length === 0) return { added, uncovered, unmatchedTokens };
+  const values = new Set(extractEnumValueTokens(query));
+  const enumNames = isEnumLikeQuery(query)
+    ? [...new Set(surfaces.flatMap((surface) =>
+        surface.role === "contract" && surface.code !== undefined ? enumNamesDeclaredWith(surface.code, values) : []))]
+    : [];
+  for (const item of items) {
+    const tokens = listedItemTokens(item, workspace);
+    const covered = isClauseCoveredBySeededSurfaces(tokens, seededCoverageView(surfaces), tokenizeQueryForDiversification);
+    const row = enumNames.length > 0 && new Set(surfaces.map(surface => surface.path)).size < MAX_SURFACES_DISTINCT
+      ? await enumDerivedItemSurface(item, tokens, enumNames, surfaces, workspace, scopeDir, query, cache, covered)
+      : undefined;
+    if (row !== undefined) {
+      surfaces.push(row);
+      added.push(row);
+      continue;
+    }
+    if (covered) continue;
+    uncovered.push(item);
+    for (const word of unservedItemWords(item, tokens, surfaces)) {
+      if (!unmatchedTokens.includes(word)) unmatchedTokens.push(word);
+    }
+  }
+  return { added, uncovered, unmatchedTokens: unmatchedTokens.slice(0, 4) };
+}
+
+/** A listed item's coverage tokens, built the way the seeded clause recovery builds a clause's. */
+function listedItemTokens(item: string, workspace: string): Set<string> {
+  const isJapanese = containsJapanese(item);
+  const base = clauseCoverageTokenSet(item, tokenizeQueryForDiversification, isJapanese ? jaBridgeExpansionTokens(item, workspace) : []);
+  const stemExtras = isJapanese ? [] : collectNeighbourWords(base, (token) => vocabularyStemNeighbours(token, workspace));
+  return stemExtras.length > 0 ? new Set([...base, ...stemExtras]) : base;
+}
+
+function seededCoverageView(surfaces: readonly TaskPackSurface[]): SeededCoverageSurface[] {
+  return surfaces.map((surface) => ({
+    path: surface.path,
+    symbol: surface.symbol,
+    bodyText: surface.code,
+    isDocSurface: surface.role === "doc",
+  }));
+}
+
+/**
+ * The latin words of a listed item that no served surface's path, symbol or
+ * body carries: the item's own words before its bridge words, longest first.
+ */
+function unservedItemWords(item: string, tokens: ReadonlySet<string>, surfaces: readonly TaskPackSurface[]): string[] {
+  const served = new Set(surfaces.flatMap((surface) =>
+    tokenizeQueryForDiversification(`${surface.path.replace(/[\\/]/gu, " ")} ${surface.symbol ?? ""} ${surface.code ?? ""}`)
+      .map((token) => token.toLowerCase())));
+  const written = new Set(tokenizeQueryForDiversification(item).map((token) => token.toLowerCase()));
+  const words = [...tokens].filter((token) => /^[a-z][a-z0-9_]{2,}$/u.test(token) && !served.has(token));
+  const longestFirst = (a: string, b: string): number => b.length - a.length;
+  return [
+    ...words.filter((word) => written.has(word)).sort(longestFirst),
+    ...words.filter((word) => !written.has(word)).sort(longestFirst),
+  ];
+}
+
+/**
+ * The one window that discharges a listed item, or undefined: the best line in
+ * the pack's root that enumerates an extended enum as a whole
+ * (`wholeEnumAccessor`), whose path or enclosing declaration the item's own
+ * words name (the >=2-token / long-token test `isClauseCoveredBySeededSurfaces`
+ * applies to a path and symbol), outside every served window and every test or
+ * doc file. A name the declaration carries outranks a word of its path.
+ */
+async function enumDerivedItemSurface(
+  item: string,
+  tokens: ReadonlySet<string>,
+  enumNames: readonly string[],
+  surfaces: readonly TaskPackSurface[],
+  workspace: string,
+  scopeDir: string,
+  query: string,
+  cache: FileReadCache,
+  covered = false,
+): Promise<TaskPackSurface | undefined> {
+  let best: { path: string; line: number; accessor: string; declaration: { name: string; line: number } | undefined; score: number } | undefined;
+  const files = walkCodeFiles(workspace, scopeDir !== "" ? { subPath: scopeDir } : {});
+  for (const file of files.slice(0, LISTED_ITEM_SCAN_MAX_FILES)) {
+    const role = classifySurface(file.relPath);
+    if (role === "test" || role === "doc" || isTestConcernPath(file.relPath)) continue;
+    const content = readCached(workspace, file.relPath, cache);
+    if (content === undefined || !enumNames.some((name) => content.includes(name))) continue;
+    // Reuse the bounded existing scan before item/declaration scoring discards
+    // unrelated-to-this-clause consumers. AST binding/use analysis remains the
+    // later source-context admission gate; a lexical hit grants no authority.
+    captureAuxiliaryEnumCandidate(cache, workspace, query, file.relPath, enumNames);
+    const lines = content.split(/\r?\n/u);
+    for (let index = 0; index < lines.length; index++) {
+      const accessor = enumNames.map((name) => wholeEnumAccessor(lines[index]!, name)).find((text) => text !== undefined);
+      if (accessor === undefined || lineServedBy(surfaces, file.relPath, index + 1)) continue;
+      const declaration = enclosingDeclaration(lines, index);
+      // Replacing loose existing coverage needs a declaration-specific proof;
+      // shared directory words alone must not consume the bounded file slot.
+      if (covered && (declaration === undefined || distinctMatchedTokenCount(tokens,
+        {path: "", symbol: declaration.name}, tokenizeQueryForDiversification) < 2)) continue;
+      const site = { path: file.relPath, ...(declaration !== undefined ? { symbol: declaration.name } : {}) };
+      if (!isClauseCoveredBySeededSurfaces(tokens, [site], tokenizeQueryForDiversification)) continue;
+      const score = 2 * (declaration !== undefined
+        ? distinctMatchedTokenCount(tokens, { path: "", symbol: declaration.name }, tokenizeQueryForDiversification)
+        : 0)
+        + distinctMatchedTokenCount(tokens, { path: file.relPath.replace(/[\\/]/gu, " ") }, tokenizeQueryForDiversification);
+      if (best === undefined || score > best.score) best = { path: file.relPath, line: index + 1, accessor, declaration, score };
+    }
+  }
+  if (best === undefined) return undefined;
+  const start = best.declaration !== undefined && best.line - best.declaration.line < LISTED_ITEM_WINDOW_MAX_LINES
+    ? best.declaration.line
+    : best.line;
+  const surface = await candidateToSurface({
+    path: best.path,
+    line: best.line,
+    range: `${start}-${best.line}`,
+    callerRange: true,
+    ...(best.declaration !== undefined ? { symbol: best.declaration.name } : {}),
+    surface: classifySurface(best.path, best.declaration?.name),
+    why: `${LISTED_ITEM_DERIVED_WHY}: ${best.accessor} takes the new value, no edit needed (listed item: ${item.slice(0, LISTED_ITEM_WHY_MAX_CHARS)})`,
+    confidence: 1,
+  }, workspace, [], query, cache);
+  // Review-only: the role-based edit guidance candidateToSurface derives from
+  // an enum-like query ("add the value to ...") would say the opposite.
+  delete surface.edit_intent;
+  delete surface.done_check;
+  surface.required = false;
+  return hasServedCode(surface) ? surface : undefined;
+}
+
+function lineServedBy(surfaces: readonly TaskPackSurface[], relPath: string, line: number): boolean {
+  return surfaces.some((surface) =>
+    surface.path === relPath && surfaceBodyCoversRange(surface, `${line}-${line}`));
+}
+
 async function buildSeededTaskPack(
   args: TaskPackArgs,
   query: string,
@@ -10830,6 +12741,10 @@ async function buildSeededTaskPack(
   // Efficiency: one per-pack read/parse memo, seeded below with the seed
   // reads so downstream slice/widen calls never re-read the same file.
   const cache = new FileReadCache();
+  const auxiliarySeed = auxiliaryEnumPool(args) ?? restoreAuxiliaryEnumPool(
+    getSession(workspace).activeTaskQuery, workspace, query, args.taskBinding, args.taskQueryRefReplay === true,
+  );
+  if (auxiliarySeed !== undefined) carryAuxiliaryEnumPool(cache, auxiliarySeed);
 
   // 1. Read every supplied path. Missing/outside-workspace entries are
   //    recorded in `missing` and never fabricated as a surface.
@@ -10844,6 +12759,7 @@ async function buildSeededTaskPack(
   // only a re-seed scoped to the directory can close this one (see the
   // unexpandedDirNext hint below).
   const unresolvedDirs: string[] = [];
+  const unresolvedFileParents: string[] = [];
   const seededArtifacts: MintedArtifactSurface[] = [];
   const seenPaths = new Set<string>();
   const seenEntries = new Set<string>();
@@ -10969,7 +12885,12 @@ async function buildSeededTaskPack(
         // the path the CALLER wrote -- re-pointing it was this server's own
         // inference, so `missing` must never name a path they did not ask for.
         // Empty unless TL_NAMED_TARGET_RESOLUTION resolved something.
-        missing.push(resolvedFromByPath.get(entry.path) ?? entry.path);
+        const requestedPath = resolvedFromByPath.get(entry.path) ?? entry.path;
+        missing.push(requestedPath);
+        const parent = path.dirname(requestedPath);
+        if (isDirectoryWithin(parent, workspace) && !unresolvedFileParents.includes(parent)) {
+          unresolvedFileParents.push(parent);
+        }
         resolvedFromByPath.delete(entry.path);
       }
       continue;
@@ -12061,6 +13982,16 @@ async function buildSeededTaskPack(
     }
   }
 
+  // Edit context (2026-10-16 bench): an edit target carries the definitions
+  // its body depends on — one the server located itself (pathless, or inside
+  // the caller's one directory scope), or the single target the caller named
+  // alongside its request (a caller-named set of several stands exactly as
+  // named). Only a callable the request names, or the single one in a served
+  // window, is a focal, so a plain read target adds nothing.
+  if (!answerProfile && (args.autoDiscoveredLocation === true || (args.paths?.length ?? 0) <= MAX_EDIT_CONTEXT_CALLER_TARGETS)) {
+    await augmentEditContextSurfaces(seededSurfaces, query, workspace, requiredRoles, cache, selectedProfile === "generic");
+  }
+
   // WP-O (eval-0929 §8): a same-name subject none of the caller's targets
   // declares — its call sites never prove it; the certificate names the
   // declaration the question means as a ranged `next` (see
@@ -12202,6 +14133,20 @@ async function buildSeededTaskPack(
       dirPackDemotionCheck = queryGiven
         ? "dir-scoped pack embeds no query-grounded implementation body — slice the implicated source before editing"
         : "dir-scoped pack embeds no implementation body — slice the implicated source before editing";
+    }
+  }
+  // Listed scope items (2026-10-19, v016 6t-4 T09): a pack the server located
+  // itself claims "complete" only when every place the request lists maps to
+  // a served surface or to a row that discharges it (accountForListedScopeItems).
+  // A caller-named file set keeps the earned-trust rule above.
+  if (!answerProfile && coverageStr === "complete" && args.autoDiscoveredLocation === true) {
+    const listed = await accountForListedScopeItems(query, seededSurfaces, workspace, ancestor, cache);
+    for (const row of listed.added) protectedSurfaces.add(row);
+    if (listed.uncovered.length > 0) {
+      coverageStr = "partial";
+      coverageReason = "concerns-uncovered";
+      allMissing.push(...listed.uncovered.map((item) => `listed-item:${item}`));
+      unmatchedConcern = listed.unmatchedTokens;
     }
   }
   const route = buildRoute(seededSurfaces, missingRequired, coverageStr, allMissing, query, coverageReason);
@@ -12362,7 +14307,7 @@ async function buildSeededTaskPack(
   // WP-O: computed before the facet plan (see there); recorded before the
   // certificate is built.
   recordSameNameSubjects(result, seededSameName);
-  attachPartialTree(result, workspace);
+  attachPartialTree(result, workspace, unresolvedFileParents);
   // WP-S2 rule 2 (TL_SEEDED_GENEROUS): claim the additive tier for a pack whose
   // caller named >= 2 files this build decided to serve whole. Marked HERE, the
   // last point before `dedupeTrimAndPersist` hands this exact object to
@@ -12552,8 +14497,21 @@ interface AnchorFocusResult {
  * a `find` call on a token that is not a real identifier. A bare file stem
  * with no directory prefix (`policy.ts`) is unaffected — see stripPathSpans.
  */
-function explicitCodeIdentifiers(query: string): string[] {
-  const cleaned = stripPathSpans("", query);
+export function explicitCodeIdentifiers(query: string): string[] {
+  return explicitCodeIdentifierEntries(query).map((entry) => entry.token);
+}
+
+/**
+ * `explicitCodeIdentifiers` with how each name became one: `framedOnly` is a plain
+ * word that is an identifier ONLY because the request frames it as a declaration
+ * ("the big Transport struct": `Transport` has no casing rule, backtick or access
+ * syntax of its own). A framed name is the name of a type or struct; the method
+ * `transport()` of another file is not it, though the lowercase spellings are equal
+ * (`rankAnswerEvidenceCandidates`).
+ */
+export function explicitCodeIdentifierEntries(query: string): Array<{ readonly token: string; readonly framedOnly: boolean }> {
+  const unstripped = maskCitationFormatFields(maskEvaluationInputRecords(query));
+  const cleaned = stripPathSpans("", unstripped);
   const matches = cleaned.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) ?? [];
   const backticked = new Set(
     [...cleaned.matchAll(/`([A-Za-z_$][A-Za-z0-9_$]*)`/g)]
@@ -12563,8 +14521,18 @@ function explicitCodeIdentifiers(query: string): string[] {
     [...cleaned.matchAll(/\(\s*([A-Z][a-z][A-Za-z0-9]*)\s*\)/g)]
       .map((match) => match[1]!.toLowerCase()),
   );
+  // `Service.Post` / `Post()`: access or call syntax marks a one-word member
+  // as code even though its casing reads like prose (util/memberReferences.ts).
+  const memberNames = memberReferenceNames(cleaned);
+  // A plain word the request frames as a declaration — "the big Transport struct",
+  // "type Transport", "impl Decimal", "Transport 構造体" (declarationFraming.ts): a Go,
+  // Rust or C type is very often one such word, and no casing rule admits it. Read from
+  // the text with its path spans intact (a file reference is part of one frame).
+  // A framed name keeps the spelling of its FRAME: "command.go の Command 構造体" has `command` in
+  // front of `Command` (the file's stem), and the first occurrence must not decide the spelling.
+  const framedSpelling = new Map(declarationFramedNames(unstripped).map((name) => [name.toLowerCase(), name] as const));
   const seen = new Set<string>();
-  const out: string[] = [];
+  const out: Array<{ readonly token: string; readonly framedOnly: boolean }> = [];
   for (const token of matches) {
     const key = token.toLowerCase();
     const codeShaped = token.includes("_")
@@ -12576,12 +14544,38 @@ function explicitCodeIdentifiers(query: string): string[] {
       // below still make it one.
       || (/^[A-Z][A-Z0-9_]{2,}$/.test(token) && !isProseAcronym(token))
       || backticked.has(key)
-      || parenthesizedPascal.has(key);
-    if (!codeShaped) continue;
+      || parenthesizedPascal.has(key)
+      || memberNames.has(key);
+    const framedOnly = !codeShaped && framedSpelling.has(key);
+    if (!codeShaped && !framedOnly) continue;
     if (PROTOCOL_IDENTIFIERS.has(key)) continue;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push(token);
+    out.push({ token: framedOnly ? framedSpelling.get(key)! : token, framedOnly });
+  }
+  return out;
+}
+
+/**
+ * Normalized names `explicitCodeIdentifiers` returns ONLY because of member
+ * access or empty-call syntax (`Uploader.Retry`, `post()`): no casing rule,
+ * backtick or `(Pascal)` would have made them code. The readiness loop treats
+ * such a name as a guess when the workspace defines it nowhere.
+ */
+function memberOnlyExplicitIdentifiers(query: string): Set<string> {
+  const cleaned = stripPathSpans("", maskCitationFormatFields(maskEvaluationInputRecords(query)));
+  const delimited = new Set(delimitedExplicitCodeIdentifiers(query).map(normIdent));
+  const out = new Set<string>();
+  const members = memberReferenceNames(cleaned);
+  for (const identifier of explicitCodeIdentifiers(query)) {
+    const key = normIdent(identifier);
+    if (!members.has(identifier.toLowerCase()) || delimited.has(key)) continue;
+    const casingShaped = identifier.includes("_")
+      || identifier.includes("$")
+      || /^[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*$/.test(identifier)
+      || isPascalCaseIdentifier(identifier)
+      || (/^[A-Z][A-Z0-9_]{2,}$/.test(identifier) && !isProseAcronym(identifier));
+    if (!casingShaped) out.add(key);
   }
   return out;
 }
@@ -13903,13 +15897,15 @@ function shouldRedirectToOverview(args: TaskPackArgs, query: string): boolean {
   }
 
   if (/どんなシステム|全体像|概要|アーキテクチャ|構成を.*教えて|実装を.*見て.*教えて/.test(raw)) {
-    return true;
+    return !queryNamesSpecificSubject(raw);
   }
 
   const overviewPhrase =
     /\b(architecture|implementation|system|repo|repository|codebase)\s+(overview|map|summary)\b/.test(lower) ||
     /\b(overview|map|summary)\s+(of|for)\s+(the\s+)?(architecture|system|repo|repository|codebase)\b/.test(lower);
-  if (overviewPhrase) return true;
+  // Bare acronyms such as MCP/CLI still describe a repository overview;
+  // paths, quoted terms and named members keep their specific subject.
+  if (overviewPhrase) return !queryNamesSpecificSubject(raw, false);
 
   // P1-2 (hands-on report, 2026-09): this gate used to fire on ANY
   // co-occurrence of an explain-class verb and a broad noun, with no check
@@ -13951,11 +15947,11 @@ function shouldRedirectToOverview(args: TaskPackArgs, query: string): boolean {
  * that is actually about one concrete symbol just because it also happens to
  * mention a broad noun like "implementation"/"architecture".
  */
-function queryNamesSpecificSubject(query: string): boolean {
+function queryNamesSpecificSubject(query: string, allowBareAcronyms = true): boolean {
   const trimmed = query.trim();
   if (trimmed.length === 0) return false;
   if (extractClassMethodPairs(trimmed).length > 0) return true;
-  if (concreteIdentifierTokens(trimmed).length > 0) return true;
+  if (concreteIdentifierTokens(trimmed).some((token) => allowBareAcronyms || !/^[A-Z][A-Z0-9]{2,}$/.test(token))) return true;
   if (trimmed.match(CREATE_TARGET_EXT_RE) !== null) return true;
   if (/["'“”‘’「」『』][^"'“”‘’「」『』]{2,}["'“”‘’「」『』]/.test(trimmed)) return true;
 
@@ -13969,6 +15965,7 @@ function queryNamesSpecificSubject(query: string): boolean {
   while ((wm = wordRe.exec(trimmed)) !== null) {
     const word = wm[0];
     if (word.length < 3 || !/^[A-Z]/.test(word)) continue;
+    if (!allowBareAcronyms && /^[A-Z][A-Z0-9]{2,}$/.test(word)) continue;
     if (sentenceStarts.has(wm.index)) continue;
     const lower = word.toLowerCase();
     if (!candidateTokens.has(lower)) continue;
@@ -14141,6 +16138,48 @@ function uniqueExplicitIdentityCandidate<
   return { candidate: best.candidate, exactSymbol: best.exactSymbol };
 }
 
+/**
+ * The candidates that ARE the requested identity — an explicit identifier as
+ * their symbol or basename (`uniqueExplicitIdentityCandidate`'s test), or a
+ * prose-cased name the request spells mid-clause as their symbol ("Fix Sum
+ * so …", requestItems.ts's `capitalizationNamesSubject`) — when they span two
+ * or more files, best first. Those files are the choice itself.
+ */
+function sameIdentityCandidates(candidates: readonly RankedDetail[], query: string): RankedDetail[] {
+  const explicit = new Set(explicitCodeIdentifiers(query).map(normIdent));
+  const spelled = (symbol: string): boolean => symbol.length >= 3
+    && new RegExp(`(?<![A-Za-z0-9_$])${escapeRegExp(symbol)}(?![A-Za-z0-9_$])`).test(query)
+    && capitalizationNamesSubject(symbol, query);
+  const matches = candidates.filter((candidate) => {
+    const symbol = unqualifiedSymbolTail(candidate.symbol ?? "");
+    const basename = normIdent(path.basename(candidate.path, path.extname(candidate.path)));
+    return (symbol.length > 0 && (explicit.has(normIdent(symbol)) || spelled(symbol)))
+      || (basename.length > 0 && explicit.has(basename));
+  });
+  return new Set(matches.map((candidate) => candidate.path)).size >= 2 ? [...matches].sort(compareDetails) : [];
+}
+
+/** See `buildPartialPack`'s identity step: the spelled-name counterpart of `uniqueExplicitIdentityCandidate`. */
+async function uniqueSpelledDefinitionCandidate(
+  candidates: readonly RankedDetail[],
+  query: string,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ candidate: RankedDetail; exactSymbol: boolean } | undefined> {
+  const spelled = candidates.filter((candidate) => {
+    const symbol = unqualifiedSymbolTail(candidate.symbol ?? "");
+    return symbol.length >= 3
+      && new RegExp(`(?<![A-Za-z0-9_$])${escapeRegExp(symbol)}(?![A-Za-z0-9_$])`).test(query)
+      && capitalizationNamesSubject(symbol, query);
+  });
+  if (new Set(spelled.map((candidate) => candidate.path)).size !== 1 || !requestAsksForChange(query)) return undefined;
+  const candidate = [...spelled].sort(compareDetails)[0]!;
+  const definitions = await namedCallableDefinitions(query, workspace, candidate.path, cache);
+  if (definitions === undefined || !definitions.complete || definitions.paths.length !== 1) return undefined;
+  if (normIdent(definitions.identifier) !== normIdent(unqualifiedSymbolTail(candidate.symbol ?? ""))) return undefined;
+  return { candidate, exactSymbol: true };
+}
+
 async function buildPartialPack(
   details: LocateCandidateDetail[],
   args: TaskPackArgs,
@@ -14189,7 +16228,14 @@ async function buildPartialPack(
   //
   // This deliberately does not guess when two paths define the same requested
   // identity: those remain a candidate-list for the caller to disambiguate.
-  const identityMatch = uniqueExplicitIdentityCandidate(pool, query);
+  //
+  // A prose-cased name the request spells mid-clause ("Fix Sum so …") is no
+  // explicit identifier; it settles the target the same way only for a
+  // request that asks for the change, when exactly one candidate declares it
+  // and no other implementation file defines it (`namedCallableDefinitions`,
+  // the generic route's own single-primary rule).
+  const identityMatch = uniqueExplicitIdentityCandidate(pool, query)
+    ?? await uniqueSpelledDefinitionCandidate(pool, query, workspace, cache);
   if (identityMatch !== undefined) {
     const { candidate: matched, exactSymbol } = identityMatch;
     const result = await buildSeededTaskPack({
@@ -14238,6 +16284,16 @@ async function buildPartialPack(
     for (const detail of ranked.slice(0, perRole)) {
       sortedEntries.push([role, detail]);
     }
+  }
+  // Every candidate that is the requested identity stays one: two files
+  // defining the named callable are the choice the pack asks the caller to
+  // make, and the one-per-role compaction above kept only the first (gauge
+  // fixture, 2026-10-17: "Fix Sum so drains count down." beside a stats.Sum
+  // listed meter/sum.go alone).
+  for (const detail of sameIdentityCandidates(pool, query)) {
+    if (sortedEntries.length >= MAX_SURFACES_DISTINCT) break;
+    if (sortedEntries.some(([, entry]) => entry.path === detail.path)) continue;
+    sortedEntries.push([detail.surface, detail]);
   }
 
   // 4. Build surfaces, capped at MAX_SURFACES_DISTINCT.
@@ -14450,8 +16506,17 @@ async function buildPartialPack(
   //     branch to the plain partial-coverage route below, unmodified.
   const unmatchedConcern = unmatchedConcernTokens(query, surfaces);
   const coverageStr = "partial" as const;
+  // A candidate the request explicitly protects ("Keep src/b.ts unchanged")
+  // is context, not a choice: when it leaves exactly one candidate, that one
+  // is resolved. The 2026-10-16 bench's "Change batch … in src/limits.mjs.
+  // Keep max at 24 and src/window.mjs unchanged." otherwise asked the caller
+  // to choose between the two files (choose-candidate).
+  const protectedPaths = protectedNamedPaths(query);
+  const unprotectedSurfaces = surfaces.flatMap((surface, index) => (protectedPaths.has(surface.path) ? [] : [index]));
   const dominantAbstainSurface = missingRequired.length === 0 && unmatchedConcern.length === 0
-    ? resolveDominantSurfaceIndex(surfaces)
+    ? protectedPaths.size > 0 && unprotectedSurfaces.length === 1 && surfaces.length > 1
+      ? unprotectedSurfaces[0]!
+      : resolveDominantSurfaceIndex(surfaces)
     : -1;
   const coverageReason: TaskPackResult["coverage_reason"] =
     missingRequired.length > 0
@@ -15443,7 +17508,77 @@ function concernTokenMatchesSurface(token: string, s: TaskPackSurface): boolean 
   // elsewhere; `concernTokenMatchesSurface` was the one reader still doing
   // its own raw concatenation.
   const body = servedSurfaceText(s).toLowerCase();
-  return body.includes(lowerToken) || normIdent(body).includes(normalizedToken);
+  if (body.includes(lowerToken) || normIdent(body).includes(normalizedToken)) return true;
+  return qualifiedMemberDeclaredBy(lowerToken, s);
+}
+
+/**
+ * `meter.Sum`, which `concernAnchorTokens` keeps whole as the compound
+ * `meter.sum`: only a CALLER spells the qualifier, so the member's own
+ * declaration covers it when the surface sits under that package or module —
+ * its directory or file stem is `owner`, or its Go `package` clause says so
+ * (locateTaskContext.ts Layer 1c's `declaredUnderPackageOwner`). Without this
+ * the located `func Sum` window left the concern open and the pack asked for
+ * a find of "meter" and "sum" (gauge fixture, 2026-10-17).
+ */
+function qualifiedMemberDeclaredBy(lowerToken: string, s: TaskPackSurface): boolean {
+  const qualified = /^([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)$/.exec(lowerToken);
+  if (qualified === null) return false;
+  const [, owner, member] = qualified as unknown as [string, string, string];
+  const text = servedSurfaceText(s);
+  if (!pathUnderPackageOwner(s.path, owner, text)) return false;
+  const symbolTail = s.symbol?.split(/::|\.|#/).at(-1);
+  return (symbolTail !== undefined && normIdent(symbolTail) === member)
+    || definedCallableNames(text).some((name) => normIdent(name) === member);
+}
+
+/**
+ * `relPath` belongs to the package or module `owner` (lowercase): its
+ * directory or file stem is `owner`, or `text` (any served or whole-file
+ * text of it) carries the Go clause `package owner`.
+ */
+function pathUnderPackageOwner(relPath: string, owner: string, text: string): boolean {
+  const segments = relPath.replace(/\\/g, "/").toLowerCase().split("/");
+  const stem = segments[segments.length - 1]!.replace(/\.[^.]+$/, "");
+  return segments[segments.length - 2] === owner
+    || stem === owner
+    || new RegExp(`^package\\s+${owner}\\b`, "m").test(text);
+}
+
+/**
+ * Members the request names ONLY through a package qualifier (`meter.Sum`
+ * and never a bare `Sum`), lowercased, each with the owners qualifying it.
+ */
+function packageQualifiedOnlyMembers(query: string): Map<string, string[]> {
+  const owners = new Map<string, string[]>();
+  for (const { owner, member } of packageMemberPairs(query)) {
+    owners.set(member, [...(owners.get(member) ?? []), owner]);
+  }
+  const out = new Map<string, string[]>();
+  for (const [member, memberOwners] of owners) {
+    const bare = query.match(new RegExp(`(?<![A-Za-z0-9_$])${member}(?![A-Za-z0-9_$])`, "g"))?.length ?? 0;
+    const qualified = memberOwners.reduce((count, owner) =>
+      count + (query.match(new RegExp(`(?<![A-Za-z0-9_$.])${owner}\\.${member}(?![A-Za-z0-9_$])`, "g"))?.length ?? 0), 0);
+    if (bare > 0 && bare === qualified) out.set(member.toLowerCase(), memberOwners.map((owner) => owner.toLowerCase()));
+  }
+  return out;
+}
+
+/**
+ * A whole-identifier hit on `identifier` (lowercased) in `relPath`'s
+ * lowercased text counts for the request, unless the request qualified that
+ * member by package (`packageQualifiedOnlyMembers`): then only a file of that
+ * package, or one spelling the qualified name (a caller), is about it.
+ */
+function identifierHitMeansRequestedMember(
+  identifier: string,
+  relPath: string,
+  lowerText: string,
+  qualifiedOnly: ReadonlyMap<string, readonly string[]>,
+): boolean {
+  const owners = qualifiedOnly.get(identifier);
+  if (owners === undefined) return true;
+  return owners.some((owner) => pathUnderPackageOwner(relPath, owner, lowerText) || lowerText.includes(`${owner}.${identifier}`));
 }
 
 function concernTokenMatchesSurfaceIdentity(token: string, s: TaskPackSurface): boolean {
@@ -15683,7 +17818,7 @@ function rankAbstainCandidates<T extends { path: string; confidence: number }>(c
   });
 }
 
-interface RankedAnswerEvidenceCandidate {
+export interface RankedAnswerEvidenceCandidate {
   candidate: ImpactCandidate;
   score: number;
   exactIdentifier: boolean;
@@ -15978,13 +18113,18 @@ async function framedDeclarationFocus(
  * symbols against the whole question. This turns a weak MAX_* filename hit
  * into the actual readiness builder without widening to a repository scan.
  */
-async function rankAnswerEvidenceCandidates(
+export async function rankAnswerEvidenceCandidates(
   candidates: readonly ImpactCandidate[],
   query: string,
   workspace: string,
   cache: FileReadCache,
 ): Promise<RankedAnswerEvidenceCandidate[]> {
-  const explicit = new Set(explicitCodeIdentifiers(query).map((identifier) => identifier.toLowerCase()));
+  const explicitEntries = explicitCodeIdentifierEntries(query);
+  const explicit = new Set(explicitEntries.map((entry) => entry.token.toLowerCase()));
+  // A name the request only FRAMES as a declaration (`Transport struct`) is matched in its own
+  // spelling: the lowercase method `transport()` of another file is not the type.
+  const framedSpelling = new Map(explicitEntries.filter((entry) => entry.framedOnly).map((entry) => [entry.token.toLowerCase(), entry.token]));
+  const namesExplicit = (name: string): boolean => explicit.has(name.toLowerCase()) && (framedSpelling.get(name.toLowerCase()) ?? name) === name;
   const queryTokens = tokenizeForEpoch(query);
   const focusedPaths = new Set<string>();
   const ranked: RankedAnswerEvidenceCandidate[] = [];
@@ -16011,9 +18151,7 @@ async function rankAnswerEvidenceCandidates(
       && evidence.matchedTerms.length >= 2;
     const exactFocuses = focus === undefined
       ? []
-      : [focus.best, ...focus.runnerUps].filter((item) =>
-          explicit.has(item.name.toLowerCase())
-        );
+      : [focus.best, ...focus.runnerUps].filter((item) => namesExplicit(item.name));
     const candidateStem = path.basename(candidate.path, path.extname(candidate.path)).toLowerCase();
     const exactFocus = exactFocuses.length === 0
       ? undefined
@@ -16198,7 +18336,7 @@ async function rankAnswerEvidenceCandidates(
         if (focusedPaths.has(candidate.path)) continue;
         focusedPaths.add(candidate.path);
         const startLine = Number.parseInt(evidenceFocus.range.split("-", 1)[0] ?? "1", 10);
-        const exactIdentifier = explicit.has(evidenceFocus.name.toLowerCase());
+        const exactIdentifier = namesExplicit(evidenceFocus.name);
         ranked.push({
           candidate: {
             ...candidate,
@@ -16229,7 +18367,7 @@ async function rankAnswerEvidenceCandidates(
         ranked.push({
           candidate: { ...candidate, confidence: Math.max(candidate.confidence, 0.9) },
           score: evidence.score - answerEvidencePathPenalty(candidate, query),
-          exactIdentifier: explicit.has(candidate.symbol.toLowerCase()),
+          exactIdentifier: namesExplicit(candidate.symbol),
           strongEvidence: true,
         });
         continue;
@@ -16268,7 +18406,7 @@ async function rankAnswerEvidenceCandidates(
       ranked.push({
         candidate: { ...candidate, confidence: Math.max(candidate.confidence, 0.9) },
         score: candidate.confidence - answerEvidencePathPenalty(candidate, query),
-        exactIdentifier: explicit.has(candidate.symbol.toLowerCase()),
+        exactIdentifier: namesExplicit(candidate.symbol),
         strongEvidence: false,
       });
       continue;
@@ -16277,7 +18415,7 @@ async function rankAnswerEvidenceCandidates(
       if (focusedPaths.has(candidate.path)) continue;
       focusedPaths.add(candidate.path);
       const startLine = Number.parseInt(focus.best.range.split("-", 1)[0] ?? "1", 10);
-      const exactIdentifier = explicit.has(focus.best.name.toLowerCase());
+      const exactIdentifier = namesExplicit(focus.best.name);
       ranked.push({
         candidate: {
           ...candidate,
@@ -16297,7 +18435,7 @@ async function rankAnswerEvidenceCandidates(
     ranked.push({
       candidate,
       score: candidate.confidence - answerEvidencePathPenalty(candidate, query),
-      exactIdentifier: candidate.symbol !== undefined && explicit.has(candidate.symbol.toLowerCase()),
+      exactIdentifier: candidate.symbol !== undefined && namesExplicit(candidate.symbol),
       strongEvidence: false,
     });
   }
@@ -16371,12 +18509,34 @@ async function recoverExplicitIdentifierAnswerCandidates(
   /** WP-N: the pack's whole-identifier absence verdicts (`explicitIdentifierAbsences`) — the only source of "verified absent". */
   absences: ReadonlyMap<string, ExplicitIdentifierAbsence>,
 ): Promise<string[]> {
-  const identifiers = explicitCodeIdentifiers(query).slice(0, 3);
+  const entries = explicitCodeIdentifierEntries(query).slice(0, 3);
+  const identifiers = entries.map((entry) => entry.token);
   if (identifiers.length === 0) return [];
   if (ranked.some((entry) => entry.exactIdentifier)) return [];
+  const framedOnly = new Set(entries.filter((entry) => entry.framedOnly).map((entry) => entry.token));
   const verifiedAbsent: string[] = [];
   const injected: RankedAnswerEvidenceCandidate[] = [];
   for (const identifier of identifiers) {
+    // A plain word the request frames as a declaration, in a file the request names: that file's
+    // declaration of it, before the workspace-wide literal scan below (see `framedTypeInNamedFiles`).
+    const named = framedOnly.has(identifier) ? await framedTypeInNamedFiles(identifier, query, workspace, cache) : undefined;
+    if (named !== undefined) {
+      injected.push({
+        candidate: {
+          path: named.path,
+          line: named.startLine,
+          surface: classifySurface(named.path),
+          why: "answer-explicit-identifier-recovery",
+          confidence: 0.97,
+          range: `${named.startLine}-${named.endLine}`,
+          symbol: identifier,
+        },
+        score: 6 + 9,
+        exactIdentifier: true,
+        strongEvidence: true,
+      });
+      continue;
+    }
     // WP-N (eval-0929 §8): only a WHOLE-identifier occurrence can name the
     // definition owner. This scan is a substring scan, and a `MAX_X_V2`
     // declaration used to be injected as `MAX_X`'s "definition" (the text
@@ -16538,6 +18698,37 @@ async function recoverExplicitIdentifierAnswerCandidates(
 // leaves the question ambiguous, which is disclosed, never guessed.
 // ---------------------------------------------------------------------------
 
+/**
+ * A request that names a file AND frames a plain word as a declaration — "yaml.v3/decode.go の
+ * decoder 型", "the Transport struct in net/http/transport.go" — means that word's declaration IN
+ * that file. Nothing else says so: `decoder` is also a variable of other files (`var decoder …`,
+ * `decoder := …`), which the identifier recovery reads as definitions of the name (measured: the
+ * request above recovered yaml/yamlfmt/yamlfmt.go 16-236, a function that declares such a variable,
+ * not the struct of the file it names). The type (class, interface, enum or type kind) named exactly
+ * `identifier`, spelled as the request spells it, declared in exactly ONE of the files the request
+ * names; undefined otherwise — a word the request does not give a file for, or declares in two, is
+ * left to the scan and its ambiguity guard.
+ */
+export async function framedTypeInNamedFiles(
+  identifier: string,
+  query: string,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ readonly path: string; readonly startLine: number; readonly endLine: number } | undefined> {
+  const found: Array<{ path: string; startLine: number; endLine: number }> = [];
+  for (const file of queryNamedWorkspaceFilesKeepingSharedBasenames(query, workspace)) {
+    const content = readCached(workspace, file, cache);
+    const lang = languageForPath(file);
+    const parsed = content === undefined || !lang ? null : await cache.parsedSymbols(content, lang, file);
+    const declarations = (parsed ?? []).filter((symbol) => CALLER_EXPANSION_TYPE_KINDS.has(symbol.kind) && unqualifiedSymbolTail(symbol.name) === identifier);
+    if (declarations.length === 0) continue;
+    // A C struct is also a one-line symbol wherever it is mentioned: the largest range is the definition.
+    const widest = declarations.reduce((best, symbol) => (symbol.endLine - symbol.startLine > best.endLine - best.startLine ? symbol : best));
+    found.push({ path: file, startLine: widest.startLine, endLine: widest.endLine });
+  }
+  return found.length === 1 ? found[0] : undefined;
+}
+
 /** One declaring file of a same-name subject: its first declaration of exactly that name. */
 interface SameNameDeclaration {
   readonly path: string;
@@ -16656,8 +18847,12 @@ function usageOnlyExplicitIdentifiers(query: string, identifiers: readonly strin
 }
 
 /** Cheap line-shape pre-filter for "this line may DECLARE `identifier`" — only ever decides which files get parsed; the parser decides. */
-function lineMayDeclareIdentifier(line: string, offset: number, identifier: string): boolean {
+function lineMayDeclareIdentifier(line: string, offset: number, identifier: string, includeKeywordlessMembers = false): boolean {
   if (isDeclarationShapedMatchText(line, identifier)) return true;
+  // Keywordless class methods (JS/TS) still declare a subject. This is only a
+  // parse prefilter: a bare call can enter, but parsed symbols must confirm it.
+  if (includeKeywordlessMembers && /^\s*(?:(?:static|async|get|set)\s+)*$/.test(line.slice(0, offset))
+    && /^\s*\(/.test(line.slice(offset + identifier.length))) return true;
   // A keyword-less top-level binding (`X = …`, `X: T = …` — Python, Ruby, …).
   return /^\s*$/.test(line.slice(0, offset))
     && /^\s*(?::[^=\n]*)?=(?!=)/.test(line.slice(offset + identifier.length));
@@ -16692,6 +18887,7 @@ async function sameNameDeclaringFiles(
   workspace: string,
   cache: FileReadCache,
 ): Promise<{ declarations: SameNameDeclaration[]; capped: boolean; occurrencePaths: string[] } | undefined> {
+  const mapMemberBinding = packHeldToCeilingWithoutPreview() && asksForStructureMap(query);
   let scanned: ReturnType<typeof scanLiteral>;
   try {
     scanned = scanLiteral(identifier, workspace, { caseInsensitive: false, ...(args.path ? { path: args.path } : {}) });
@@ -16714,9 +18910,18 @@ async function sameNameDeclaringFiles(
     const line = linesByPath.get(match.path)?.[match.line - 1];
     if (line === undefined) continue;
     const offset = wholeIdentifierOffsets(line, identifier)[0];
-    if (offset === undefined || !lineMayDeclareIdentifier(line, offset, identifier)) continue;
+    if (offset === undefined || !lineMayDeclareIdentifier(line, offset, identifier, mapMemberBinding)) continue;
     shapedSeen.add(match.path);
     shapedPaths.push(match.path);
+  }
+  // Explicit file anchors must survive the parse cap for a common member
+  // name. Otherwise earlier unrelated methods consume every parse first.
+  if (mapMemberBinding) {
+    const namedPaths = new Set([
+      ...queryNamedWorkspaceFilesKeepingSharedBasenames(query, workspace),
+      ...(args.path ? [args.path] : []),
+    ]);
+    shapedPaths.sort((a, b) => Number(namedPaths.has(b)) - Number(namedPaths.has(a)));
   }
   let declarations: SameNameDeclaration[] = [];
   let capped = false;
@@ -16735,7 +18940,12 @@ async function sameNameDeclaringFiles(
       .filter((entry) => unqualifiedSymbolTail(entry.name) === identifier)
       .sort((a, b) => a.startLine - b.startLine)[0];
     if (symbol === undefined) continue;
-    declarations.push({ path: relPath, name: symbol.name, startLine: symbol.startLine, endLine: symbol.endLine });
+    // Parsers can attach a leading doc block to a method. The declaration
+    // proof names its first code line, which survives the comment policy.
+    const startLine = mapMemberBinding
+      ? declarationHeaderLine(content.split(/\r?\n/), symbol.startLine, symbol.endLine) ?? symbol.startLine
+      : symbol.startLine;
+    declarations.push({ path: relPath, name: symbol.name, startLine, endLine: symbol.endLine });
   }
   if (!/\b(?:tests?|specs?|fixtures?|mocks?|fakes?|stubs?)\b|テスト/iu.test(query)) {
     const real = declarations.filter((declaration) => !isTestConcernPath(declaration.path));
@@ -18745,6 +20955,8 @@ interface NamedWindow {
   readonly start: number;
   readonly end: number;
   readonly name: string;
+  /** Import/re-export evidence, not a callable body to scan for values. */
+  readonly binding?: boolean;
   /** FIX-FAB item 6 (eval-0927 review #10, bigConstants): true when `findModuleConstantWindow` capped this declaration's own extent — `end` is NOT the declaration's real close, and the value facet this window backs is not covered until the rest is served too (see facetGate.ts's continuation handling). Absent/false for every other window kind. */
   readonly truncated?: boolean;
 }
@@ -20096,8 +22308,10 @@ async function resolveImportSpecifierFile(
 }
 
 /**
- * `calleeName`'s own declaring file + symbol, one hop from `focalPath` via
- * its import lines. Go is out of `importSpecifiersNaming`'s scope by
+ * `calleeName`'s declaring file + symbol, following import aliases and
+ * re-exports within MAX_REEXPORT_HOPS / MAX_REEXPORT_FILES_TOTAL. Each
+ * module carries its own lookup name and the source binding windows.
+ * Go is out of `importSpecifiersNaming`'s scope by
  * design (a package import never names an individual binding) -- for a Go
  * focal with no resolving import, sibling `.go` files in the SAME
  * directory are tried instead (real Go same-package visibility).
@@ -20133,50 +22347,115 @@ async function resolveCalleeFile(
   workspace: string,
   cache: FileReadCache,
   onBounded?: () => void,
-): Promise<{ path: string; content: string; symbol?: { startLine: number; endLine: number } } | undefined> {
+): Promise<{ path: string; content: string; name?: string; bindings?: NamedWindow[]; symbol?: { startLine: number; endLine: number } } | undefined> {
+  const declaration = async (file: { path: string; content: string }, name: string, bindings: NamedWindow[]) => {
+    if (!new RegExp(`(?<![\\w$])${escapeRegExp(name)}(?![\\w$])`).test(file.content)) return undefined;
+    const lang = languageForPath(file.path);
+    const lines = cachedFileLines(cache, file.path, file.content);
+    const parsed = (lang ? await cache.parsedSymbols(file.content, lang, file.path) : null) ?? [];
+    const symbol = parsed.find((s) => unqualifiedSymbolTail(s.name) === name
+      && symbolIsCallable(s, lines, hasHashComments(file.path)));
+    return symbol === undefined ? undefined : { ...file, name, bindings,
+      symbol: { startLine: symbol.startLine, endLine: symbol.endLine } };
+  };
   const focalContent = readCached(workspace, focal.path, cache);
   if (focalContent !== undefined) {
-    const focalLang = languageForPath(focal.path);
-    const sameFileParsed = (focalLang ? await cache.parsedSymbols(focalContent, focalLang, focal.path) : null) ?? [];
-    const sameFileSymbol = sameFileParsed.find((s) =>
-      unqualifiedSymbolTail(s.name) === calleeName && symbolIsCallable(s, focalFileLines, hashComment)
-    );
-    if (sameFileSymbol !== undefined) {
-      return { path: focal.path, content: focalContent, symbol: { startLine: sameFileSymbol.startLine, endLine: sameFileSymbol.endLine } };
+    const typed = await resolveTypedCallee({ workspace, source: focalContent, focal, calleeName, hashComment, cacheToken: cache });
+    if (typed.kind === "resolved") {
+      const target = readCached(workspace, typed.path, cache);
+      if (target === undefined || contentHash(target) !== typed.contentHash) { onBounded?.(); return undefined; }
+      let symbol = typed.symbol;
+      {
+        // A semantic definition can name a binding or signature. Require an
+        // executable callable in the same hash-verified file for every backend;
+        // LSP name-only ranges grow to its body without widening the caller.
+        const lang = languageForPath(typed.path);
+        const targetLines = cachedFileLines(cache, typed.path, target);
+        const parsed = (lang ? await cache.parsedSymbols(target, lang, typed.path) : null) ?? [];
+        const matches = parsed.filter(candidate => unqualifiedSymbolTail(candidate.name) === typed.name
+          && symbolIsCallable(candidate, targetLines, hasHashComments(typed.path))
+          // The parser's signature ends at the body when one exists. A method
+          // kind alone also covers abstract/extern declarations without a body.
+          && (candidate.kind === "const" || candidate.signatureEndIndex < candidate.endIndex)
+          && candidate.startLine <= typed.symbol.startLine && candidate.endLine >= typed.symbol.endLine);
+        if (matches.length !== 1) { onBounded?.(); return undefined; }
+        symbol = { startLine: matches[0]!.startLine, endLine: matches[0]!.endLine };
+      }
+      return { path: typed.path, content: target, name: typed.name, bindings: [], symbol };
     }
+    if (typed.kind === "unresolved") { onBounded?.(); return undefined; }
+    if (typed.kind === "external") return undefined;
+    // An explicit own receiver alias is not an unqualified same-name callable.
+    // Without semantic implementation resolution, disclose the unfinished hop.
+    for (const position of qualifiedCalleePositionsIn(focalFileLines, focal.startLine, focal.endLine, calleeName, hashComment)) {
+      const before = maskNonCode(focalFileLines[position.line]!, hashComment).slice(0, position.character);
+      const receiver = /([A-Za-z_$][\w$]*)\s*(?:\?\.|\.)\s*$/.exec(before)?.[1];
+      if (receiver === undefined) continue;
+      const window = findModuleConstantWindow(focalFileLines, receiver, hashComment);
+      if (window === undefined) continue;
+      const initializer = focalFileLines.slice(window.start - 1, window.end).map(line => maskNonCode(line, hashComment)).join("\n");
+      const alias = new RegExp("(?:^|[,{])\\s*" + escapeRegExp(calleeName) + "\\s*:\\s*[A-Za-z_$][\\w$]*\\s*(?=[,}])");
+      if (alias.test(initializer)) { onBounded?.(); return undefined; }
+    }
+    const own = await declaration({ path: focal.path, content: focalContent }, calleeName, []);
+    if (own !== undefined) return own;
   }
-  const specifiers = importSpecifiersNaming(focalFileLines, calleeName, hashComment, focal.path).slice(0, MAX_REEXPORT_FILES_TOTAL);
-  const candidateFiles: Array<{ path: string; content: string }> = [];
-  for (const spec of specifiers) {
-    const resolved = await resolveImportSpecifierFile(focal.path, spec, workspace, cache);
-    if (resolved !== undefined) candidateFiles.push(resolved);
+  // Each module carries its own lookup name. A barrel can rename again, so
+  // neither the local alias nor a visited file alone identifies a binding.
+  let frontier = [{ path: focal.path, lines: focalFileLines, name: calleeName, bindings: [] as NamedWindow[], aliased: false }];
+  const visited = new Set([`${focal.path}\0${calleeName}`]);
+  let filesVisited = 0;
+  for (let hop = 0; hop < MAX_REEXPORT_HOPS && frontier.length > 0; hop++) {
+    const next: typeof frontier = [];
+    for (const owner of frontier) {
+      for (const spec of importSpecifiersNaming(owner.lines, owner.name, owner.path === focal.path ? hashComment : hasHashComments(owner.path), owner.path, true)) {
+        const file = await resolveImportSpecifierFile(owner.path, spec, workspace, cache);
+        if (file === undefined) continue;
+        const name = spec.exportedName ?? owner.name;
+        const key = `${file.path}\0${name}`;
+        if (visited.has(key)) continue;
+        if (filesVisited >= MAX_REEXPORT_FILES_TOTAL) { onBounded?.(); continue; }
+        visited.add(key);
+        filesVisited++;
+        const bindings = spec.binding === undefined ? owner.bindings : [...owner.bindings,
+          { path: owner.path, start: spec.binding.start, end: spec.binding.end, name: owner.name, binding: true }];
+        const aliased = owner.aliased || spec.exportedName !== undefined;
+        const found = await declaration(file, name, bindings);
+        if (found !== undefined) return { ...found, bindings: aliased || hop > 0 ? bindings : [] };
+        next.push({ path: file.path, lines: cachedFileLines(cache, file.path, file.content), name, bindings, aliased });
+      }
+    }
+    frontier = next;
   }
-  let goBounded = false;
-  if (candidateFiles.length === 0 && path.extname(focal.path) === ".go") {
-    // P0-3 (eval-0927 review r2 finding 3, goManyFiles/goMethodManyCallers):
-    // the OWNER's directory is listed directly (`goPackageSiblingFiles`), never
-    // a `MAX_CALLER_FILES_EXAMINED` PREFIX of a whole-workspace walk — a
-    // package sibling sorting behind unrelated files elsewhere in the
-    // workspace must still be found. R2-T3: and never a two-file prefix of
-    // the directory either; a `func [(recv)] callee(` declaration is looked
-    // for in EVERY package file and only the files that hold one are parsed.
+  if (frontier.length > 0) onBounded?.();
+  if (path.extname(focal.path) === ".go") {
+    // `posting.Apply(...)` names another package's function. Resolve it
+    // through this file's import of that package (go.mod module path ->
+    // directory, importResolveGo.ts) before the same-package scan below,
+    // which never looked outside the focal's directory and could return an
+    // unrelated local `Apply` (2026-10-16 bench: Service.Post's callees).
+    const body = focalFileLines.slice(focal.startLine - 1, focal.endLine).map((line) => maskNonCode(line, hashComment)).join("\n");
+    for (const edge of resolveGoImports(workspace, focal.path, focalFileLines)) {
+      const [qualifier, ...declared] = edge.names;
+      if (edge.kind !== "import" || qualifier === undefined || !declared.includes(calleeName)) continue;
+      if (!new RegExp(`(?<![\\w$.])${escapeRegExp(qualifier)}\\s*\\.\\s*${escapeRegExp(calleeName)}\\s*\\(`).test(body)) continue;
+      const content = readCached(workspace, edge.path, cache);
+      if (content === undefined) continue;
+      const found = await declaration({ path: edge.path, content }, calleeName, []);
+      if (found !== undefined) return found;
+    }
+    const files: Array<{ path: string; content: string }> = [];
     const declarationRe = new RegExp(`(?:^|\\n)func\\s+(?:\\([^)]*\\)\\s*)?${escapeRegExp(calleeName)}\\s*[(\\[]`);
-    goBounded = scanGoPackageSiblings(focal.path, workspace, cache, (relPath, content) => {
-      candidateFiles.push({ path: relPath, content });
+    const bounded = scanGoPackageSiblings(focal.path, workspace, cache, (relPath, content) => {
+      files.push({ path: relPath, content });
       return undefined;
     }, { mightMatch: (content) => declarationRe.test(content) }).bounded;
+    for (const file of files) {
+      const found = await declaration(file, calleeName, []);
+      if (found !== undefined) return found;
+    }
+    if (bounded) onBounded?.();
   }
-  // A callee's declaration names it: parse only the files that mention it.
-  const mentionRe = new RegExp(`(?<![\\w$])${escapeRegExp(calleeName)}(?![\\w$])`);
-  for (const file of candidateFiles) {
-    if (!mentionRe.test(file.content)) continue;
-    const lang = languageForPath(file.path);
-    const parsed = (lang ? await cache.parsedSymbols(file.content, lang, file.path) : null) ?? [];
-    const symbol = parsed.find((s) => unqualifiedSymbolTail(s.name) === calleeName
-      && symbolIsCallable(s, file.content.split(/\r?\n/), hasHashComments(file.path)));
-    if (symbol !== undefined) return { path: file.path, content: file.content, symbol: { startLine: symbol.startLine, endLine: symbol.endLine } };
-  }
-  if (goBounded) onBounded?.();
   return undefined;
 }
 
@@ -20283,8 +22562,8 @@ async function findConstantAcrossReexports(
    * "not found in the first headers" says nothing about `NULL`/`size_t`.
    */
   onBounded?: () => void,
-): Promise<{ path: string; start: number; end: number; truncated: boolean } | undefined> {
-  const visited = new Set<string>([startPath]);
+): Promise<{ path: string; start: number; end: number; truncated: boolean; bindings?: NamedWindow[]; declaredName?: string } | undefined> {
+  const visited = new Set<string>([`${startPath}\0${name}`]);
   // FIX-ALIAS (eval-0929 §4, root cause 1): each frontier entry carries the
   // name to search for IN THAT FILE, never a single closure-wide `name` —
   // a rename at hop N (`import { A as B }`) means hop N+1 must look up `A`,
@@ -20293,13 +22572,13 @@ async function findConstantAcrossReexports(
   // `exportedName` undefined, so `spec.exportedName ?? seek` is `seek`
   // unchanged — byte-for-byte the prior single-`name` behaviour whenever no
   // hop renames anything.
-  let frontier: Array<{ lines: readonly string[]; path: string; name: string }> = [{ lines: startLines, path: startPath, name }];
+  let frontier: Array<{ lines: readonly string[]; path: string; name: string; bindings: NamedWindow[]; aliased: boolean }> = [{ lines: startLines, path: startPath, name, bindings: [], aliased: false }];
   let filesVisited = 0;
   let bounded = false;
   for (let hop = 0; hop < MAX_REEXPORT_HOPS && frontier.length > 0; hop++) {
-    const nextFrontier: Array<{ lines: readonly string[]; path: string; name: string }> = [];
-    for (const { lines, path: filePath, name: seek } of frontier) {
-      let specifiers = importSpecifiersNaming(lines, seek, hasHashComments(filePath), filePath);
+    const nextFrontier: typeof frontier = [];
+    for (const { lines, path: filePath, name: seek, bindings, aliased } of frontier) {
+      let specifiers = importSpecifiersNaming(lines, seek, hasHashComments(filePath), filePath, true);
       // B4(b) (round-9 fable finding, pyTwoStarImportsLastWins): Python's
       // `from x import *` re-binds the module namespace every time it runs
       // -- when SEVERAL star-import lines in the SAME file could define
@@ -20329,9 +22608,11 @@ async function findConstantAcrossReexports(
       for (const spec of specifiers) {
         if (filesVisited >= MAX_REEXPORT_FILES_TOTAL && spec.packageEligible !== true) continue;
         const resolved = await resolveImportSpecifierFile(filePath, spec, workspace, cache);
-        if (resolved === undefined || visited.has(resolved.path)) continue;
+        const targetName = spec.exportedName ?? seek;
+        const bindingKey = `${resolved?.path}\0${targetName}`;
+        if (resolved === undefined || visited.has(bindingKey)) continue;
         if (filesVisited >= MAX_REEXPORT_FILES_TOTAL) { bounded = true; continue; }
-        visited.add(resolved.path);
+        visited.add(bindingKey);
         filesVisited += 1;
         const resolvedLines = cachedFileLines(cache, resolved.path, resolved.content);
         const resolvedHashComment = hasHashComments(resolved.path);
@@ -20339,7 +22620,8 @@ async function findConstantAcrossReexports(
         // THIS resolved file declares — searching it under `seek` (the LOCAL
         // alias the PREVIOUS file happened to import it as) is exactly the
         // confirmed miss (`timeoutMs: DEFAULT_MS` never reaching `7231`).
-        const targetName = spec.exportedName ?? seek;
+        const nextBindings = spec.binding === undefined ? bindings : [...bindings,
+          { path: filePath, start: spec.binding.start, end: spec.binding.end, name: seek, binding: true }];
         const window = findModuleConstantWindow(resolvedLines, targetName, resolvedHashComment)
           // B3 (round-8 fable finding, cjsDestructureConst): `const { NAME } =
           // require("./config")` already resolves the FILE via the `req`
@@ -20353,9 +22635,11 @@ async function findConstantAcrossReexports(
         // declaration -- its line holds no value, so the search goes on
         // INTO `./other` (next hop) exactly as through a barrel.
         if (window && !isRequireMemberInitializer(resolvedLines.slice(window.start - 1, window.end), resolvedHashComment)) {
-          return { path: resolved.path, start: window.start, end: window.end, truncated: window.truncated };
+          return { path: resolved.path, start: window.start, end: window.end, truncated: window.truncated,
+            bindings: aliased || spec.exportedName !== undefined ? nextBindings : [], declaredName: targetName };
         }
-        nextFrontier.push({ lines: resolvedLines, path: resolved.path, name: targetName });
+        nextFrontier.push({ lines: resolvedLines, path: resolved.path, name: targetName, bindings: nextBindings,
+          aliased: aliased || spec.exportedName !== undefined });
       }
     }
     frontier = nextFrontier;
@@ -20365,10 +22649,10 @@ async function findConstantAcrossReexports(
   // a workspace file nobody visited means the search stopped short.
   if (!bounded) {
     for (const { lines, path: filePath, name: seek } of frontier) {
-      for (const spec of importSpecifiersNaming(lines, seek, hasHashComments(filePath), filePath)) {
+      for (const spec of importSpecifiersNaming(lines, seek, hasHashComments(filePath), filePath, true)) {
         if (spec.packageEligible !== true) continue;
         const resolved = await resolveImportSpecifierFile(filePath, spec, workspace, cache);
-        if (resolved !== undefined && !visited.has(resolved.path)) { bounded = true; break; }
+        if (resolved !== undefined && !visited.has(`${resolved.path}\0${spec.exportedName ?? seek}`)) { bounded = true; break; }
       }
       if (bounded) break;
     }
@@ -20876,7 +23160,7 @@ async function resolveConstantWindow(
    * this call as "not searched to the end", never as "not declared".
    */
   opts: { skipExportsMember?: boolean; allowPackageSibling?: boolean; onSearchBounded?: () => void } = {},
-): Promise<{ path: string; start: number; end: number; truncated: boolean } | undefined> {
+): Promise<{ path: string; start: number; end: number; truncated: boolean; bindings?: NamedWindow[]; declaredName?: string } | undefined> {
   const hashComment = hasHashComments(ownerPath);
   const sameFileRaw = findModuleConstantWindow(ownerLines, name, hashComment);
   // R2-T3 (eval-0929 final review, P1-4): `const B = require("./x").A` matches
@@ -21147,7 +23431,8 @@ async function constantClosureForFocal(
   // or past a JS/TS regex literal (csInterpolatedConst/ktTemplateConst/
   // tsRegexQuoteConst) instead of silently masking it away.
   const candidates = constantLikeReferencesIn(bodyLines, hashComment, focal.name, excludeNames, focal.path);
-  const visitedConstantNames = new Set<string>([focal.name]);
+  const visitedConstantNames = new Set<string>([`${focal.path}\0${focal.name}`]);
+  const resolvedConstantBindings = new Set<string>();
   // V3 (round-7 fable finding, goCrossPackageConst): lowercase MODULE/PACKAGE
   // aliases this FILE imports (Go package, Python module, Rust/C++
   // namespace) -- `qualifiedConstantReferencesIn` accepts a lowercase owner
@@ -21291,8 +23576,13 @@ async function constantClosureForFocal(
     callableDepth = 0,
     pureRefDepth = 0,
   ): Promise<boolean> {
+    const bindingKey = `${ownerPath}\0${name}`;
+    const resolvedBinding = (ok: boolean): boolean => {
+      if (ok) resolvedConstantBindings.add(bindingKey);
+      return ok;
+    };
     if (out.length >= MAX_PLANNED_CONSTANT_WINDOWS || Date.now() >= deadline) { complete = false; return false; }
-    if (visitedConstantNames.has(name)) {
+    if (visitedConstantNames.has(bindingKey)) {
       // WP-A2 (eval-0929 §4/§8, defect (c)): re-entering a name whose OWN
       // pure-reference chase is still OPEN on this very call stack (`A =
       // B; B = A;`) is a genuine cycle that never bottoms out in a real
@@ -21302,7 +23592,7 @@ async function constantClosureForFocal(
       // `false` lets the CALLER's own existing dependency-disclosure branch
       // (the `inner` loop below) name it exactly like any other unresolved
       // reference, attributed to whichever window's text closed the loop.
-      if (pureReferenceOpenStack.has(name)) return false;
+      if (pureReferenceOpenStack.has(bindingKey)) return false;
       // P2-7 (round-7 fable finding, classMethodSharedConstProp/
       // classMethodTwoPropsSameConst): a name a SECOND reading context (a
       // sibling property's own initializer, or the focal's own body reading
@@ -21313,12 +23603,12 @@ async function constantClosureForFocal(
       // visit reached one through a callable hop -- the SAME
       // `innerResolvedAny` fold below computes a fresh visit's own "resolved"
       // fact identically).
-      return out.some((w) => w.name === name);
+      return resolvedConstantBindings.has(bindingKey);
     }
-    visitedConstantNames.add(name);
+    visitedConstantNames.add(bindingKey);
     const allowPackageSibling = !(depth === 0 && ownerPath === focal.path && /\.(?:kt|kts|scala|sc)$/.test(ownerPath) && await focalBindsItself(name));
     let searchBounded = false;
-    const resolved = await resolveConstantWindow(name, ownerLines, ownerPath, workspace, cache, false, {
+    const resolved: Awaited<ReturnType<typeof resolveConstantWindow>> = await resolveConstantWindow(name, ownerLines, ownerPath, workspace, cache, false, {
       allowPackageSibling,
       onSearchBounded: () => { searchBounded = true; },
     })
@@ -21435,7 +23725,7 @@ async function constantClosureForFocal(
     // `resolveModuleNamespaceFile`'s own CJS/default-import shapes).
     const isModuleAliasInitializer = !resolved.truncated && winLines !== undefined
       && isRequireModuleInitializer(winLines.slice(resolved.start - 1, resolved.end), hasHashComments(resolved.path));
-    if (isModuleAliasInitializer) return true;
+    if (isModuleAliasInitializer) return resolvedBinding(true);
     const isCallableBinding = !resolved.truncated && winLines !== undefined
       && declarationIsCallable(winLines.slice(resolved.start - 1, resolved.end), hasHashComments(resolved.path));
     // V4 (round-7 fable finding, valueBehindConfigAccessor): a resolved,
@@ -21447,6 +23737,7 @@ async function constantClosureForFocal(
       ? constructionOnlyInitializer(winLines.slice(resolved.start - 1, resolved.end), hasHashComments(resolved.path))
       : undefined;
     if (!isCallableBinding && constructedExpr === undefined) {
+      out.push(...(resolved.bindings ?? []));
       out.push({
         path: resolved.path, start: resolved.start, end: resolved.end, name,
         ...(resolved.truncated ? { truncated: true } : {}),
@@ -21500,16 +23791,16 @@ async function constantClosureForFocal(
         }
         complete = false;
       }
-      return constructedExpr === undefined;
+      return resolvedBinding(constructedExpr === undefined);
     }
-    if (winLines === undefined) return constructedExpr === undefined;
+    if (winLines === undefined) return resolvedBinding(constructedExpr === undefined);
     if (isPureReference) {
       pureReferenceFilesVisited.add(resolved.path);
-      pureReferenceOpenStack.add(name);
+      pureReferenceOpenStack.add(bindingKey);
     }
     const winHashComment = hasHashComments(resolved.path);
     const initializerLines = winLines.slice(resolved.start - 1, resolved.end);
-    const inner = constantLikeReferencesIn(initializerLines, winHashComment, name, new Set(), undefined, resolved.path);
+    const inner = constantLikeReferencesIn(initializerLines, winHashComment, resolved.declaredName ?? name, new Set(), undefined, resolved.path);
     let innerResolvedAny = false;
     for (const innerName of inner) {
       if (out.length >= MAX_PLANNED_CONSTANT_WINDOWS || Date.now() >= deadline) { complete = false; break; }
@@ -21535,8 +23826,8 @@ async function constantClosureForFocal(
       const qualifiedOk = await resolveQualifiedReferencesIn(initializerLines, winHashComment, resolved.path);
       if (qualifiedOk) innerResolvedAny = true;
     }
-    if (isPureReference) pureReferenceOpenStack.delete(name);
-    return constructedExpr === undefined || innerResolvedAny;
+    if (isPureReference) pureReferenceOpenStack.delete(bindingKey);
+    return resolvedBinding(constructedExpr === undefined || innerResolvedAny);
   }
 
   /**
@@ -21777,7 +24068,8 @@ async function constantClosureForFocal(
   const chaseCalleeBody = async (calleeName: string, calleePath: string, calleeLines: readonly string[], calleeBody: readonly string[]): Promise<boolean> => {
     const calleeHashComment = hasHashComments(calleePath);
     // R6-C: see the focal-body call above — same P1-3 dialect coverage, one hop out.
-    const innerCandidates = constantLikeReferencesIn(calleeBody, calleeHashComment, calleeName, new Set([calleeName]), calleePath);
+    const innerCandidates = constantLikeReferencesIn(calleeBody, calleeHashComment, calleeName,
+      new Set([calleeName, ...focalParameterNames(calleeBody, calleeHashComment, calleeName, calleePath)]), calleePath);
     for (const name of innerCandidates) {
       if (out.length >= MAX_PLANNED_CONSTANT_WINDOWS) { complete = false; return false; }
       if (Date.now() >= deadline) { complete = false; return false; }
@@ -21795,6 +24087,7 @@ async function constantClosureForFocal(
     // closure requires, so the constants of a required second-layer callee
     // are required too.
     for (const win of calleeWindows) {
+      if (win.binding === true) continue;
       const calleeLines = readCached(workspace, win.path, cache)?.split(/\r?\n/);
       if (calleeLines === undefined) continue;
       if (!await chaseCalleeBody(win.name, win.path, calleeLines, calleeLines.slice(win.start - 1, win.end))) break;
@@ -22931,10 +25224,9 @@ const MAX_FLOW_CALLEE_DEPTH = 2;
  * the SAME one-hop resolution `constantClosureForFocal` uses, but returning
  * each callee's own full definition window instead of scanning inside it
  * for constants. Recurses up to MAX_FLOW_CALLEE_DEPTH layers (item 7):
- * `visited` is shared across the whole recursion (keyed by NAME, matching
- * this module's existing name-keyed resolution everywhere else), so a
- * callee reachable two different ways is never double-counted and a
- * recursive call chain can never loop back on itself.
+ * `visited` is shared across the recursion and keyed by the caller's focal
+ * range plus callee name. Sibling scopes can bind the same member name to
+ * different receiver types, while repeated traversal of one call site stops.
  *
  * Copilot retest (2026-10-02): EVERY direct callee is returned, up to the
  * MAX_SCANNED_CALLEE_NAMES / MAX_REQUIRED_CALLEE_WINDOWS ceilings, for flow
@@ -22945,12 +25237,480 @@ const MAX_FLOW_CALLEE_DEPTH = 2;
  * so the gate required -- and certified -- a hub's first three callees only.
  * `complete` is false exactly when a ceiling cut the direct list.
  */
+/** At most this many dependency windows ride an auto-located edit pack. */
+const MAX_EDIT_CONTEXT_WINDOWS = 6;
+/** Caller-named targets (or directory scopes) up to this many still receive edit context. */
+const MAX_EDIT_CONTEXT_CALLER_TARGETS = 1;
+/** Their combined source bytes (a window the cap would split is skipped, never cut). */
+const MAX_EDIT_CONTEXT_BYTES = 6_000;
+/**
+ * A dependency file is served whole when that adds at most this many bytes to
+ * the declarations the edit needs from it: any file this small, and a larger
+ * one those declarations already mostly cover.
+ */
+const EDIT_CONTEXT_WHOLE_FILE_BYTES = 1_600;
+/** A single dependency window larger than this is left to the caller. */
+const EDIT_CONTEXT_MAX_WINDOW_BYTES = 2_000;
+/** The `why` prefix of every edit-context surface; the change contract keeps them review-only. */
+const EDIT_CONTEXT_WHY = "edit-context";
+
+/**
+ * 2026-10-16 bench (F1, the T07 ledgerd credit-normal fix): an edit target
+ * the server located itself was certified `act.edit` with nothing but its
+ * own file, so the caller then had to find what the change depends on
+ * (`Balance.Apply`, the account side constants) one call at a time — on
+ * Copilot CLI 11.5 requests against native's 6.5. This serves those
+ * definitions with the target: the bodies of the callables the focal calls
+ * and the constants it reads, one hop, through the same resolvers the
+ * answer closure uses (`calleeDefinitionsForFocal`, `constantClosureForFocal`,
+ * Go import resolution included). A window in a small file is widened to
+ * the whole file, which carries a type's sibling methods for the price of a
+ * few lines. Bounded by MAX_EDIT_CONTEXT_WINDOWS / MAX_EDIT_CONTEXT_BYTES;
+ * the focal is only a callable the request names explicitly (or the
+ * surface's own symbol), never a guess.
+ *
+ * 2026-10-20 (decision runs 6t-4 to 6t-7, T07 arm A): those windows were a
+ * definition's code lines alone, and the solver re-read the files they were
+ * cut from in every window (6t-7 rep1: balance.go, posting.go and money.go
+ * whole, 10,789 B, the call right after the 10,297 B pack, at 61,989 cached
+ * context tokens). The fix needed what the slices lacked: `Balance`'s doc on
+ * Net's sign (Compute's result type, same package, not served at all),
+ * `posting.Side` with DebitSide/CreditSide (a conversion, `posting.Side(…)`,
+ * which the qualified rule skipped as a call) and `Money.Sub` (a method
+ * called on a field, which no import names). So a window is now a whole
+ * declaration (with its `//` doc comment, and an enum-like Go type with its
+ * const block), the focal's own package types and the methods it calls on
+ * values are among them (`goPackageTypeWindows`, `goCalledMethodWindows`),
+ * and a file is served whole when that adds at most
+ * EDIT_CONTEXT_WHOLE_FILE_BYTES to the declarations the edit needs from it
+ * (`editContextCandidates`).
+ */
+/**
+ * Go: the constants, variables and types the focal names through one of its
+ * file's imports (`account.DebitNormal`, `posting.Side`), resolved to the
+ * declaring file by the import graph (importResolveGo.ts). Functions are the
+ * callee closure's, so a call-shaped use counts only as a conversion to a
+ * type (`posting.Side(x)`); the constant closure only searches the focal's
+ * own package.
+ */
+async function goQualifiedDeclarationWindows(focal: ResolvedFacetFocal, workspace: string, cache: FileReadCache): Promise<NamedWindow[]> {
+  if (path.extname(focal.path) !== ".go") return [];
+  const content = readCached(workspace, focal.path, cache);
+  if (content === undefined) return [];
+  const lines = content.split(/\r?\n/);
+  const body = lines.slice(focal.startLine - 1, focal.endLine).map((line) => maskNonCode(line, false)).join("\n");
+  const out: NamedWindow[] = [];
+  for (const edge of resolveGoImports(workspace, focal.path, lines)) {
+    const [qualifier, ...declared] = edge.names;
+    if (edge.kind !== "import" || qualifier === undefined) continue;
+    for (const name of declared) {
+      const uses = [...body.matchAll(new RegExp(`(?<![\\w$.])${escapeRegExp(qualifier)}\\s*\\.\\s*${escapeRegExp(name)}\\b(\\s*\\()?`, "g"))];
+      if (uses.length === 0) continue;
+      const asValue = uses.some((use) => use[1] === undefined);
+      const target = readCached(workspace, edge.path, cache);
+      if (target === undefined) continue;
+      const targetLines = cachedFileLines(cache, edge.path, target);
+      const constant = asValue ? findModuleConstantWindow(targetLines, name, false) : undefined;
+      if (constant !== undefined) {
+        out.push({ path: edge.path, start: constant.start, end: constant.end, name });
+        continue;
+      }
+      const symbol = ((await cache.parsedSymbols(target, "go", edge.path)) ?? [])
+        .find((entry) => unqualifiedSymbolTail(entry.name) === name && (asValue || entry.kind === "type"));
+      if (symbol !== undefined) out.push({ path: edge.path, start: symbol.startLine, end: symbol.endLine, name });
+    }
+  }
+  return out;
+}
+
+/**
+ * Go: the types of the focal's own package it names unqualified — its
+ * `Balance` result, a `Balance{…}` literal, a `T(x)` conversion — at their
+ * declarations. Qualified ones are goQualifiedDeclarationWindows'.
+ */
+async function goPackageTypeWindows(focal: ResolvedFacetFocal, workspace: string, cache: FileReadCache): Promise<NamedWindow[]> {
+  if (path.extname(focal.path) !== ".go") return [];
+  const content = readCached(workspace, focal.path, cache);
+  if (content === undefined) return [];
+  const body = cachedFileLines(cache, focal.path, content).slice(focal.startLine - 1, focal.endLine)
+    .map((line) => maskNonCode(line, false)).join("\n");
+  const named = new Set([...body.matchAll(/(?<![\w$.])[A-Za-z_]\w*/g)].map((match) => match[0]));
+  const files = [{ path: focal.path, content }];
+  scanGoPackageSiblings(focal.path, workspace, cache, (relPath, text) => {
+    files.push({ path: relPath, content: text });
+    return undefined;
+  }, { mightMatch: (text) => /^type\s/m.test(text) });
+  const out: NamedWindow[] = [];
+  for (const file of files) {
+    for (const symbol of (await cache.parsedSymbols(file.content, "go", file.path)) ?? []) {
+      const name = unqualifiedSymbolTail(symbol.name);
+      // The first declaration wins: `delete` is true only while the name is still wanted.
+      if (symbol.kind === "type" && named.delete(name)) out.push({ path: file.path, start: symbol.startLine, end: symbol.endLine, name });
+    }
+  }
+  return out;
+}
+
+/**
+ * Go: the methods the focal calls on values (`b.Debit.Sub(…)`) that the
+ * callee closure left unresolved — a member call names no import — each at
+ * its one declaration on a type the focal handles (one its code names, or a
+ * field type of a declaration in `typeWindows`: `Balance.Debit` is a
+ * `money.Money`), across the focal's package and the packages its file
+ * imports. A method name declared on two such types (`String`) stays out:
+ * telling the receivers apart takes types this scan does not have.
+ */
+async function goCalledMethodWindows(
+  focal: ResolvedFacetFocal,
+  workspace: string,
+  cache: FileReadCache,
+  resolved: ReadonlySet<string>,
+  typeWindows: readonly NamedWindow[],
+): Promise<NamedWindow[]> {
+  if (path.extname(focal.path) !== ".go") return [];
+  const content = readCached(workspace, focal.path, cache);
+  if (content === undefined) return [];
+  const lines = cachedFileLines(cache, focal.path, content);
+  const body = lines.slice(focal.startLine - 1, focal.endLine).map((line) => maskNonCode(line, false)).join("\n");
+  const called = new Set([...body.matchAll(/\.\s*([A-Za-z_]\w*)\s*\(/g)].map((match) => match[1]!).filter((name) => !resolved.has(name)));
+  if (called.size === 0) return [];
+  const handled = new Set([...body.matchAll(/[A-Za-z_]\w*/g)].map((match) => match[0]));
+  for (const window of typeWindows) {
+    const text = readCached(workspace, window.path, cache);
+    if (text === undefined) continue;
+    for (const line of cachedFileLines(cache, window.path, text).slice(window.start - 1, window.end)) {
+      for (const match of maskNonCode(line, false).matchAll(/[A-Za-z_]\w*/g)) handled.add(match[0]);
+    }
+  }
+  const owners = new Map([[path.posix.dirname(focal.path), focal.path]]);
+  for (const edge of resolveGoImports(workspace, focal.path, lines)) {
+    const dir = path.posix.dirname(edge.path);
+    if (edge.kind === "import" && !owners.has(dir)) owners.set(dir, edge.path);
+  }
+  const declares = new RegExp(`^func\\s*\\([^)]*\\)\\s*(?:${[...called].map(escapeRegExp).join("|")})\\s*[(\\[]`, "m");
+  const declared = new Map<string, NamedWindow[]>();
+  for (const owner of owners.values()) {
+    const files = [owner];
+    scanGoPackageSiblings(owner, workspace, cache, (relPath) => {
+      files.push(relPath);
+      return undefined;
+    }, { mightMatch: (text) => declares.test(text) });
+    for (const file of files) {
+      const text = readCached(workspace, file, cache);
+      if (text === undefined || !declares.test(text)) continue;
+      const fileLines = cachedFileLines(cache, file, text);
+      for (const symbol of (await cache.parsedSymbols(text, "go", file)) ?? []) {
+        const name = unqualifiedSymbolTail(symbol.name);
+        const receiver = /^func\s*\(\s*(?:[A-Za-z_]\w*\s+)?\*?\s*([A-Za-z_]\w*)/.exec(fileLines[symbol.startLine - 1] ?? "")?.[1];
+        if (!called.has(name) || receiver === undefined || !handled.has(receiver)) continue;
+        declared.set(name, [...(declared.get(name) ?? []), { path: file, start: symbol.startLine, end: symbol.endLine, name }]);
+      }
+    }
+  }
+  return [...declared.values()].flatMap((windows) => windows.length === 1 ? windows : []);
+}
+
+/** First line of the `//` (`#`) comment block directly above line `start`, or `start`. */
+function leadingCommentStart(lines: readonly string[], start: number, hashComment: boolean): number {
+  const comment = hashComment ? /^\s*#/ : /^\s*\/\//;
+  let first = start;
+  while (first > 1 && comment.test(lines[first - 2] ?? "")) first--;
+  return first;
+}
+
+/** Bytes of lines `start`-`end` (1-based, inclusive) as served. */
+function lineSpanBytes(lines: readonly string[], start: number, end: number): number {
+  return Buffer.byteLength(lines.slice(start - 1, end).join("\n"), "utf8");
+}
+
+/**
+ * Go: the `const` declarations of the values of the named non-struct type
+ * declared on line `typeLine` — `type Side int` and its `DebitSide Side = 1`
+ * block, an enum's members.
+ */
+function goTypedConstWindows(lines: readonly string[], name: string, typeLine: number): Array<{ start: number; end: number }> {
+  const type = escapeRegExp(name);
+  if (!new RegExp(`^type\\s+${type}\\s+[A-Za-z_][\\w.]*\\s*$`).test(maskNonCode(lines[typeLine - 1] ?? "", false).trimEnd())) return [];
+  const single = new RegExp(`^const\\s+[A-Za-z_]\\w*\\s+${type}\\b`);
+  const member = new RegExp(`^\\s+[A-Za-z_]\\w*(?:\\s*,\\s*[A-Za-z_]\\w*)*\\s+${type}\\b`);
+  const out: Array<{ start: number; end: number }> = [];
+  for (let at = 0; at < lines.length; at++) {
+    const masked = maskNonCode(lines[at]!, false);
+    if (single.test(masked)) out.push({ start: at + 1, end: at + 1 });
+    if (!/^const\s*\(\s*$/.test(masked)) continue;
+    let close = at + 1;
+    while (close < lines.length && !/^\)/.test(lines[close]!)) close++;
+    if (lines.slice(at + 1, close).some((line) => member.test(maskNonCode(line, false)))) out.push({ start: at + 1, end: Math.min(close + 1, lines.length) });
+    at = close;
+  }
+  return out;
+}
+
+/**
+ * One dependency window as the declarations it serves: the definition with the
+ * comment block directly above it (without it when that would pass
+ * EDIT_CONTEXT_MAX_WINDOW_BYTES), and for an enum-like Go type its const
+ * block. A span still over the cap is left to the caller.
+ */
+function declarationSpans(relPath: string, lines: readonly string[], window: NamedWindow): Array<{ start: number; end: number }> {
+  const documented = leadingCommentStart(lines, window.start, hasHashComments(relPath));
+  const spans = [{ start: lineSpanBytes(lines, documented, window.end) <= EDIT_CONTEXT_MAX_WINDOW_BYTES ? documented : window.start, end: window.end }];
+  if (path.extname(relPath) === ".go") spans.push(...goTypedConstWindows(lines, window.name, window.start));
+  return spans.filter((span) => lineSpanBytes(lines, span.start, span.end) <= EDIT_CONTEXT_MAX_WINDOW_BYTES);
+}
+
+interface EditContextSpan {
+  readonly start: number;
+  readonly end: number;
+  /** The declarations it serves, and the focals using them, in first-use order. */
+  readonly names: readonly string[];
+  readonly focals: readonly string[];
+}
+
+/**
+ * `spans` in line order, overlapping ones joined, and ones only blank lines
+ * apart joined while the join stays within EDIT_CONTEXT_MAX_WINDOW_BYTES (a
+ * type and the const block under it are one window).
+ */
+function mergeEditContextSpans(lines: readonly string[], spans: readonly EditContextSpan[]): EditContextSpan[] {
+  const merged: EditContextSpan[] = [];
+  for (const span of [...spans].sort((a, b) => a.start - b.start || b.end - a.end)) {
+    const last = merged[merged.length - 1];
+    const overlaps = last !== undefined && span.start <= last.end + 1;
+    const adjacent = last !== undefined && !overlaps && lines.slice(last.end, span.start - 1).every((line) => line.trim() === "")
+      && lineSpanBytes(lines, last.start, span.end) <= EDIT_CONTEXT_MAX_WINDOW_BYTES;
+    if (last === undefined || !overlaps && !adjacent) {
+      merged.push(span);
+      continue;
+    }
+    merged[merged.length - 1] = {
+      start: last.start,
+      end: Math.max(last.end, span.end),
+      names: [...new Set([...last.names, ...span.names])],
+      focals: [...new Set([...last.focals, ...span.focals])],
+    };
+  }
+  return merged;
+}
+
+/**
+ * `edit-context: A, B (used by F)`, its names cut short with "…" so the
+ * whole stays within the 60 characters `whySummary` keeps of a `why`.
+ */
+function editContextWhy(names: readonly string[], focals: readonly string[]): string {
+  const tail = ` (used by ${focals.join(", ")})`;
+  let shown = names.join(", ");
+  for (let count = names.length - 1; count >= 1 && `${EDIT_CONTEXT_WHY}: ${shown}${tail}`.length > 60; count--) {
+    shown = `${names.slice(0, count).join(", ")}, …`;
+  }
+  return `${EDIT_CONTEXT_WHY}: ${shown}${tail}`;
+}
+
+/**
+ * Appends `editContextCandidates`' windows to a located edit pack as served,
+ * non-required context surfaces (`TL_EDIT_CONTEXT`, default ON).
+ */
+async function attachEnumStyleReviews(surfaces: TaskPackSurface[], workspace: string, query: string, cache?: FileReadCache): Promise<void> {
+  const siblings = existingSiblingMembers(surfaces, workspace, cache), existing = new Set(extractEnumValueTokens(query).map(normIdent).filter(value => siblings.has(value)));
+  for (const surface of surfaces.filter(row => row.path.endsWith(".css")).slice(0, 2)) {
+    if (typeof surface.code !== "string" || surface.content_completeness === "partial"
+      || (surface.remaining_ranges?.length ?? 0) > 0 || (surface.appended_windows?.length ?? 0) > 0) continue;
+    const span = parseSurfaceSpan(surface.range), fullBody = readCached(workspace, surface.path, cache);
+    if (!span || fullBody === undefined) continue;
+    const text = await enumStyleReview({path:surface.path,body:surface.code,fullBody,
+      startLine:span.start,endLine:span.end,fresh:true,complete:true}, existing);
+    if (text !== undefined) bindEnumStyleReviewOrigin(surface,{path:surface.path,range:surface.range,body:surface.code,text});
+  }
+}
+
+/**
+ * The Go returned-local review of the first two Go surfaces (goReturnedLocalReview.ts: a narrow safety net
+ * for one shape, about 1 function in 50,000). A surface qualifies when its body is the exact, complete
+ * source of its window and the window parses as whole declarations: the small file served whole, or ONE
+ * FUNCTION served as a window of a larger file, with or without a prefix before it. The rest of the file
+ * (`remaining_ranges`) does not matter, only a remaining range that overlaps the window itself does
+ * (2026-10-24, generality audit §3.9.1: a function served as a window with the rest of the file remaining, as
+ * pkgbits `NewDecoderRaw` is served (190-206 of 519 lines), was never reviewed: this required `remaining_ranges`
+ * to be empty). `projectEvidence` makes the same distinction when the review reaches the wire.
+ */
+async function attachGoReturnedLocalReviews(surfaces: TaskPackSurface[], workspace: string, cache?: FileReadCache): Promise<void> {
+  for (const surface of surfaces.slice(0, 2)) {
+    if (!surface.path.endsWith(".go") || surface.path.endsWith("_test.go")
+      || typeof surface.code !== "string" || surface.content_completeness === "partial"
+      || (surface.appended_windows?.length ?? 0) > 0) continue;
+    const span = parseSurfaceSpan(surface.range), source = readCached(workspace, surface.path, cache);
+    if (span === undefined || source === undefined || !isExactContiguousBody(surface.code, source, span.start, span.end)) continue;
+    // A remaining range that is not a plain span, or that touches this window, means the body is not all of its window.
+    if ((surface.remaining_ranges ?? []).some(range => {
+      const rest = parseSurfaceSpan(range);
+      return rest === undefined || (rest.start <= span.end && rest.end >= span.start);
+    })) continue;
+    const review = await goReturnedLocalReview({path: surface.path, startLine: span.start, endLine: span.end,
+      body: surface.code, fresh: true, complete: true});
+    if (review !== undefined) bindGoReviewOrigin(surface, {path: surface.path, body: surface.code, range: surface.range, text: review});
+  }
+}
+
+/** Most surfaces of one pack `attachJavaLoopGuardReviews` reads. */
+const MAX_JAVA_LOOP_GUARD_REVIEW_SURFACES = 64;
+
+async function attachJavaLoopGuardReviews(surfaces: TaskPackSurface[], workspace: string, cache?: FileReadCache): Promise<void> {
+  const analyzed = new Map<string, ReturnType<typeof analyzeJavaLoopGuards>>();
+  // A continuation that owes a type's members as rows serves each row as its own
+  // surface (up to MAX_FLOW_REQUIRED_MEMBER_WINDOWS of them): the loop in the
+  // 43rd must be reviewed as the one in the 3rd is.
+  for (const surface of surfaces.filter(row => row.path.endsWith(".java")).slice(0, MAX_JAVA_LOOP_GUARD_REVIEW_SURFACES)) {
+    if (typeof surface.code !== "string" || surface.content_completeness === "partial"
+      || (surface.remaining_ranges?.length ?? 0) > 0 || (surface.appended_windows?.length ?? 0) > 0) continue;
+    const span = parseSurfaceSpan(surface.range), fullBody = readCached(workspace, surface.path, cache);
+    if (span === undefined || fullBody === undefined || !isExactContiguousBody(surface.code, fullBody, span.start, span.end)) continue;
+    if (!analyzed.has(surface.path)) {
+      if (analyzed.size >= 2) continue;
+      analyzed.set(surface.path, analyzeJavaLoopGuards(surface.path, fullBody));
+    }
+    const review = javaLoopGuardReview({path: surface.path, fullBody, body: surface.code, startLine: span.start,
+      endLine: span.end, fresh: true, complete: true}, await analyzed.get(surface.path));
+    if (review !== undefined) bindJavaLoopGuardOrigin(surface, {path: surface.path, body: surface.code, range: surface.range, text: review});
+  }
+}
+
+async function augmentEditContextSurfaces(
+  surfaces: TaskPackSurface[],
+  query: string,
+  workspace: string,
+  requiredRoles: string[],
+  cache: FileReadCache,
+  includeTests = false,
+): Promise<void> {
+  // A pack already holding MAX_SURFACES_DISTINCT surfaces takes none; one with
+  // room takes every window editContextCandidates returns, which bounds them
+  // itself (MAX_EDIT_CONTEXT_WINDOWS / MAX_EDIT_CONTEXT_BYTES) as an answer
+  // pack's facet-closure windows are bounded: a declaration the edit needs is
+  // not dropped for the surface count the located files left over.
+  if (!editContextEnabled()) return;
+  if (surfaces.length >= MAX_SURFACES_DISTINCT) return;
+  for (const candidate of await editContextCandidates(surfaces, query, workspace, cache, includeTests)) {
+    const surface = await candidateToSurface(candidate, workspace, requiredRoles, query, cache);
+    if (!hasServedCode(surface) || surfaces.some((existing) => existing.path === surface.path && existing.range === surface.range)) continue;
+    surface.required = false;
+    surfaces.push(surface);
+  }
+}
+
+export async function editContextCandidates(
+  surfaces: readonly TaskPackSurface[],
+  query: string,
+  workspace: string,
+  cache: FileReadCache,
+  includeTests = false,
+): Promise<ImpactCandidate[]> {
+  const named = new Set(explicitCodeIdentifiers(query).map(normIdent));
+  // A prose-cased name ("(Compute)", "Sum") is no explicit identifier, but a
+  // callable in the located edit target spelled exactly so in the request is
+  // the one it means.
+  const spelled = (name: string): boolean => name.length >= 3
+    && new RegExp(`(?<![A-Za-z0-9_$])${escapeRegExp(name)}(?![A-Za-z0-9_$])`).test(query);
+  const focals: ResolvedFacetFocal[] = [];
+  for (const surface of surfaces.filter(hasServedCode).slice(0, 2)) {
+    const content = readCached(workspace, surface.path, cache);
+    const lang = languageForPath(surface.path);
+    if (content === undefined || lang === undefined) continue;
+    const lines = content.split(/\r?\n/);
+    const span = parseSurfaceSpan(surface.range ?? "") ?? { start: 1, end: lines.length };
+    const parsed = (await cache.parsedSymbols(content, lang, surface.path)) ?? [];
+    const callables = parsed.filter((symbol) => symbol.startLine >= span.start && symbol.endLine <= span.end
+      && symbolIsCallable(symbol, lines, hasHashComments(surface.path)));
+    const chosen = callables.filter((symbol) => {
+      const name = unqualifiedSymbolTail(symbol.name);
+      return surface.symbol !== undefined ? normIdent(surface.symbol) === normIdent(name) : named.has(normIdent(name)) || spelled(name);
+    });
+    // A served target holding a single callable is that callable's edit.
+    for (const symbol of chosen.length > 0 || surface.symbol !== undefined ? chosen : callables.length === 1 ? callables : []) {
+      const name = unqualifiedSymbolTail(symbol.name);
+      focals.push({ path: surface.path, name, startLine: symbol.startLine, endLine: symbol.endLine, typeName: "", hasRealType: false, kind: symbol.kind });
+    }
+  }
+  const served = surfaces.map((surface) => ({ path: surface.path, span: parseSurfaceSpan(surface.range ?? "") }));
+  const covered = (path: string, start: number, end: number): boolean => served.some((entry) =>
+    entry.path === path && (entry.span === undefined || (entry.span.start <= start && entry.span.end >= end)));
+  // The declarations each dependency file must serve, by file in first-use order.
+  const needed = new Map<string, { lines: readonly string[]; bytes: number; spans: EditContextSpan[] }>();
+  for (const focal of focals.slice(0, 2)) {
+    const callees = await calleeDefinitionsForFocal(focal, workspace, cache);
+    const qualified = await goQualifiedDeclarationWindows(focal, workspace, cache);
+    const types = await goPackageTypeWindows(focal, workspace, cache);
+    const methods = await goCalledMethodWindows(focal, workspace, cache, new Set(callees.windows.map((window) => window.name)), [...qualified, ...types]);
+    const constants = await constantClosureForFocal(focal, workspace, cache, Date.now() + 1_500, callees.windows);
+    for (const window of [...callees.windows, ...qualified, ...types, ...methods, ...constants.windows]) {
+      if (window.binding === true || window.path === focal.path && window.start >= focal.startLine && window.end <= focal.endLine) continue;
+      const content = readCached(workspace, window.path, cache);
+      if (content === undefined) continue;
+      const file = needed.get(window.path) ?? { lines: cachedFileLines(cache, window.path, content), bytes: Buffer.byteLength(content, "utf8"), spans: [] };
+      needed.set(window.path, file);
+      for (const span of declarationSpans(window.path, file.lines, window)) file.spans.push({ ...span, names: [window.name], focals: [focal.name] });
+    }
+  }
+  const out: ImpactCandidate[] = [];
+  let bytes = 0;
+  for (const [filePath, file] of needed) {
+    const spans = mergeEditContextSpans(file.lines, file.spans);
+    const wanted = spans.reduce((sum, span) => sum + lineSpanBytes(file.lines, span.start, span.end), 0);
+    // The whole file when that adds at most EDIT_CONTEXT_WHOLE_FILE_BYTES to
+    // the declarations wanted from it: the rest is cheaper to send than the
+    // re-read a partial view of such a file draws, which costs a turn over
+    // the whole context. Never over a file a served surface holds part of.
+    const whole = file.bytes <= EDIT_CONTEXT_WHOLE_FILE_BYTES || spans.length > 0
+      && file.bytes - wanted <= EDIT_CONTEXT_WHOLE_FILE_BYTES
+      && bytes + file.bytes <= MAX_EDIT_CONTEXT_BYTES
+      && !served.some((entry) => entry.path === filePath);
+    // The last line, not the empty string after a final newline: `1-58` of a
+    // 57-line file is no served `1-57`, and would take a window slot.
+    const lastLine = file.lines.length - (file.lines.length > 1 && file.lines[file.lines.length - 1] === "" ? 1 : 0);
+    const pieces: readonly EditContextSpan[] = whole
+      ? [{ start: 1, end: lastLine, names: [...new Set(file.spans.flatMap((span) => span.names))], focals: [...new Set(file.spans.flatMap((span) => span.focals))] }]
+      : spans;
+    for (const piece of pieces) {
+      if (out.length >= MAX_EDIT_CONTEXT_WINDOWS) break;
+      const size = lineSpanBytes(file.lines, piece.start, piece.end);
+      if (covered(filePath, piece.start, piece.end) || bytes + size > MAX_EDIT_CONTEXT_BYTES) continue;
+      bytes += size;
+      // `callerRange`: serve exactly this window; candidateToSurface would
+      // otherwise widen a symbol-less window in a mid-size file to the whole file.
+      // A resolved definition is embedded (HIGH_CONFIDENCE_THRESHOLD), never handle-only.
+      out.push({ path: filePath, line: piece.start, range: `${piece.start}-${piece.end}`, callerRange: true, surface: "unknown",
+        why: editContextWhy(piece.names, piece.focals), confidence: Math.max(HIGH_CONFIDENCE_THRESHOLD, 0.9), required: false });
+    }
+  }
+  if (includeTests) for (const focal of focals.slice(0, 2)) {
+    if (!focal.path.endsWith(".go") || focal.path.endsWith("_test.go")) continue;
+    const testPath = focal.path.slice(0, -3) + "_test.go";
+    if (surfaces.some(surface => surface.path === testPath)) continue;
+    // Auto-discovery must obey the same ignore policy as every other candidate.
+    if (!walkCodeFiles(workspace, {subPath: path.posix.dirname(focal.path)}).some(file => file.relPath === testPath)) continue;
+    const source = readCached(workspace, focal.path, cache), content = readCached(workspace, testPath, cache);
+    if (source === undefined || content === undefined || Buffer.byteLength(content, "utf8") > 6 * 1024
+      || !samePackageGoTest(focal.path, source, testPath, content) || !goTestInvokesFocal(content, focal.name)) continue;
+    const ownBytes = surfaces.reduce((sum, surface) => sum + Buffer.byteLength(surface.code ?? "", "utf8"), 0);
+    const ceiling = packByteCeilingStorage.getStore() ?? DEFAULT_RESPONSE_BYTE_FLOOR;
+    if (ownBytes + bytes + measureResponseBytes(JSON.stringify(content))
+      + 128 * (surfaces.length + out.length + 1) + 4096 > ceiling) continue;
+    const lines = content.split(/\r?\n/), last = lines.length - (lines.at(-1) === "" ? 1 : 0);
+    out.push({path: testPath, line: 1, range: "1-" + last, callerRange: true, surface: "test",
+      why: EDIT_CONTEXT_WHY + ": test for " + focal.name, confidence: 0.9, required: false});
+    break; // One corresponding whole test, separate from the dependency budget.
+  }
+  return out;
+}
+
+/** How many call names of a nested callee's body `calleeDefinitionsForFocal` tries to resolve. */
+const MAX_NESTED_CALLEE_NAMES_SCANNED = 3 * MAX_CALLEES_PER_REQUIREMENT;
+
 async function calleeDefinitionsForFocal(
   focal: ResolvedFacetFocal,
   workspace: string,
   cache: FileReadCache,
   depth = 1,
-  visited: Set<string> = new Set([focal.name]),
+  visited: Set<string> = new Set(),
   /** How many direct call names are taken at depth 1 (a type flow's steps keep the old MAX_CALLEES_PER_REQUIREMENT bound). */
   directLimit = MAX_SCANNED_CALLEE_NAMES,
 ): Promise<CalleeDefinitions> {
@@ -22961,8 +25721,14 @@ async function calleeDefinitionsForFocal(
   const bodyLines = lines.slice(focal.startLine - 1, focal.endLine);
   const names = calleeNamesIn(bodyLines, hashComment, focal.name, new Set([focal.name]));
   // A deeper layer keeps its bounded expansion: the first
-  // MAX_CALLEES_PER_REQUIREMENT names of an already-required callee's body.
-  const callees = names.slice(0, depth === 1 ? directLimit : MAX_CALLEES_PER_REQUIREMENT);
+  // MAX_CALLEES_PER_REQUIREMENT workspace definitions an already-required
+  // callee's body calls, among its first MAX_NESTED_CALLEE_NAMES_SCANNED call
+  // names. A name that resolves to none (`fmt.Errorf`, `sort.SliceStable`)
+  // does not use up that budget (2026-10-17 bench, M1: `posting.Apply`'s
+  // `validateNoDuplicates`, the check returning ErrDuplicateLeg, was cut
+  // behind `Errorf`), and likewise only resolved callees count toward the
+  // MAX_CALLEES_PER_REQUIREMENT that are expanded one layer deeper.
+  const callees = names.slice(0, depth === 1 ? directLimit : MAX_NESTED_CALLEE_NAMES_SCANNED);
   let complete = depth > 1 || names.length <= callees.length;
   if (!complete) {
     // Names past the scan ceiling cut the list only when one of them could be
@@ -22979,29 +25745,40 @@ async function calleeDefinitionsForFocal(
   }
   const out: NamedWindow[] = [];
   let required = 0;
-  for (const [index, calleeName] of callees.entries()) {
-    if (visited.has(calleeName)) continue;
-    visited.add(calleeName);
-    const resolved = await resolveCalleeFile(calleeName, focal, lines, hashComment, workspace, cache);
-    if (resolved?.symbol === undefined) continue;
+  const unresolved: string[] = [];
+  for (const calleeName of callees) {
+    if (depth > 1 && required >= MAX_CALLEES_PER_REQUIREMENT) break;
+    const bindingKey = JSON.stringify([focal.path, focal.startLine, focal.endLine, focal.name, calleeName]);
+    if (visited.has(bindingKey)) continue;
+    visited.add(bindingKey);
+    const resolved = await resolveCalleeFile(calleeName, focal, lines, hashComment, workspace, cache, () => { complete = false; });
+    if (resolved?.symbol === undefined) {
+      const specs = importSpecifiersNaming(lines, calleeName, hashComment, focal.path);
+      if (specs.some((s) => s.relative && !s.wildcard)) unresolved.push(`${calleeName} in ${focal.path}`);
+      continue;
+    }
     if (depth === 1 && required >= MAX_REQUIRED_CALLEE_WINDOWS) {
       complete = false;
       break;
     }
     required += 1;
-    out.push({ path: resolved.path, start: resolved.symbol.startLine, end: resolved.symbol.endLine, name: calleeName });
-    if (depth >= MAX_FLOW_CALLEE_DEPTH || index >= MAX_CALLEES_PER_REQUIREMENT) continue;
+    out.push(...(resolved.bindings ?? []));
+    out.push({ path: resolved.path, start: resolved.symbol.startLine, end: resolved.symbol.endLine, name: resolved.name ?? calleeName });
+    if (depth >= MAX_FLOW_CALLEE_DEPTH || required > MAX_CALLEES_PER_REQUIREMENT) continue;
     const calleeFocal: ResolvedFacetFocal = {
       path: resolved.path,
-      name: calleeName,
+      name: resolved.name ?? calleeName,
       startLine: resolved.symbol.startLine,
       endLine: resolved.symbol.endLine,
       typeName: focal.typeName,
       hasRealType: focal.hasRealType,
     };
-    out.push(...(await calleeDefinitionsForFocal(calleeFocal, workspace, cache, depth + 1, visited)).windows);
+    const nested = await calleeDefinitionsForFocal(calleeFocal, workspace, cache, depth + 1, visited);
+    out.push(...nested.windows);
+    if (!nested.complete) complete = false;
+    unresolved.push(...(nested.unresolved ?? []));
   }
-  return { windows: out, complete };
+  return { windows: out, complete, ...(unresolved.length > 0 ? { unresolved } : {}) };
 }
 
 /**
@@ -23027,6 +25804,7 @@ function symbolIsCallable(symbol: { kind: string; startLine: number; endLine: nu
 /** `calleeDefinitionsForFocal`'s result. */
 interface CalleeDefinitions {
   readonly windows: NamedWindow[];
+  readonly unresolved?: string[];
   /** False when MAX_SCANNED_CALLEE_NAMES / MAX_REQUIRED_CALLEE_WINDOWS cut the focal's direct callee list. */
   readonly complete: boolean;
 }
@@ -23034,6 +25812,7 @@ interface CalleeDefinitions {
 /** flow's callee/step windows for one focal (`flowWindowsForFocal`). */
 interface FlowWindows {
   readonly windows: NamedWindow[];
+  readonly unresolvedCallees?: string[];
   readonly membersComplete: boolean;
   readonly ungroundedTerms: string[];
   /** False when a direct callee list (the focal's own, or a step's) was cut -- see `CalleeDefinitions.complete`. */
@@ -23113,6 +25892,22 @@ function derivationalStemEn(word: string): string {
   return word;
 }
 
+/** A structure map's out-of-line member as the parsed callable the flow facet reads members as (its range is the member's own, doc comment included, so the map's window for it is found by that range). */
+function mapMemberSymbol(member: StructureMapMember): CollectedSymbol {
+  return {
+    name: member.name,
+    kind: "method",
+    startLine: member.start,
+    endLine: member.end,
+    startIndex: 0,
+    endIndex: 0,
+    signatureStartIndex: 0,
+    signatureEndIndex: 0,
+    signatureStartLine: member.signatureStart,
+    signatureEndLine: member.signatureEnd,
+  };
+}
+
 /** P1-8: safety ceiling on how many matched members become required flow windows at all — MAX_CALLEES_PER_REQUIREMENT (3) still bounds the costlier one-hop callee-expansion (`steps`), a separate, smaller concern. */
 const MAX_FLOW_REQUIRED_MEMBER_WINDOWS = 64;
 
@@ -23121,18 +25916,33 @@ async function flowStepWindowsForNonCallableFocal(
   requirement: FacetRequirement,
   workspace: string,
   cache: FileReadCache,
+  /** v0.16 6t-7 T03: the answer pack's structure map, when it maps this very type (`structureMapForAnswer`). */
+  structureMap?: AnswerStructureMap,
 ): Promise<FlowWindows> {
   const content = readCached(workspace, focal.path, cache);
   if (content === undefined) return { windows: [], membersComplete: true, ungroundedTerms: [], calleesComplete: true };
   const lang = languageForPath(focal.path);
   const parsed = (lang ? await cache.parsedSymbols(content, lang, focal.path) : null) ?? [];
   const ownName = normalizeCallerIdent(focal.name);
-  const members = parsed
-    .filter((s) =>
+  // The members a MAPPED type declares outside its range (a Go struct's methods, the
+  // fns of a Rust type's impl blocks, the C++ `T::m` definitions of its file) are
+  // its members here too: found in the focal's range alone, a Go type has none, every
+  // clause term goes ungrounded and the flow is "undetermined" over a served map.
+  // For a type whose members are inside it the map adds none (Java, TypeScript, …).
+  const mappedOutside = structureMap !== undefined
+    && structureMap.type.path === focal.path
+    && structureMap.type.name === unqualifiedSymbolTail(focal.name)
+    ? structureMap.type.members.filter((member) => member.outOfLine === true && !member.nestedType)
+      .map((member) => ({ symbol: mapMemberSymbol(member), path: member.path ?? focal.path }))
+    : [];
+  const members = [
+    ...parsed.filter((s) =>
       CALLER_EXPANSION_CALLABLE_KINDS.has(s.kind)
       && s.startLine >= focal.startLine && s.endLine <= focal.endLine
       && normalizeCallerIdent(unqualifiedSymbolTail(s.enclosingSymbol?.name ?? "")) === ownName)
-    .sort((a, b) => a.startLine - b.startLine);
+      .map((symbol) => ({ symbol, path: focal.path })),
+    ...mappedOutside,
+  ].sort((a, b) => a.path.localeCompare(b.path) || a.symbol.startLine - b.symbol.startLine);
   const lines = content.split(/\r?\n/);
   // 2026-10-10 (false flow gaps): a word naming no point of the flow — the
   // file's path, a flow descriptor, a declaration kind (requestFacets.ts
@@ -23144,10 +25954,18 @@ async function flowStepWindowsForNonCallableFocal(
   )];
   const ungroundedTerms = new Set(terms);
   const matched: typeof members = terms.length === 0 ? [...members] : [];
-  for (const member of members) {
+  const linesByPath = new Map<string, string[]>([[focal.path, lines]]);
+  for (const { path: memberPath } of members) {
+    if (linesByPath.has(memberPath)) continue;
+    const text = readCached(workspace, memberPath, cache);
+    if (text !== undefined) linesByPath.set(memberPath, text.split(/\r?\n/u));
+  }
+  for (const { symbol: member, path: memberPath } of members) {
     if (terms.length === 0) break;
     const nameLower = unqualifiedSymbolTail(member.name).toLowerCase();
-    const bodyLower = lines.slice(member.startLine - 1, member.endLine).join("\n").toLowerCase();
+    const memberLines = linesByPath.get(memberPath);
+    if (memberLines === undefined) continue;
+    const bodyLower = memberLines.slice(member.startLine - 1, member.endLine).join("\n").toLowerCase();
     let hit = false;
     for (const term of terms) {
       const stem = derivationalStemEn(term);
@@ -23156,27 +25974,59 @@ async function flowStepWindowsForNonCallableFocal(
         hit = true;
       }
     }
-    if (hit) matched.push(member);
+    if (hit) matched.push({ symbol: member, path: memberPath });
   }
   const membersComplete = matched.length <= MAX_FLOW_REQUIRED_MEMBER_WINDOWS;
   const required = matched.slice(0, MAX_FLOW_REQUIRED_MEMBER_WINDOWS);
+  // v0.16 6t-7 T03: a short, map-shaped answer about this type is served its
+  // STRUCTURE MAP (structureMap.ts) — every member's signature and the ROWS of
+  // the members that call the clause's concerns (the statements that call them,
+  // the returns and throws, the control lines around them), never the member
+  // bodies — so the flow requires exactly those windows of each matched member,
+  // and no one-hop callee expansion: the map serves no callee body to expand
+  // into. (The reply the map rides in is filled with whole bodies where they
+  // fit; what is REQUIRED is the rows alone, 2026-10-23.) The member matching
+  // above (and so `ungroundedTerms`) is unchanged.
+  if (
+    structureMap !== undefined
+    && structureMap.type.path === focal.path
+    && structureMap.type.name === unqualifiedSymbolTail(focal.name)
+  ) {
+    // A small page must not certify a state table, declaration or call it
+    // omitted. These obligations describe the full map, not just this page.
+    const mapWindows: NamedWindow[] = [
+      ...structureMap.requiredWindows.map(span => ({ path: span.path ?? focal.path, start: span.start, end: span.end, name: structureMap.type.name })),
+      ...structureMap.stateWindows,
+    ];
+    for (const { symbol: member, path: memberPath } of required) {
+      const name = unqualifiedSymbolTail(member.name);
+      const mapped = structureMap.type.members.find((candidate) =>
+        candidate.name === name && candidate.start === member.startLine && candidate.end === member.endLine
+        && (candidate.path ?? focal.path) === memberPath);
+      // The full map already requires every mapped member's declaration and
+      // all requested concern calls after the normal comment policy. Do not
+      // reintroduce raw elided comments as obligations from a second planner.
+      if (mapped === undefined) mapWindows.push({ path: memberPath, start: member.startLine, end: member.endLine, name });
+    }
+    return { windows: mapWindows, membersComplete, ungroundedTerms: [...ungroundedTerms], calleesComplete: true };
+  }
   const steps = required.slice(0, MAX_CALLEES_PER_REQUIREMENT);
   const out: NamedWindow[] = [];
   // Every matched member (up to the safety ceiling) is a required window on
   // its own -- cheap (no expansion), and lets the gate recognize a member
   // already served by some OTHER surface (e.g. the whole class on the wire)
   // without limiting how many of them can be accepted as covered.
-  for (const member of required) {
-    out.push({ path: focal.path, start: member.startLine, end: member.endLine, name: unqualifiedSymbolTail(member.name) });
+  for (const { symbol: member, path: memberPath } of required) {
+    out.push({ path: memberPath, start: member.startLine, end: member.endLine, name: unqualifiedSymbolTail(member.name) });
   }
   const visited = new Set<string>([focal.name]);
   const calleesComplete = true;
-  for (const member of steps) {
+  for (const { symbol: member, path: memberPath } of steps) {
     const stepName = unqualifiedSymbolTail(member.name);
     if (visited.has(stepName)) continue;
     visited.add(stepName);
     const stepFocal: ResolvedFacetFocal = {
-      path: focal.path,
+      path: memberPath,
       name: stepName,
       startLine: member.startLine,
       endLine: member.endLine,
@@ -23211,12 +26061,15 @@ async function flowWindowsForFocal(
   cache: FileReadCache,
   /** The pack's shared (memoized) callee resolution; a direct call by default. */
   calleesOf: (focal: ResolvedFacetFocal) => Promise<CalleeDefinitions> = (f) => calleeDefinitionsForFocal(f, workspace, cache),
+  /** v0.16 6t-7 T03: see `flowStepWindowsForNonCallableFocal`. */
+  structureMap?: AnswerStructureMap,
 ): Promise<FlowWindows> {
   if (!focalIsCallable(focal, workspace, cache)) {
-    return flowStepWindowsForNonCallableFocal(focal, requirement, workspace, cache);
+    return flowStepWindowsForNonCallableFocal(focal, requirement, workspace, cache, structureMap);
   }
   const callees = await calleesOf(focal);
-  return { windows: callees.windows, membersComplete: true, ungroundedTerms: [], calleesComplete: callees.complete };
+  return { windows: callees.windows, membersComplete: true, ungroundedTerms: [], calleesComplete: callees.complete,
+    ...(callees.unresolved !== undefined ? { unresolvedCallees: callees.unresolved } : {}) };
 }
 
 /** The enclosing-symbol (or bounded-margin) window of one ranked call site — same rule `recoverCallerExpansionCandidates` applies to its own sites above. */
@@ -23400,6 +26253,33 @@ function facetPlanWorkspaceKey(workspace: string): string {
   return laneScopedKey(path.resolve(workspace));
 }
 
+/** A source-bound plan for independently addressable read-only tail requests.
+ * This grants no completion: each member still runs the ordinary pack gates.
+ * In particular, losing/replacing the original facet plan disables batching.
+ */
+export function readonlyAnswerBatchPlan(workspace: string, query: string) {
+  const key = facetPlanWorkspaceKey(workspace);
+  const shaOf = (relPath: string): string | undefined => {
+    const text = readCached(workspace, relPath);
+    return text === undefined ? undefined : shaOfText(text);
+  };
+  const plan = facetPlanFor(key, query, shaOf);
+  if (!plan || !plan.entries.some(entry => entry.facet === "flow" && entry.focal?.callable === false
+    && entry.windows.length > 1)) return undefined;
+  const snapshot = () => {
+    const current = facetPlanFor(key, query, shaOf);
+    return current === undefined ? undefined : JSON.stringify([
+      current, facetDependencyEntriesFor(key, query, shaOf),
+    ]);
+  };
+  const binding = snapshot();
+  if (binding === undefined || Buffer.byteLength(binding) > 96 * 1024) return undefined;
+  const entries = [...plan.entries, ...facetDependencyEntriesFor(key, query, shaOf)];
+  const windows = entries.flatMap(entry => entry.windows).map(win => ({path:win.path,range:`${win.start}-${win.end}`}));
+  if (windows.length === 0 || windows.length > 256 || entries.some(entry => entry.windows.some(win => win.truncated))) return undefined;
+  return {windows, validate: () => snapshot() === binding};
+}
+
 /**
  * FIX-FAB item 11 (orchestrator report, 2026-09-27): the facet-closure
  * completeness decision (`planSitesComplete`, `constantClosureForFocal`'s
@@ -23483,6 +26363,44 @@ async function additionalFacetSubjectFocals(
 }
 
 /**
+ * The flow of a pack that serves the structure map of a type with members outside
+ * its range (Go, Rust, C, C++) is the flow OF that type, whatever the resolver
+ * would pick for the word the request uses. A request frames such a type by a plain
+ * word — "the big Desk struct" — which names no subject identifier (requestFacets.ts
+ * reads casing, and `Desk` has none), so the resolver's concept anchor would be a
+ * callable whose name or body mentions the concerns, a constructor that merely wires
+ * them (`NewDesk`), whose flow is empty — and the map's windows would be required by
+ * no facet. And a C struct's name is the NAME of every function whose signature line
+ * mentions `struct X` (the parser's habit), so the resolver would settle on one of
+ * them. A flow clause that names no subject, or names the type, is given the mapped
+ * type as its focal; one that names its own subject (a method, an identifier) keeps
+ * the resolver's, as it does for a Java class. Undefined: resolve as always.
+ *
+ * The focal's range is the type's EXTENT, as a Java class's is its whole range: a
+ * mention of the type's name on a line inside it — a Go receiver, a Rust `impl Trait
+ * for T {`, a C++ constructor the parser gave no symbol — is the map's to owe (its
+ * rows and its owed bodies), not a use of the type elsewhere whose ±12 lines the gate
+ * would require, the code of other types between the members included
+ * (`sameFileFacetCallSites` skips the focal's own range). A use in ANOTHER file stays
+ * one, and is required like any.
+ */
+function mapFlowFocal(requirement: FacetRequirement, map: AnswerStructureMap | undefined): ResolvedFacetFocal | undefined {
+  if (map === undefined || requirement.facet !== "flow") return undefined;
+  if (!map.type.members.some((member) => member.outOfLine === true)) return undefined;
+  const named = requirement.subjectIdentifiers;
+  if (named.length > 0 && !named.some((identifier) => normIdent(identifier) === normIdent(map.type.name))) return undefined;
+  return {
+    path: map.type.path,
+    name: map.type.name,
+    startLine: map.type.start,
+    endLine: map.type.end,
+    typeName: map.type.name,
+    hasRealType: false,
+    kind: "type",
+  };
+}
+
+/**
  * The facet-closure additions for one answer pack, for the caller to MERGE
  * (never to inject into the ranking) -- mirrors
  * `recoverCallerExpansionCandidates`'s own contract exactly, one requirement
@@ -23501,8 +26419,12 @@ async function recoverFacetClosureCandidates(
   requirements: readonly FacetRequirement[],
   /** FIX-G: record the gate's plan only — serve nothing, widen nothing (the seeded flow, whose caller-named surfaces must stand exactly as selected). */
   planOnly = false,
+  /** v0.16 6t-7 T03: the answer pack's structure map (`structureMapForAnswer`); a flow over the type it maps requires the map's windows. */
+  structureMap?: AnswerStructureMap,
+  /** TL_EFF_MAP_ANSWER_FIRST: a DRY RUN — the caller passes COPIES of the selection and the run is the real run's, window by window, but nothing is counted or recorded; the windows it served and the plan it would record are collected here (`answerFirstPageHolds`). */
+  trial?: FacetClosureTrial,
 ): Promise<{ additions: ImpactCandidate[]; outcomes: FacetClosureOutcome[]; widenedPaths: ReadonlySet<string> }> {
-  facetClosureEntryCountForTest += 1;
+  if (trial === undefined) facetClosureEntryCountForTest += 1;
   // FIX-FAB item 9 (eval-0927 review #12, jaKanjiOnly): a zero-length
   // `selected` used to be an unconditional dead end. When the query's own
   // requirements ALSO carry no usable concept term, that is still correct —
@@ -23710,9 +26632,12 @@ async function recoverFacetClosureCandidates(
     // these additions honours (MAX_SURFACES_WITH_FACET_CLOSURE);
     // MAX_CLOSURE_BYTES_PER_PACK is the real bound on what this hook serves.
     const servingOpen = !planOnly && additions.length < MAX_SURFACES_WITH_FACET_CLOSURE;
-    const serve = (path: string, start: number, end: number, why: string): boolean =>
-      servingOpen && tryAddWindow(path, start, end, why);
-    const focal = queuedFocal ?? await resolveFacetFocal(requirement, selected, args, workspace, cache, allowTestPaths, deadline, priorFocalPaths);
+    const serve = (path: string, start: number, end: number, why: string): boolean => {
+      const served = servingOpen && tryAddWindow(path, start, end, why);
+      if (trial !== undefined && served) trial.served.push({ path, start, end });
+      return served;
+    };
+    const focal = queuedFocal ?? mapFlowFocal(requirement, structureMap) ?? await resolveFacetFocal(requirement, selected, args, workspace, cache, allowTestPaths, deadline, priorFocalPaths);
     if (focal === undefined) {
       outcomes.push({ facet: requirement.facet, clause: requirement.clause, subject: subjectLabel(requirement), focal: [], windows: [], reason: "no-focal" });
       planEntries.push({ facet: requirement.facet, clause: requirement.clause, resolution: "no-focal", windows: [] });
@@ -23788,6 +26713,7 @@ async function recoverFacetClosureCandidates(
     let planFocalDefaultExported: boolean | undefined;
     /** Copilot retest (2026-10-02): see `CalleeDefinitions.complete`. */
     let planCalleesComplete: boolean | undefined;
+    let planUnresolvedCallees: string[] | undefined;
     planPaths.add(focal.path);
     priorFocalPaths.add(focal.path);
 
@@ -23805,21 +26731,24 @@ async function recoverFacetClosureCandidates(
       // six callees. MAX_PLANNED_CONSTANT_WINDOWS and the callee ceilings
       // still bound the walk.
       for (const win of closure.windows) {
-        const served = serve(win.path, win.start, win.end, `closure:${requirement.facet} ${win.name} (read by ${focal.name})`);
+        const served = win.binding !== true && serve(win.path, win.start, win.end, `closure:${requirement.facet} ${win.name} (read by ${focal.name})`);
         windows.push({ path: win.path, range: `${win.start}-${win.end}`, served });
         planWindows.push({
           kind: "constant", path: win.path, start: win.start, end: win.end, name: win.name,
+          ...(win.binding === true ? { binding: true } : {}),
           ...(win.truncated ? { truncated: true } : {}),
         });
         planPaths.add(win.path);
       }
       for (const callee of callees?.windows ?? []) {
-        const served = serve(callee.path, callee.start, callee.end, `closure:${requirement.facet} callee ${callee.name} (of ${focal.name})`);
+        const served = callee.binding !== true && serve(callee.path, callee.start, callee.end, `closure:${requirement.facet} callee ${callee.name} (of ${focal.name})`);
         windows.push({ path: callee.path, range: `${callee.start}-${callee.end}`, served });
-        planWindows.push({ kind: "callee", path: callee.path, start: callee.start, end: callee.end, name: callee.name });
+        planWindows.push({ kind: "callee", path: callee.path, start: callee.start, end: callee.end, name: callee.name,
+          ...(callee.binding === true ? { binding: true } : {}) });
         planPaths.add(callee.path);
       }
       if (callees !== undefined && !callees.complete) planCalleesComplete = false;
+      planUnresolvedCallees = callees?.unresolved;
       planUnresolved = closure.unresolved;
       if (Object.keys(closure.unresolvedPackages).length > 0) planUnresolvedPackages = closure.unresolvedPackages;
       if (closure.unresolvedProperties.length > 0) planUnresolvedSelfProperties = closure.unresolvedProperties;
@@ -23921,15 +26850,17 @@ async function recoverFacetClosureCandidates(
     let planFlowMembersComplete: boolean | undefined;
     let planUngroundedFlowTerms: string[] | undefined;
     if (requirement.facet === "flow") {
-      const flow = await flowWindowsForFocal(focal, requirement, workspace, cache, calleesOf);
+      const flow = await flowWindowsForFocal(focal, requirement, workspace, cache, calleesOf, structureMap);
       for (const callee of flow.windows) {
-        const served = serve(callee.path, callee.start, callee.end, `closure:flow callee ${callee.name} (of ${focal.name})`);
+        const served = callee.binding !== true && serve(callee.path, callee.start, callee.end, `closure:flow callee ${callee.name} (of ${focal.name})`);
         windows.push({ path: callee.path, range: `${callee.start}-${callee.end}`, served });
-        planWindows.push({ kind: "callee", path: callee.path, start: callee.start, end: callee.end, name: callee.name });
+        planWindows.push({ kind: "callee", path: callee.path, start: callee.start, end: callee.end, name: callee.name,
+          ...(callee.binding === true ? { binding: true } : {}) });
         planPaths.add(callee.path);
       }
       planFlowMembersComplete = flow.membersComplete;
       if (!flow.calleesComplete) planCalleesComplete = false;
+      planUnresolvedCallees = flow.unresolvedCallees;
       if (flow.ungroundedTerms.length > 0) planUngroundedFlowTerms = flow.ungroundedTerms;
       // FIX-G: whether the focal calls ANYTHING (resolved or not) — decides
       // "no flow evidence resolved" (undetermined) vs a genuinely empty flow.
@@ -23976,6 +26907,7 @@ async function recoverFacetClosureCandidates(
       ...(planFocalMakesCalls !== undefined ? { focalMakesCalls: planFocalMakesCalls } : {}),
       ...(planFlowMembersComplete !== undefined ? { flowMembersComplete: planFlowMembersComplete } : {}),
       ...(planCalleesComplete === false ? { calleesComplete: false } : {}),
+      ...(planUnresolvedCallees !== undefined ? { unresolvedCallees: planUnresolvedCallees } : {}),
       ...(planUngroundedFlowTerms !== undefined ? { ungroundedFlowTerms: planUngroundedFlowTerms } : {}),
       ...(planUnclassifiedMentions !== undefined ? { unclassifiedMentions: planUnclassifiedMentions } : {}),
       ...(planUnclassifiedMentionsCapped === true ? { unclassifiedMentionsCapped: true } : {}),
@@ -23987,8 +26919,29 @@ async function recoverFacetClosureCandidates(
     const content = readCached(workspace, planPath, cache);
     if (content !== undefined) fileShas[planPath] = shaOfText(content);
   }
-  recordFacetPlan(facetPlanWorkspaceKey(workspace), { query, entries: planEntries, fileShas });
+  const plan: FacetPlan = { query, entries: planEntries, fileShas };
+  if (trial !== undefined) {
+    trial.plan = plan;
+    return { additions, outcomes, widenedPaths };
+  }
+  recordFacetPlan(facetPlanWorkspaceKey(workspace), plan);
   return { additions, outcomes, widenedPaths };
+}
+
+/**
+ * TL_EFF_MAP_ANSWER_FIRST: the dry run of the facet hook that decides whether an
+ * answer-first page is adopted (`recoverFacetClosureCandidates`' `trial`). It is the real
+ * hook run on COPIES of the selection (a requirement widens a candidate in place, and
+ * the next requirement is planned against the widened one — the copies keep that
+ * sequence, and the closure budget, exactly as the real run has them): it computes what
+ * the real hook computes — the focal of each requirement, its windows and call sites,
+ * the windows it serves — but changes none of the pack's candidates, does not count as a
+ * run of the hook and records no plan, so the ordinary request that follows it (when the
+ * page is not adopted) runs on the state a request without the flag would have.
+ */
+interface FacetClosureTrial {
+  readonly served: Array<{ path: string; start: number; end: number }>;
+  plan?: FacetPlan;
 }
 
 /**
@@ -24655,6 +27608,23 @@ function enumeratedItemCarriesCodeShape(query: string, item: EnumeratedQueryItem
   return false;
 }
 
+/** `workspaceDefinesIdentifier` === false for a member-only name, memoized like `identifierIsUngrounded`. */
+function memberReferenceIsUndefined(result: TaskPackResult, workspace: string | undefined, identifier: string): boolean {
+  if (workspace === undefined) return false;
+  let memo = identifierGroundingByResult.get(result);
+  if (memo === undefined) {
+    memo = { verdicts: new Map(), scans: 0 };
+    identifierGroundingByResult.set(result, memo);
+  }
+  const key = identifier.toLowerCase();
+  if (!memo.verdicts.has(key)) {
+    if (memo.scans >= MAX_IDENTIFIER_GROUNDING_SCANS) return false;
+    memo.scans += 1;
+    memo.verdicts.set(key, workspaceDefinesIdentifier(workspace, identifier));
+  }
+  return memo.verdicts.get(key) === false;
+}
+
 /**
  * The gate `buildReadinessObligations` consults: true when this identifier must
  * NOT mint a blocking obligation. Every early return is the conservative one
@@ -24917,6 +27887,10 @@ const enumeratedObligationSummaryCountedResults = new WeakSet<object>();
  */
 const MAX_TRACED_RECEIPT_REPAIR_CALL_IDS = 32;
 const receiptRepairTracedCallIds = new Set<number>();
+/** Test-only session reset: trace call ids restart with the counter (testing/sessionReset.ts). */
+export function resetReceiptRepairTraceOnceForTest(): void {
+  receiptRepairTracedCallIds.clear();
+}
 function shouldTraceReceiptRepairOnce(): boolean {
   const callId = currentTraceCallId();
   // Outside any runWithTraceCall scope (e.g. a direct unit call in a spec) —
@@ -25506,7 +28480,7 @@ function nextHintForCoverage(
   if (reason === "missing-roles" && missingRoles.length > 0) {
     return {
       tool: "tl_read_file",
-      arguments: { mode: "task_pack", query: continuationQuery(query), surfaceRoles: missingRoles },
+      arguments: { mode: "task_pack", query, surfaceRoles: missingRoles },
     };
   }
   if (reason === "concerns-uncovered" && unmatchedTokens.length > 0) {
@@ -25808,6 +28782,16 @@ function hasRequestedMutationIntent(query: string): boolean {
     || REQUESTED_MUTATION_JA_RE.test(positiveText)
     || REQUESTED_MUTATION_JA_LINE_RE.test(positiveText)
     || REQUESTED_MUTATION_JA_NOUN_RE.test(positiveText);
+}
+
+/**
+ * The request asks for a change: an EN mutation verb this file's own
+ * profile reader recognizes (`hasRequestedMutationIntent`: "Fix Sum so …"),
+ * or the explicit-path seeds' reading (requestItems.ts `queryAsksForChange`,
+ * which also takes the casual JA 「修正して、…」 and an object-free "Fix it.").
+ */
+function requestAsksForChange(query: string): boolean {
+  return hasRequestedMutationIntent(query) || queryAsksForChange(query);
 }
 
 function hasExplicitNoEditDeclaration(query: string): boolean {
@@ -26228,6 +29212,17 @@ const DEFECT_SYMPTOM_JA: readonly string[] = [
   "抜け", "漏れ", "無視", "重複", "二重", "遅い", "固まる", "されない", "ならない", "はず", "できない", "出ない", "消え", "消える", "返らない", "効かない", "反映されない",
 ];
 
+/**
+ * The request names its deliverable as an answer and only an answer: "Return
+ * only a JSON object", "Respond only with …", "Answer with …", "Use keys a and
+ * b", 「JSON だけで返して」. See `bindTaskProfile`'s §14 branch.
+ */
+const ANSWER_ONLY_DELIVERABLE_EN_RE = /\b(?:return|respond|reply|answer|output)\s+(?:with\s+)?only\b|\b(?:return|respond|reply|answer)\s+(?:with\s+)?(?:a|an|the)?\s*json\b|\buse\s+(?:the\s+)?keys?\s+[\w"'`]+/i;
+const ANSWER_ONLY_DELIVERABLE_JA_RE = /JSON\s*(?:のみ|だけ)\s*(?:で|を)?\s*(?:返|答|回答|出力)|(?:回答|答え)\s*(?:のみ|だけ)\s*(?:を)?\s*(?:返|出力)/;
+function hasAnswerOnlyDeliverable(query: string): boolean {
+  return ANSWER_ONLY_DELIVERABLE_EN_RE.test(query) || ANSWER_ONLY_DELIVERABLE_JA_RE.test(query);
+}
+
 function hasDefectSymptomMarker(query: string): boolean {
   return DEFECT_SYMPTOM_EN_RE.test(query)
     || DEFECT_SYMPTOM_JA.some((marker) => query.includes(marker));
@@ -26333,7 +29328,15 @@ function bindTaskProfile(
     const explicitNoEdit = hasExplicitNoEditDeclaration(query);
     const interrogativeAnswer = inferred === "answer" && hasInterrogativeAnswerMarker(query);
     const defectSymptom = inferred === "answer" && hasDefectSymptomMarker(query);
-    const honorInferredAnswer = explicitNoEdit || (interrogativeAnswer && !defectSymptom);
+    // 2026-10-17 (DESIGN-v0.14-plan §20.10): a question that restricts its own
+    // deliverable to an answer ("Return only a JSON object", "Use keys errors
+    // and sources") and asks no change is read-only even when it NAMES error
+    // values ("which sentinel error does each failing check return") — the
+    // guardrail's misfires were bug reports that wanted a fix, never ones that
+    // dictated an answer format. Measured: a solver dropped the request's
+    // "Do not modify files" sentence and the pack fell back to generic (M1).
+    const answerOnlyDeliverable = defectSymptom && hasAnswerOnlyDeliverable(query) && !hasRequestedMutationIntent(query);
+    const honorInferredAnswer = explicitNoEdit || (interrogativeAnswer && (!defectSymptom || answerOnlyDeliverable));
     const selected = inferred === "answer" && !honorInferredAnswer ? "generic" : inferred;
     return {
       requested: "auto",
@@ -26348,7 +29351,7 @@ function bindTaskProfile(
       reason: inferred === "answer" && selected === "generic"
         ? "answer-shaped query served as generic per §14 misfire guardrail; declare task.profile:\"answer\" for a read-only pack"
         : inferred === "answer" && selected === "answer" && !explicitNoEdit
-          ? "answer-shaped query with no mutation or defect-symptom marker; declare task.profile to override"
+          ? "answer-shaped read-only query; task.profile overrides"
           : selected === "generic"
             ? "no high-confidence task-shape marker"
             : `query matched ${selected}`,
@@ -26592,7 +29595,7 @@ function buildRoute(
     && (surface.content_completeness === "partial" || (surface.remaining_ranges?.length ?? 0) > 0)
   ).length;
   const zoomNote = partialRequired > 0
-    ? `${partialRequired} surface(s) have remaining_ranges (re-slice to zoom, or ONE tl_read_file {targets:[{handle}], content:"full"} when most of the file is needed)`
+    ? `${partialRequired} surface(s) have remaining lines (re-slice to zoom, or ONE tl_read_file {targets:[{handle}], content:"full"} when most of the file is needed)`
     : undefined;
   const doneRoute = (reason: string): NonNullable<TaskPackResult["route"]> =>
     zoomNote !== undefined
@@ -27534,6 +30537,129 @@ function filesNamedByPathToken(token: string, walked: readonly string[], query: 
   const words = new Set(query.toLowerCase().split(/[^\p{L}\p{N}_-]+/u).filter((word) => word.length >= 3));
   const mentioned = matches.filter((rel) => dirsOf(rel).some((segment) => !shared.has(segment) && words.has(segment)));
   return mentioned.length === 1 ? mentioned : matches;
+}
+
+interface NamedCallableDefinitions {
+  /** The explicit identifier the located file defines. */
+  readonly identifier: string;
+  /** The located file first, then every other implementation file defining it. */
+  readonly paths: readonly string[];
+  /** Every implementation file spelling the name was checked. */
+  readonly complete: boolean;
+}
+
+/**
+ * The implementation files that define the first callable `query` names
+ * explicitly (`explicitCodeIdentifiers`) which `relPath` defines: `relPath`
+ * first, then the others. Two packages that both define `Sum` leave a bare
+ * `Sum` ambiguous.
+ *
+ * `complete` is false past the readiness probe's own budgets
+ * (`READINESS_PROBE_MAX_FILES` / `_BYTES`) or for an unreadable file, so a
+ * caller never reads "unique" into a probe that stopped early. The definition
+ * test is the name's own (`definedCallableNames`' two shapes, not that
+ * helper's first-twelve-names list); a method of that name or a call before a
+ * block also satisfies it, which only withholds a uniqueness claim.
+ */
+async function namedCallableDefinitions(
+  query: string,
+  workspace: string,
+  relPath: string,
+  cache: FileReadCache,
+): Promise<NamedCallableDefinitions | undefined> {
+  const content = readCached(workspace, relPath, cache);
+  if (content === undefined) return undefined;
+  // A prose-cased name ("Fix Sum so …") is no explicit identifier, but a
+  // callable of the located file spelled exactly so in the middle of a clause
+  // is the one the request means (`editContextCandidates`' `spelled` rule;
+  // requestItems.ts's `capitalizationNamesSubject` keeps a sentence's opening
+  // verb, "Add a check …", out).
+  const lang = languageForPath(relPath);
+  const lines = content.split(/\r?\n/);
+  const spelled = lang === undefined ? [] : ((await cache.parsedSymbols(content, lang, relPath)) ?? [])
+    .filter((symbol) => symbolIsCallable(symbol, lines, hasHashComments(relPath)))
+    .map((symbol) => unqualifiedSymbolTail(symbol.name))
+    .filter((name) => name.length >= 3
+      && new RegExp(`(?<![A-Za-z0-9_$])${escapeRegExp(name)}(?![A-Za-z0-9_$])`).test(query)
+      && capitalizationNamesSubject(name, query));
+  for (const identifier of [...new Set([...explicitCodeIdentifiers(query), ...spelled])].slice(0, 4)) {
+    const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const defines = new RegExp(
+      `\\b(?:def|fn|func|function)\\s+${escaped}\\s*\\(|(?<![A-Za-z0-9_$.])${escaped}\\s*\\([^;{}]*\\)\\s*(?:const\\s*)?\\{`,
+    );
+    if (!defines.test(relationCodeOnly(content))) continue;
+    let mentioning: string[];
+    try {
+      mentioning = [...new Set(scanLiteral(identifier, workspace, { caseInsensitive: false }).map((match) => match.path))]
+        .filter((candidate) => candidate !== relPath && isImplementationPath(candidate));
+    } catch {
+      return { identifier, paths: [relPath], complete: false };
+    }
+    const paths = [relPath];
+    let complete = mentioning.length < READINESS_PROBE_MAX_FILES;
+    let bytes = 0;
+    for (const other of mentioning.slice(0, READINESS_PROBE_MAX_FILES)) {
+      const text = readCached(workspace, other, cache);
+      if (text === undefined) {
+        complete = false;
+        continue;
+      }
+      bytes += Buffer.byteLength(text, "utf8");
+      if (bytes > READINESS_PROBE_MAX_BYTES) {
+        complete = false;
+        break;
+      }
+      if (defines.test(relationCodeOnly(text))) paths.push(other);
+    }
+    return { identifier, paths, complete };
+  }
+  return undefined;
+}
+
+/** How many other files defining the named callable are served beside the located one. */
+const MAX_SAME_NAME_DEFINITION_CANDIDATES = 3;
+const SAME_NAME_DEFINITION_MAX_WINDOW_BYTES = 2_000;
+
+/**
+ * Serves each other file whose PARSED symbols declare the named callable as a
+ * candidate of the pack's choice (`why: "same-name definition: <name>"`), and
+ * drops the located file's edit context, which belongs to one of the choices.
+ * A file whose spelling only looked like a definition (a call before a block)
+ * is no candidate.
+ */
+async function addSameNameDefinitionCandidates(
+  surfaces: TaskPackSurface[],
+  definitions: NamedCallableDefinitions,
+  workspace: string,
+  requiredRoles: string[],
+  query: string,
+  cache: FileReadCache,
+): Promise<void> {
+  const added: TaskPackSurface[] = [];
+  for (const other of definitions.paths.slice(1)) {
+    if (added.length >= MAX_SAME_NAME_DEFINITION_CANDIDATES) break;
+    if (surfaces.some((surface) => surface.path === other && !String(surface.why ?? "").startsWith("edit-context:"))) continue;
+    const content = readCached(workspace, other, cache);
+    const lang = languageForPath(other);
+    if (content === undefined || lang === undefined) continue;
+    const lines = content.split(/\r?\n/);
+    const symbol = ((await cache.parsedSymbols(content, lang, other)) ?? []).find((entry) =>
+      unqualifiedSymbolTail(entry.name) === definitions.identifier && symbolIsCallable(entry, lines, hasHashComments(other)));
+    if (symbol === undefined) continue;
+    if (Buffer.byteLength(lines.slice(symbol.startLine - 1, symbol.endLine).join("\n"), "utf8") > SAME_NAME_DEFINITION_MAX_WINDOW_BYTES) continue;
+    const surface = await candidateToSurface({
+      path: other, line: symbol.startLine, range: `${symbol.startLine}-${symbol.endLine}`, callerRange: true,
+      symbol: definitions.identifier, surface: "unknown", why: `same-name definition: ${definitions.identifier}`,
+      confidence: Math.max(HIGH_CONFIDENCE_THRESHOLD, 0.9), required: true,
+    }, workspace, requiredRoles, query, cache);
+    if (!hasServedCode(surface)) continue;
+    added.push(surface);
+  }
+  if (added.length === 0) return;
+  for (let index = surfaces.length - 1; index >= 0; index--) {
+    if (String(surfaces[index]!.why ?? "").startsWith("edit-context:")) surfaces.splice(index, 1);
+  }
+  surfaces.push(...added);
 }
 
 /**
@@ -29015,7 +32141,7 @@ function editIntentForRole(query: string, role: string, why?: string): string {
   // enum-like branches below so it always wins for this why, not just when
   // role happens to be "api".
   if (why === "exhaustive-initializer") {
-    return "update exhaustive initializer/aggregation maps";
+    return "extend the existing exhaustive map with the new value; keep the local form. New runtime symbol uses need value bindings/imports in the same edit batch (import type provides no value)";
   }
   if (why === "concern-causal-layer") {
     return "this surface is the causal layer of the concern named in the task; fix the root cause here rather than compensating downstream, keeping this layer's state and units consistent";
@@ -29025,7 +32151,7 @@ function editIntentForRole(query: string, role: string, why?: string): string {
 
   if (isEnumLikeQuery(query)) {
     if (role === "contract") return "add the value to exported enum/type/schema contracts";
-    if (role === "api") return "update validation, transitions, repository/search, and aggregation enumerations";
+    if (role === "api") return "extend validation/aggregation maps; runtime enumeration needs a value binding/import in this batch (import type provides no value)";
     if (role === "ui") return "update badges, filters, forms, and rendered labels for the value";
     if (role === "style") return "add matching design tokens and class/style mappings for the value";
   }
@@ -30262,6 +33388,24 @@ function hasServedCode(surface: TaskPackSurface): boolean {
  * refuses a surface carrying `code_unchanged`).
  */
 function shippedSurfaces(result: TaskPackResult): TaskPackSurface[] {
+  // v0.16.0 release verification (T22): the auxiliary enum-context exclusion
+  // lives HERE, in the one projection, so the booking pass keeps its single
+  // `const shipped = shippedSurfaces(returned);` form and the answer pack's
+  // post-augmenter re-booking (the second call site) cannot disagree with it
+  // about which rows are primary. Auxiliary rows do not become cumulative role
+  // coverage, a certified working set or primary edit bookings; their exact
+  // served range is captured on another path (`recordPackServedRanges`) and
+  // `captureServedPack` retains their actual source.
+  return primaryEnumContextRows(servedBodySurfaces(result));
+}
+
+/**
+ * `shippedSurfaces` before the auxiliary-row exclusion: every code surface that
+ * ships a body (or a `code_unchanged` restatement). Private to
+ * `shippedSurfaces` -- a consumer calls THAT, never this, so there is still one
+ * answer to "what did this response ship".
+ */
+function servedBodySurfaces(result: TaskPackResult): TaskPackSurface[] {
   return codeTaskPackSurfaces(result.surfaces).filter(hasServedCode);
 }
 
@@ -32356,6 +35500,11 @@ export function semanticConstructionHubExcerpt(
   anchorLines: readonly number[],
 ): { code: string; remaining_ranges: string[]; edit_hunk_ranges?: string[] } | undefined {
   const lines = source.split(/\r?\n/);
+  // 2026-10-19 (DESIGN-v0.14-plan.md §20.26): split() leaves a phantom empty
+  // element after a trailing newline, so every 6t-4/6t-5 T13 first pack
+  // disclosed `478-504` for the 503-line tasks_init.cpp. countLines is the
+  // line count every other read path uses.
+  lines.length = Math.min(lines.length, countLines(source));
   if (lines.length === 0) return undefined;
   // Wave 4 (2026-07-24 T13 forensics): the globals center matched the FIRST
   // /global instances/i line — in real firmware hubs that is a mention inside
@@ -32408,7 +35557,7 @@ export function semanticConstructionHubExcerpt(
     ]);
     const code = merged.map((range, index) => {
       const prefix = index === 0
-        ? "// TL hub excerpt; omitted ranges listed in remaining_ranges (zoom: ONE tl_read_file {targets:[{handle}], content:\"full\"} beats repeated re-slices when you need most of the file)\n"
+        ? "// TL hub excerpt; omitted ranges listed in remaining (zoom: ONE tl_read_file {targets:[{handle}], content:\"full\"} beats repeated re-slices when you need most of the file)\n"
         : `// TL omitted lines before L${range.start}\n`;
       // A2: only the LANDING-REGION sub-span of a window is served verbatim —
       // the rest of that window keeps the elided representation it always had.
@@ -32749,6 +35898,21 @@ function buildSemanticTaskWiringProfile(
   }
   sourceSurface.required = true;
   adapterSurface.required = true;
+  // A constructed receiver may instead live inside the host object, whose
+  // input handlers see each sample once (the resolver's required_action). Its
+  // implementation is then review evidence, a window at the input handler,
+  // and an alternate site for the receiver checks. Optional: added only while
+  // the surface cap has room, so it never displaces a certified surface.
+  const hostImplementationPath = resolution.host.implementationPath;
+  const hostImplementationAnchor = resolution.host.implementationAnchor;
+  const hostImplementationSurface = !isConstructReceiver
+    || hostImplementationPath === undefined
+    || hostImplementationAnchor === undefined
+    ? undefined
+    : surfaces.find((surface) => surface.path === hostImplementationPath)
+      ?? (surfaces.length < MAX_SEMANTIC_WIRING_SURFACES
+        ? ensure(hostImplementationPath, hostImplementationAnchor, false, reviewEvidenceBytes, 0)
+        : undefined);
   const consumerSurface = surfaces.find((surface) => surface.path === resolution.consumer.path);
   const insertionSurface = surfaces.find((surface) => surface.path === resolution.insertion.path);
   const hostSurface = surfaces.find((surface) => surface.path === resolution.host.path);
@@ -32901,6 +36065,13 @@ function buildSemanticTaskWiringProfile(
   const reviewFrontier = reviewSurfaces
     .filter((surface): surface is TaskPackSurface => surface !== undefined)
     .map((surface) => surface.handle);
+  if (
+    hostImplementationSurface !== undefined
+    && !editFrontier.includes(hostImplementationSurface.handle)
+    && !reviewFrontier.includes(hostImplementationSurface.handle)
+  ) {
+    reviewFrontier.push(hostImplementationSurface.handle);
+  }
   // R5 (2026-08-01, wont-fix): the K2 relevance gate's precise-diff
   // `changedIdentifiers` threading (server.ts buildVerificationBody) is
   // deliberately NOT wired here — no edit args exist at pack time, and this
@@ -32951,12 +36122,18 @@ function buildSemanticTaskWiringProfile(
   // only a manifest with a workspace-proven runnable entry can satisfy that
   // demand, so a recipe containing only gaps never reaches this contract.
   const completionVerification = completionRecipe ?? harnessEntryRecipe(completionManifest, resolution.editPaths);
-  const structuralChecks = resolution.structuralChecks?.map((check) => ({
-    id: check.id,
-    description: check.description,
-    handle: surfaces.find((surface) => surface.path === check.path)!.handle,
-    tokens: check.tokens,
-  }));
+  const structuralChecks = resolution.structuralChecks?.map((check) => {
+    const alternateHandles = (check.alternatePaths ?? [])
+      .map((alternate) => surfaces.find((surface) => surface.path === alternate)?.handle)
+      .filter((handle): handle is string => handle !== undefined);
+    return {
+      id: check.id,
+      description: check.description,
+      handle: surfaces.find((surface) => surface.path === check.path)!.handle,
+      ...(alternateHandles.length > 0 ? { alternate_handles: alternateHandles } : {}),
+      tokens: check.tokens,
+    };
+  });
   return {
     version: 1,
     strategy: "semantic-multihop",
@@ -33039,9 +36216,16 @@ function semanticCompletionCheckRecords(
     : [];
   return checks.map((check) => {
     const path = surfaces.find((surface) => surface.handle === check.handle)?.path;
+    // An alternate whose surface is not served is dropped, never widened to
+    // "any file": an unresolved alternate keeps the check as strict as its
+    // primary file.
+    const altGlobs = (check.alternate_handles ?? [])
+      .map((handle) => surfaces.find((surface) => surface.handle === handle)?.path)
+      .filter((alternate): alternate is string => alternate !== undefined && alternate !== path);
     const draft: Omit<PackCheckRecord, "id"> = {
       desc: check.description,
       ...(path !== undefined ? { glob: path } : {}),
+      ...(path !== undefined && altGlobs.length > 0 ? { altGlobs } : {}),
       allTokens: check.tokens,
       role: "wiring",
     };
@@ -33376,7 +36560,7 @@ interface WriteAuthorityVeto {
  * request's wording does ask to edit it), so the veto names the ambiguity
  * instead of mislabelling it.
  */
-type WriteAuthorityVetoReason = "read-lead" | "token-match-only" | "nul-stripped" | "unresolved-alternative";
+type WriteAuthorityVetoReason = "read-lead" | "token-match-only" | "nul-stripped" | "unresolved-alternative" | "edit-context" | "enum-derived";
 
 function writeAuthorityVeto(query: string, editObserved = false): WriteAuthorityVeto {
   const leads = requestItemLeads(query);
@@ -33409,6 +36593,10 @@ function writeAuthorityVeto(query: string, editObserved = false): WriteAuthority
       // authority was earned), so certifying it would still promise an edit the
       // only sanctioned transition always refuses (BLOCKER 62).
       if (editObserved) return surfaceServedNulStripped(why) ? "nul-stripped" : undefined;
+      // Served as a dependency of the located edit target (editContextCandidates).
+      if (why?.startsWith(EDIT_CONTEXT_WHY) === true) return "edit-context";
+      // Served to discharge a listed scope item (accountForListedScopeItems).
+      if (why?.startsWith(LISTED_ITEM_DERIVED_WHY) === true) return "enum-derived";
       if (alternatives.has(path)) return "unresolved-alternative";
       if (readOnlyLeadPaths.has(path)) return "read-lead";
       if (surfaceServedNulStripped(why)) return "nul-stripped";
@@ -33429,6 +36617,10 @@ const WRITE_AUTHORITY_VETO_REASON: Readonly<Record<WriteAuthorityVetoReason, str
     "a query token matched an identifier here; this request never names this file as a change target, so it is discovery evidence, not a write target",
   "nul-stripped":
     "served with NUL characters stripped, so it cannot be written back without losing them: re-save this file as UTF-8 before editing it",
+  "edit-context":
+    "served as a definition the edit target depends on, so you need not look it up; it is context, not a change target",
+  "enum-derived":
+    "served for a place the request lists: it enumerates the enum as a whole, so the new value reaches it without an edit",
 };
 
 function buildTaskChangeContract(
@@ -33437,7 +36629,10 @@ function buildTaskChangeContract(
   workspace: string,
 ): TaskChangeContract {
   suppressFragmentOnlyFilenameMatches(workspace, query, result.surfaces as TaskPackResultSurface[]);
-  const allSurfaces = codeTaskPackSurfaces(result.surfaces);
+  // Artifact consumers are context the target's code will use, never change
+  // obligations of their own (a consumer named like a query word would
+  // otherwise turn into a required edit).
+  const allSurfaces = codeTaskPackSurfaces(result.surfaces).filter((surface) => !isArtifactConsumerSurface(surface) && !isAuxiliaryEnumSurface(surface));
   const wiringFrontier = result.wiring?.status === "ready"
     ? new Set([...result.wiring.edit_frontier, ...result.wiring.review_frontier])
     : undefined;
@@ -33484,6 +36679,9 @@ function buildTaskChangeContract(
   // exists to prevent): a §4.2 task would otherwise certify a writable
   // `action_frontier` while its own `change_contract` said `action:"review"`.
   const veto = writeAuthorityVeto(query, getIntentEditObserved(workspace));
+  // A row that only discharges a listed item needs no edit, so no edit
+  // obligation waits on it (accountForListedScopeItems).
+  const dischargeOnly = new Set<string>();
 
   const obligations: TaskChangeObligation[] = surfaces.map((surface, index) => {
     const basename = path.basename(surface.path).replace(/\.[^.]+$/, "");
@@ -33495,6 +36693,7 @@ function buildTaskChangeContract(
     // exactly the reason `readLedExplicitly` already is: a wiring pack's
     // `edit_frontier` is a separate, call-graph-proved mechanism.
     const vetoReason = connection === undefined ? veto.reasonFor(surface.path, surface.why) : undefined;
+    if (vetoReason === "enum-derived") dischargeOnly.add("o" + (index + 1));
     const editRequired = vetoReason === undefined && (
       connection !== undefined
         ? wiringDestination
@@ -33546,11 +36745,15 @@ function buildTaskChangeContract(
     };
   });
 
-  const definitions = obligations.filter((item) => item.kind === "definition").map((item) => item.id);
-  const integrations = obligations
-    .filter((item) => ["implementation", "integration", "persistence"].includes(item.kind))
+  const definitions = obligations
+    .filter((item) => item.kind === "definition" && !dischargeOnly.has(item.id))
     .map((item) => item.id);
-  const presentations = obligations.filter((item) => item.kind === "presentation").map((item) => item.id);
+  const integrations = obligations
+    .filter((item) => ["implementation", "integration", "persistence"].includes(item.kind) && !dischargeOnly.has(item.id))
+    .map((item) => item.id);
+  const presentations = obligations
+    .filter((item) => item.kind === "presentation" && !dischargeOnly.has(item.id))
+    .map((item) => item.id);
   const editIds = obligations.filter((item) => item.action === "edit").map((item) => item.id);
   for (const obligation of obligations) {
     if (obligation.kind === "integration" && sourceHandle !== undefined) {
@@ -34308,7 +37511,7 @@ function enumeratedItemFacetFromId(id: string): string | undefined {
 }
 
 function currentEnumeratedQueryItems(query: string): EnumeratedQueryItem[] {
-  const cleaned = stripPathSpans("", query);
+  const cleaned = stripPathSpans("", maskCitationFormatFields(maskEvaluationInputRecords(query)));
   const split = new RegExp(`${ENUMERATION_LIST_MARKER_RE.source}|${ENUMERATION_SEPARATOR_RE.source}`, "giu");
   const segments: Array<{ text: string; start: number; end: number }> = [];
   let cursor = 0;
@@ -34375,13 +37578,18 @@ function currentEnumeratedQueryItems(query: string): EnumeratedQueryItem[] {
   return items.length >= ENUMERATED_QUERY_MIN_FACETS ? items.slice(0, ENUMERATED_QUERY_MAX_FACETS) : [];
 }
 
-function enumeratedQueryItemsForEpoch(query: string, workspace?: string): EnumeratedQueryItem[] {
+function enumeratedQueryItemsForEpoch(
+  query: string,
+  workspace?: string,
+  priorConcernTokens?: readonly string[],
+): EnumeratedQueryItem[] {
   const items = currentEnumeratedQueryItems(query);
-  if (workspace === undefined) return items;
-  const stored = queryTaskContract(workspace, tokenizeForEpoch(query));
-  if (stored === undefined) return items;
+  if (workspace === undefined && priorConcernTokens === undefined) return items;
+  const storedConcernTokens = priorConcernTokens ?? (workspace === undefined
+    ? []
+    : queryTaskContract(workspace, tokenizeForEpoch(query))?.concernTokens ?? []);
   const byId = new Map(items.map((item) => [item.id, item]));
-  for (const id of stored.concernTokens) {
+  for (const id of storedConcernTokens) {
     const facet = enumeratedItemFacetFromId(id);
     if (facet === undefined || byId.has(id)) continue;
     byId.set(id, { facet, id, start: -1, end: -1 });
@@ -34849,6 +38057,7 @@ function runInternalReadinessFalsification(
     .filter((token) => token.length >= 4 && !READINESS_PROBE_GENERIC_TOKENS.has(token))
     .slice(0, 10);
   const explicitIdentifiers = explicitCodeIdentifiers(query).map((identifier) => identifier.toLowerCase());
+  const qualifiedOnlyMembers = packageQualifiedOnlyMembers(query);
   const connection = result.wiring?.connections[0];
   const endpointTokens = [connection?.source?.token, connection?.destination?.token]
     .filter((token): token is string => typeof token === "string" && token.length > 0);
@@ -34941,7 +38150,12 @@ function runInternalReadinessFalsification(
     // `PipelineConfigHeader` interface ("pipelineconfig" from the file name)
     // instead of the named `finalizeShutdownSequence`, and so needed two more
     // calls to answer.
-    const matchedIdentifiers = explicitIdentifiers.filter((identifier) => containsWholeIdentifier(lower, identifier));
+    // A `meter.Sum` request is not contradicted by `stats.Sum`
+    // (`identifierHitMeansRequestedMember`).
+    const matchedIdentifiers = explicitIdentifiers.filter((identifier) =>
+      containsWholeIdentifier(lower, identifier)
+      && identifierHitMeansRequestedMember(identifier, filePath, lower, qualifiedOnlyMembers)
+    );
     const identifierHit = matchedIdentifiers.length > 0;
     const endpointHit = endpointTokens.some((token) => lower.includes(token.toLowerCase()));
     // Once a file already contributes an action surface, generic lexical
@@ -35361,6 +38575,7 @@ function closureAlreadyExecuted(
 /** Test-only: forget every executed-call token (specs start from a clean slate). */
 export function resetClosureExecutedCallsForTest(): void {
   closureExecutedCallsByToken.clear();
+  closureExecutedTokenCounter = 0;
 }
 
 function closureCallSignature(call: ContinuationCall): string {
@@ -41628,12 +44843,40 @@ function reconcileAnalysisSourceFromFacets(
 
 /** A facet `next` asks for no more window bytes than this share of the call's byte ceiling (the follow-up runs under the same client ceiling) — always at least one window, the rest ride later hops. */
 const FACET_NEXT_CEILING_SHARE = 0.75;
-/** The ceiling assumed for sizing a facet `next` when no caller/client ceiling is active (the default ladder's lowest step). */
+/** The ceiling assumed for sizing a facet `next` when no caller/client ceiling is active (the default ladder's lowest step), and the most a map continuation page is sized for under a higher one (`mergeFacetGap`). */
 const FACET_NEXT_DEFAULT_CEILING = 24576;
+/**
+ * From this ceiling up, the open windows of a short, map-shaped answer are asked
+ * for in batches sized to the ceiling (`mergeFacetGap`'s `mapBatch`: up to
+ * FACET_NEXT_MAX_TARGETS windows, each priced as the row it will ship, within the
+ * ceiling less the envelope): the Copilot CLI's 18,432 B, where the batches were
+ * measured. Below it they are asked for MAX_REQUEST_ITEM_BATCH at a time within
+ * three quarters of the ceiling, measured in source bytes — except for the
+ * follow-up a pack that serves a structure map issues (`servesStructureMap`).
+ */
+const FACET_NEXT_MAP_BATCH_MIN_CEILING_BYTES = 18 * 1024;
+
+/**
+ * Whether the pack in progress runs under a ceiling from which a map's owed
+ * windows are served in batches (`FACET_NEXT_MAP_BATCH_MIN_CEILING_BYTES`).
+ * Every pack without a ceiling does. `structureMapForAnswer` admits only a page
+ * that holds the map's skeleton below it.
+ */
+function mapContinuationBatched(): boolean {
+  return (activePackByteCeiling() ?? FACET_NEXT_DEFAULT_CEILING) >= FACET_NEXT_MAP_BATCH_MIN_CEILING_BYTES;
+}
+
+/** True when `surfaces` serve a structure map (`renderStructureMapSurface`): a surface whose rows ride as appended `structure map (a-b)` windows. */
+function servesStructureMap(surfaces: readonly TaskPackSurface[]): boolean {
+  return surfaces.some(surface => surface.appended_windows?.some(window => window.marker.startsWith("\n\n/* structure map (")) === true);
+}
+
+/** Tiny disjoint facet windows share one model turn; wire bytes still bound the page. */
+const FACET_NEXT_MAX_TARGETS = 64;
 
 /**
  * The request-item gap with every OPEN facet's exact windows appended
- * (query-bearing, ranged, ≤ MAX_REQUEST_ITEM_BATCH targets), sized so the
+ * (query-bearing, ranged, ≤ FACET_NEXT_MAX_TARGETS targets), sized so the
  * follow-up response fits the same byte ceiling this call runs under:
  * a caller-ranged follow-up serves what it names, so an over-long batch would
  * ship above a client's ceiling rather than page (measured: a 10-constant
@@ -41646,6 +44889,8 @@ function mergeFacetGap(
   facets: FacetReadiness | undefined,
   query: string,
   workspace: string | undefined,
+  surfaces: readonly TaskPackSurface[] = [],
+  answerTask = false,
 ): RequestItemReadiness["gap"] {
   if (facets === undefined || facets.openTargets.length === 0 || workspace === undefined) return gap;
   const openIds = facets.entries.filter((entry) => entry.status === "open").map((entry) => `facet-${entry.label}`);
@@ -41653,7 +44898,32 @@ function mergeFacetGap(
   const keyOf = (target: { path: string; range?: string }): string => `${target.path}\u0000${target.range ?? ""}`;
   const seen = new Set(baseTargets.map(keyOf));
   const targets = [...baseTargets];
-  const byteBudget = Math.floor((activePackByteCeiling() ?? FACET_NEXT_DEFAULT_CEILING) * FACET_NEXT_CEILING_SHARE);
+  // A pack that serves a structure map asks for its owed windows in batches under any
+  // ceiling (`structureMapForAnswer` admitted the page expecting it). The bounded
+  // served-pack record carries that hint through every same-query follow-up.
+  const mapBatch = answerTask && effStructureMapEnabled() && asksForStructureMap(query)
+    && (mapContinuationBatched() || servesStructureMap(surfaces) || structureMapChainWasServed(workspace, query));
+  const tinyWindows = mapBatch || effStructureMapEnabled() && asksForStructureMap(query)
+    && mapContinuationBatched()
+    && facets.openTargets.every(target => {
+    const bounds = /^(\d+)-(\d+)$/.exec(target.range);
+    const content = readCached(workspace, target.path);
+    return bounds !== null && content !== undefined
+      && Buffer.byteLength(sliceLinesToText(content, Number(bounds[1]), Number(bounds[2])), "utf8") <= MAX_SURFACE_CODE_BYTES;
+  });
+  // Map continuations estimate each source row with its actual body policy
+  // and address cost. Reserve the small continuation envelope separately;
+  // the final wire packer still enforces the unchanged client ceiling.
+  const ceiling = activePackByteCeiling() ?? FACET_NEXT_DEFAULT_CEILING;
+  // A page of owed windows is held to the code tier of the pack cap (27,648
+  // bytes) whatever the client's ceiling is, and its own decision, contract and
+  // `next` take about 3 KiB of that: windows asked past ~24.5 KB are trimmed or
+  // shed, and the tail of the member the first page cut goes out alone before
+  // the rest (T03 under an explicit `budget.bytes` of 28,000 and more cost one
+  // or two replies more than pages that fit). The default ceiling is that
+  // measure, so a ceiling above it buys no larger page.
+  const pageCeiling = Math.min(ceiling, FACET_NEXT_DEFAULT_CEILING);
+  const byteBudget = mapBatch ? pageCeiling - 2048 : Math.floor(ceiling * FACET_NEXT_CEILING_SHARE);
   // R2-T1 (eval-0929 review P0-3, orchestrator ruling rule 2): the largest
   // window ONE follow-up surface carries whole (the per-surface code cap) — the
   // rest of a long condition / flow focal is larger than that, and asked for
@@ -41663,40 +44933,107 @@ function mergeFacetGap(
   // the follow-up cannot carry whole under a small ceiling is paged by the
   // gate's ordinary open -> `next` on the hop after, exactly as before.
   const pieceBytes = MAX_SURFACE_CODE_BYTES;
-  let bytes = 0;
-  let added = 0;
-  for (const target of facets.openTargets) {
+  let bytes = tinyWindows ? baseTargets.reduce((total, target) => {
+    const bounds = /^(\d+)-(\d+)$/.exec(target.range ?? "");
+    const content = readCached(workspace, target.path);
+    if (bounds === null || content === undefined) return total + 256;
+    return total + estimateStructureMapReplyBytes(target.path, content.split(/\r?\n/),
+      [{ start: Number(bounds[1]), end: Number(bounds[2]) }], []) - STRUCTURE_MAP_ENVELOPE_RESERVE_BYTES;
+  }, 0) : 0;
+  let added = tinyWindows ? baseTargets.length : 0;
+  // Blank-only gaps add no new behavioral scope; carrying their actual bytes
+  // avoids paying a complete evidence envelope for each tiny source fragment.
+  const openTargets = tinyWindows
+    ? coalesceBlankGapWindows(facets.openTargets, path => readCached(workspace, path), pieceBytes)
+    : facets.openTargets;
+  for (const target of openTargets) {
     if (seen.has(keyOf(target))) continue;
     const bounds = /^(\d+)-(\d+)$/.exec(target.range);
     const content = readCached(workspace, target.path);
     const windowBytes = bounds !== null && content !== undefined
       ? Buffer.byteLength(sliceLinesToText(content, Number(bounds[1]), Number(bounds[2])), "utf8")
       : 0;
-    if (added > 0 && bytes + windowBytes > byteBudget) break;
+    const wireBytes = !tinyWindows ? windowBytes : bounds !== null && content !== undefined
+      ? estimateStructureMapReplyBytes(target.path, content.split(/\r?\n/), [{ start: Number(bounds[1]), end: Number(bounds[2]) }], []) - STRUCTURE_MAP_ENVELOPE_RESERVE_BYTES
+      : windowBytes + 256;
+    if (mapBatch && bounds !== null && content !== undefined) {
+      seen.add(keyOf(target));
+      const lines = content.split(/\r?\n/);
+      let cursor = Number(bounds[1]);
+      const end = Number(bounds[2]);
+      while (cursor <= end && targets.length < FACET_NEXT_MAX_TARGETS) {
+        const first = byteBoundedLinePieces(content, cursor, end, pieceBytes)[0];
+        if (first === undefined) break;
+        let low = cursor, high = first.end, best = cursor - 1, cost = 0;
+        while (low <= high) {
+          const middle = Math.floor((low + high) / 2);
+          const needed = estimateStructureMapReplyBytes(target.path, lines, [{start: cursor, end: middle}], [])
+            - STRUCTURE_MAP_ENVELOPE_RESERVE_BYTES;
+          if (bytes + needed <= byteBudget) {best = middle; cost = needed; low = middle + 1;}
+          else high = middle - 1;
+        }
+        if (best < cursor) break;
+        targets.push({path: target.path, range: cursor + "-" + best});
+        bytes += cost; added++;
+        cursor = best + 1;
+      }
+      continue; // Undelivered suffixes stay open in the same facet ledger.
+    }
+    if (added > 0 && bytes + wireBytes > byteBudget) {
+      if (tinyWindows) continue; // Leave this window owed; later small windows can still fit.
+      break;
+    }
     if (bounds !== null && content !== undefined && windowBytes > pieceBytes) {
       // R2-T1: an oversized window is named as consecutive pieces, each one a
       // follow-up surface carries whole, as many as the budget holds (always
       // the first) — the gate names the unserved rest again on the next hop.
       seen.add(keyOf(target));
       for (const piece of byteBoundedLinePieces(content, Number(bounds[1]), Number(bounds[2]), pieceBytes)) {
-        if (added > 0 && bytes + piece.bytes > byteBudget) break;
-        bytes += piece.bytes;
+        const wirePieceBytes = !tinyWindows ? piece.bytes : estimateStructureMapReplyBytes(target.path, content.split(/\r?\n/), [piece], []) - STRUCTURE_MAP_ENVELOPE_RESERVE_BYTES;
+        if (added > 0 && bytes + wirePieceBytes > byteBudget) break;
+        bytes += wirePieceBytes;
         added += 1;
         targets.push({ path: target.path, range: `${piece.start}-${piece.end}` });
       }
       continue;
     }
-    bytes += windowBytes;
+    bytes += wireBytes;
     added += 1;
     seen.add(keyOf(target));
     targets.push({ path: target.path, range: target.range });
   }
+  const page = targets.slice(0, tinyWindows ? FACET_NEXT_MAX_TARGETS : MAX_REQUEST_ITEM_BATCH);
+  // Pre-shed sizing of the executable candidate call: long repeated paths
+  // must not consume the entire response before any source can be carried.
+  // The same next also rides in the internal contract and gap. Reserve
+  // their repeated control cost before allowing a batch to displace source.
+  const nextBudget = Math.floor((activePackByteCeiling() ?? FACET_NEXT_DEFAULT_CEILING) * 0.125);
+  const surfaceHandles = new Map(codeTaskPackSurfaces([...surfaces]).map(surface => [surface.path, surface.handle]));
+  const wirePage = (): Array<{ path?: string; handle?: string; range?: string; ranges?: string[] }> => {
+    if (!tinyWindows) return page;
+    const grouped = new Map<string, {path?: string; handle?: string; range?: string; ranges?: string[]}>();
+    for (const target of page) {
+      const handle = surfaceHandles.get(target.path);
+      const key = handle === undefined ? "path:" + target.path : "handle:" + handle;
+      const prior = grouped.get(key);
+      if (target.range === undefined || (prior && prior.range === undefined && prior.ranges === undefined)) {
+        grouped.set(key, handle === undefined ? {path: target.path} : {handle}); continue;
+      }
+      if (!prior) {grouped.set(key, handle === undefined ? {...target} : {handle, range: target.range}); continue;}
+      const ranges = prior.ranges ?? (prior.range === undefined ? [] : [prior.range]);
+      if (!ranges.includes(target.range)) ranges.push(target.range);
+      delete prior.range; prior.ranges = ranges;
+    }
+    return [...grouped.values()];
+  };
+  const nextBytes = (): number => Buffer.byteLength(JSON.stringify({ query, targets: wirePage(), content: "auto" }), "utf8") + 512;
+  while (tinyWindows && page.length > 1 && nextBytes() > nextBudget) page.pop();
   return {
     next_call: {
       tool: "tl_read_file",
       arguments: {
         query,
-        targets: targets.slice(0, MAX_REQUEST_ITEM_BATCH),
+        targets: wirePage(),
         content: "auto",
       },
     },
@@ -41743,7 +45080,9 @@ function buildReadinessObligations(
   /** I-7: workspace for the trace-only enumerated_obligation_summary emission below; omitted by the readiness specs that build synthetic results with no real filesystem — same optionality convention buildTaskExecutionContract's own `workspace` param already uses. */
   workspace?: string,
 ): TaskReadinessObligation[] {
-  const surfaces = codeTaskPackSurfaces(result.surfaces);
+  // Artifact consumers are context, never readiness evidence: a consumer's
+  // callable body must not prove the implementation target the pack lacks.
+  const surfaces = codeTaskPackSurfaces(result.surfaces).filter((surface) => !isArtifactConsumerSurface(surface));
   const served = surfaces.filter(hasServedCode);
   // R-D2 (2026-09-21, TL-06 REBUILD class) — THE SAME epoch-served evidence
   // request items already read (`epochServedEvidence`, the `priorEvidence` of
@@ -41997,6 +45336,7 @@ function buildReadinessObligations(
     // declaration — disclosed); a call site or mention never proves it. See
     // `sameNameIdentifierObligation`.
     const sameNameSubjects = sameNameSubjectsFor(result);
+    const memberOnly = memberOnlyExplicitIdentifiers(query);
     for (const identifier of explicitCodeIdentifiers(query).slice(0, 6)) {
       const sameNameSubject = sameNameSubjects.get(identifier);
       if (sameNameSubject !== undefined) {
@@ -42027,8 +45367,14 @@ function buildReadinessObligations(
       if (
         evidence.length === 0
         && !verifiedAbsentIdentifiersFor(result).includes(identifier)
-        && identifierGroundingEnabled()
-        && identifierIsUngrounded(result, workspace, query, identifier)
+        && (
+          (identifierGroundingEnabled() && identifierIsUngrounded(result, workspace, query, identifier))
+          // A member named only through access syntax (`Uploader.Retry`) that
+          // the workspace defines nowhere is the caller's guess, not a code
+          // identity to search for: the owner's facet gap discloses it, as it
+          // did before member names became explicit (ir1010gc).
+          || (memberOnly.has(normIdent(identifier)) && memberReferenceIsUndefined(result, workspace, identifier))
+        )
       ) continue;
       obligations.push({
         id: `identifier:${identifier}`,
@@ -42854,6 +46200,7 @@ function actionFrontierForCertificate(
   // mutate widens to the same `provedImplementation` set a genuinely
   // declared non-answer profile falls through to below).
   editObserved = false,
+  workspace?: string,
 ): string[] {
   if (profile === "answer" && !editObserved) return [];
   if (profile === "wiring") {
@@ -42881,8 +46228,9 @@ function actionFrontierForCertificate(
   const whyOfPath = new Map(
     codeTaskPackSurfaces(result.surfaces).map((surface) => [surface.path, surface.why] as const),
   );
+  const auxiliaryPaths = new Set(result.surfaces.filter(isAuxiliaryEnumSurface).map(surface => surface.path));
   const vetoedPath = (path: string): boolean =>
-    veto.reasonFor(path, whyOfPath.get(path)) !== undefined;
+    auxiliaryPaths.has(path) || veto.reasonFor(path, whyOfPath.get(path)) !== undefined;
   const provedImplementation = obligations
     .filter((obligation) => obligation.status === "proved" && obligation.kind !== "explicit-identifier")
     .flatMap((obligation) => (obligation.evidence ?? [])
@@ -42944,12 +46292,20 @@ function actionFrontierForCertificate(
   // false certificate got out.
   const wiringExempt = new Set(fromWiring);
   const surfacesForGuard = codeTaskPackSurfaces(result.surfaces);
-  const pathOfHandle = new Map(surfacesForGuard.map((surface) => [surface.handle, surface.path] as const));
+  const pathOfHandle = new Map([
+    ...(result.frontier_index ?? []).filter(row => typeof row.handle === "string")
+      .map(row => [row.handle!, row.path] as const),
+    ...surfacesForGuard.map((surface) => [surface.handle, surface.path] as const),
+  ]);
   const whyOfHandle = new Map(surfacesForGuard.map((surface) => [surface.handle, surface.why] as const));
   const whyOfSurfacePath = new Map(surfacesForGuard.map((surface) => [surface.path, surface.why] as const));
   const guarded = merged.filter((entry) => {
     if (wiringExempt.has(entry)) return true;
-    const surfacePath = pathOfHandle.get(entry) ?? entry;
+    const historical = workspace === undefined ? undefined
+      : handleTable.get(entry) ?? rehydrateHandleEntry(entry, workspace);
+    const historicalPath = historical !== undefined && historical.workspaceRoot === workspace
+      && (historical.lane ?? "") === currentSessionLane() ? historical.path : undefined;
+    const surfacePath = pathOfHandle.get(entry) ?? historicalPath ?? entry;
     const why = whyOfHandle.get(entry) ?? whyOfSurfacePath.get(surfacePath);
     return veto.reasonFor(surfacePath, why) === undefined;
   });
@@ -43101,7 +46457,7 @@ function buildDecisionEvidenceModel(
   };
 }
 
-/** `queries` is OR-matched and capped at 5 per call (server.ts find dispatch). */
+/** `queries` is OR-matched and capped per call (server.ts find dispatch: 10, or 5 with TL_EFF_WIDE_FIND=0); 5 fits either cap. */
 const UNCOVERED_IDENTIFIER_FIND_MAX = 5;
 
 /**
@@ -43181,6 +46537,16 @@ function buildCapabilityGaps(
 ): TaskCapabilityGap[] | undefined {
   const uncovered = obligations.filter((obligation) => obligation.status !== "proved").map((obligation) => obligation.id);
   const gaps: TaskCapabilityGap[] = [];
+  // Retrieval caps are known inability to inspect a requirement, never proof
+  // that it is absent. Keep these disclosures ahead of the bounded gap list.
+  for (const obligation of obligations.filter((entry) => entry.id.startsWith("request-item:compound-request:"))) {
+    gaps.push({
+      kind: "request-item-undetermined",
+      recoverable: false,
+      reason: obligation.reason ?? "compound discovery was bounded before every requested point was inspected",
+      obligation_ids: [obligation.id],
+    });
+  }
   if (result.missing.some((item) => item.startsWith("(invalid paths[] entry"))) {
     gaps.push({
       kind: "invalid-request",
@@ -43870,6 +47236,13 @@ function nextCallForUnresolved(
   return undefined;
 }
 
+function certificateIdentityProfile(result: TaskPackResult, proofProfile: TaskProfile): TaskProfile {
+  // Cumulative proof can evaluate held roles with generic obligations. Its
+  // task identity still belongs to the original selected request profile.
+  return result.coverage_basis === "cumulative" && proofProfile === "generic"
+    ? result.profile_binding?.selected ?? result.task_profile ?? proofProfile : proofProfile;
+}
+
 function deterministicCertificate(
   query: string,
   profile: TaskProfile,
@@ -43879,10 +47252,12 @@ function deterministicCertificate(
   actionFrontier: string[],
   workspaceState: TaskWorkspaceState,
   ledgerDigest?: string,
+  identityProfile: TaskProfile = profile,
 ): TaskReadinessCertificate {
-  const taskHash = shaOfText(`${profile}\u0000${query}`).replace(/^sha256:/, "").slice(0, 16);
+  const taskHash = shaOfText(`${identityProfile}\u0000${query}`).replace(/^sha256:/, "").slice(0, 16);
   const proofHash = shaOfText(JSON.stringify({
     taskHash,
+    ...(identityProfile !== profile ? {proofProfile: profile} : {}),
     obligations: obligations.map((obligation) => [obligation.id, obligation.status, (obligation.evidence ?? []).map((item) => item.handle)]),
     actionFrontier,
     workspaceState: workspaceState.fingerprint,
@@ -44055,6 +47430,8 @@ export function buildTaskExecutionContract(
   servedZoomScope?: ServedWindowScope,
   /** Exact literal cohort evidence, admitted only after its bound continuation and ledger proof. */
   literalSourceUniverse = false,
+  /** Optional detached ledger evaluation; default callers retain the workspace-backed read path. */
+  ledgerEvaluationInput?: ReturnType<typeof taskContractProjectionForSnapshot>,
 ): TaskExecutionContract {
   // FIXALL-A group D (2026-09-14): stamp `request_names_no_target` here, the ONE
   // choke point every decision path passes through with the query text in hand
@@ -44084,9 +47461,12 @@ export function buildTaskExecutionContract(
   // the preliminary evaluation into the final one.
   result.missing = result.missing.filter((entry) => !entry.startsWith("unresolved-ledger:"));
   const ledgerEpochTokens = tokenizeForEpoch(query);
-  const ledger = !proofCompletion || workspace === undefined
+  const ledgerEvaluation = ledgerEvaluationInput;
+  const ledger = !proofCompletion
     ? { open: [] as string[], explicitGaps: [] as string[], resolved: [] as string[] }
-    : taskContractGapProjection(workspace, ledgerEpochTokens);
+    : ledgerEvaluation?.projection ?? (workspace === undefined
+      ? { open: [] as string[], explicitGaps: [] as string[], resolved: [] as string[] }
+      : taskContractGapProjection(workspace, ledgerEpochTokens));
   if (ledger.open.length > 0 || ledger.explicitGaps.length > 0) {
     result.missing = [...new Set([
       ...result.missing,
@@ -44098,9 +47478,13 @@ export function buildTaskExecutionContract(
       result.coverage_reason ??= "concerns-uncovered";
     }
   }
-  const ledgerCertificate = !proofCompletion || workspace === undefined
+  const ledgerCertificate = !proofCompletion
     ? undefined
-    : taskContractDischargeCertificate(workspace, ledgerEpochTokens);
+    : ledgerEvaluationInput !== undefined
+      ? ledgerEvaluationInput.certificate
+      : workspace === undefined
+        ? undefined
+        : taskContractDischargeCertificate(workspace, ledgerEpochTokens);
   // -------------------------------------------------------------------------
   // R2 (2026-08-28): THE EXPANSION-SUCCEEDED ARM.
   //
@@ -44160,6 +47544,26 @@ export function buildTaskExecutionContract(
   // never a wire effect. See enumeratedObligationSummaryCountedResults' doc
   // comment.
   const obligations = buildReadinessObligations(result, profile, query, openUniverseDischarged, workspace);
+  const compoundPlan = compoundPlanForQuery(query);
+  const compoundBudgetGaps = compoundPlan?.outstanding.map((gap) => `compound-request:query:${gap.reason}`) ?? [];
+  const compoundDiscoveryGaps = activeEngineDiscoveryGaps();
+  const compoundGaps = [...new Set([...compoundBudgetGaps, ...compoundDiscoveryGaps.filter((gap) => /:(?:query|clause|candidate|wire)-budget$/u.test(gap))])];
+  result.missing = result.missing.filter((entry) => !entry.startsWith("unresolved-compound-request:"));
+  for (const gap of compoundGaps) {
+    // Discovery remains useful, but evidence about the retained prefix cannot
+    // discharge an uninspected clause or a dropped mandatory candidate.
+    obligations.push({
+      id: `request-item:${gap}`,
+      kind: "concern", status: "uncovered", required: true, evidence: [],
+      reason: `${gap}: compound discovery did not inspect or retain every requested point; not a verified absence`,
+      origin: "query",
+    });
+    result.missing.push(`unresolved-compound-request:${gap}`);
+  }
+  if (compoundGaps.length > 0) {
+    result.coverage = "partial";
+    result.coverage_reason = "concerns-uncovered";
+  }
   // DESIGN-v0.15 R1: request-item obligations join the SAME array the
   // certificate gate below reads, so an uncovered explicit point demotes
   // `discovery_complete` exactly like any other open obligation — no second,
@@ -44175,10 +47579,31 @@ export function buildTaskExecutionContract(
   const facetOwnedItemIds = facetReadiness === undefined
     ? new Set<string>()
     : reconcileRequestItemsWithFacets(requestItemReadiness, facetReadiness, query);
+  // A locator's abstention is not an evidence verdict. The normal positional
+  // and facet proofs can still cover that clause, or verify scoped absence;
+  // only a genuinely unresolved point earns the shared unknown disclosure.
+  if (workspace !== undefined && compoundPlan !== undefined) {
+    const evidenceNow = epochServedEvidence(workspace, result, tokenizeForEpoch(query), profile);
+    const items = extractRequestItems(query);
+    for (const gap of compoundDiscoveryGaps.filter((entry) => /:(?:discovery-incomplete|not-located)$/u.test(entry))) {
+      const clauseId = /^compound-request:(cr-\d+):/u.exec(gap)?.[1];
+      const clause = compoundPlan.clauses.find((entry) => entry.id === clauseId);
+      if (clause === undefined) continue;
+      if (isFormatOrBehaviourClause(clause.text) || citationClauseNamesOnlyServedThings(clause.text, evidenceNow)) continue;
+      if (facetReadiness?.entries.some((entry) => facetClauseMatchesItem(entry.requirement.clause, clause.text)
+        && (entry.facts.kind === "covered" || entry.facts.kind === "empty"))) continue;
+      const clauseItems = items.filter((item) => item.text === clause.text || clause.text.includes(item.text));
+      if (clauseItems.length > 0 && clauseItems.every((item) => requestItemReadiness.absences.some((absence) => absence.id === item.id)
+        || requestItemReadiness.obligations.some((obligation) => obligation.id === `request-item:${item.id}` && obligation.status === "proved"))) continue;
+      const terms = concernTopicTerms(clause.text);
+      if (concernCoveredByServedEvidence(clause.text, terms, concernVariantMap(terms, workspace), evidenceNow, workspace).covered) continue;
+      requestItemReadiness.undetermined.push({ id: gap, term: capWords(clause.text, 24), reason: "the independent clause could not be located; not a verified absence" });
+    }
+  }
   if (facetReadiness !== undefined) reconcileAnalysisSourceFromFacets(obligations, facetReadiness);
   obligations.push(...requestItemReadiness.obligations);
   if (facetReadiness !== undefined) obligations.push(...facetReadiness.entries.map((entry) => entry.obligation));
-  const requestItemGap = mergeFacetGap(requestItemReadiness.gap, facetReadiness, query, workspace);
+  const requestItemGap = mergeFacetGap(requestItemReadiness.gap, facetReadiness, query, workspace, result.surfaces, profile === "answer");
   if (requestItemGap !== undefined) {
     result.request_item_gap = requestItemGap;
   }
@@ -44205,7 +47630,7 @@ export function buildTaskExecutionContract(
     // keep a still-true disclosure but can never keep a contradicted one.
     // External (`identifier:*`) proofs keep the merge-never-overwrite rule
     // and their own staleness gate.
-    const carried = result.request_item_absences ?? [];
+    const carried = (result.request_item_absences ?? []).filter((entry) => !entry.id.startsWith("compound-request:"));
     let keptCarried = carried;
     if (workspace !== undefined && carried.some((entry) => REQUEST_ITEM_ABSENCE_ID_RE.test(entry.id))) {
       const itemTextById = new Map(extractRequestItems(query).map((item) => [item.id, item.text]));
@@ -44829,9 +48254,11 @@ export function buildTaskExecutionContract(
     query,
     workspace !== undefined ? priorEpochActionFrontier(workspace, query, result, editObserved) : [],
     editObserved,
+    workspace,
   );
   const certificate = accepted
-    ? deterministicCertificate(query, profile, obligations, falsification, risk, actionFrontier, workspaceState, ledgerCertificate?.digest)
+    ? deterministicCertificate(query, profile, obligations, falsification, risk, actionFrontier, workspaceState, ledgerCertificate?.digest,
+      certificateIdentityProfile(result, profile))
     : undefined;
   const reason = accepted
     ? terminalAction === "answer"
@@ -45019,6 +48446,7 @@ export function buildTaskExecutionContract(
         actionFrontier,
         workspaceState,
         ledgerCertificate?.digest,
+        certificateIdentityProfile(result, profile),
       )
     : undefined;
   const semanticClosure: TaskSemanticClosure = {
@@ -45265,7 +48693,23 @@ function reconcileTaskChangeContract(result: TaskPackResult): void {
   if (contract === undefined) return;
   const servedByHandle = new Map(codeTaskPackSurfaces(result.surfaces).map((surface) => [surface.handle, surface]));
   for (const obligation of contract.obligations) {
-    const surface = servedByHandle.get(obligation.handle);
+    let surface = servedByHandle.get(obligation.handle);
+    if (surface === undefined) {
+      const original = handleTable.get(obligation.handle), wanted = parseSurfaceSpan(obligation.range);
+      const replacements = [...servedByHandle.values()].filter(candidate => {
+        const entry = handleTable.get(candidate.handle), span = parseSurfaceSpan(candidate.range ?? "");
+        return candidate.path === obligation.path && wanted !== undefined && span !== undefined
+          && span.start <= wanted.start && span.end >= wanted.end && hasSufficientEditContent(candidate)
+          && original !== undefined && entry !== undefined && entry.path === original.path
+          && entry.workspaceRoot === original.workspaceRoot && entry.lane === original.lane;
+      });
+      // A whole-file fold may replace a narrow handle. Rebind only a unique
+      // containing, actually served window in the same capability scope.
+      if (replacements.length === 1) {
+        surface = replacements[0]!;
+        obligation.handle = surface.handle;
+      }
+    }
     obligation.status = surface !== undefined && hasSufficientEditContent(surface) ? "ready" : "needs-context";
   }
   const nonContextMissing = contract.missing.filter((item) => !item.startsWith("context:"));
@@ -45577,7 +49021,27 @@ function existingSiblingMembers(surfaces: TaskPackSurface[], workspace: string, 
  * exact path. Detected by role plus the summarized `why` markers those sites
  * carry (whySummary transforms the raw `why`, so match its output forms).
  */
-function isPerSiteCheckSurface(s: TaskPackSurface): boolean {
+/** Suppress a per-file literal requirement only for a proven ordinary CSS
+ * file with no sibling declaration/selector. Generic resets need no enum key.
+ * Unknown syntax and explicitly requested stylesheets remain conservative. */
+export function styleHasLiteralEnumSite(s: Pick<TaskPackSurface, "path">, query: string, existing: ReadonlySet<string>, workspace: string): boolean {
+  if (!s.path.endsWith(".css") || existing.size === 0
+    || query.includes(s.path) || query.includes(path.basename(s.path))) return true;
+  const raw = readCached(workspace, s.path);
+  if (raw === undefined || /[\\@$]|#\{/.test(raw)) return true;
+  const code = raw.replace(/\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, "");
+  const names = [...code.matchAll(/--([A-Za-z_][\w-]*)\s*:|\.([A-Za-z_][\w-]*)/g)];
+  return names.some(match => {
+    const parts = (match[1] ?? match[2]!).split("-");
+    return parts.some((_, index) => existing.has(normIdent(parts.slice(index).join("_"))));
+  });
+}
+
+export function isPerSiteCheckSurface(s: Pick<TaskPackSurface, "role" | "required" | "why">): boolean {
+  // A row that discharges a listed item takes the value from the enum itself.
+  // Seeded required-role context can be required for delivery while remaining
+  // a canonical review obligation; it does not create a literal edit site.
+  if (isRequiredEnumReview(s.why)) return false;
   if (s.role === "style" || s.role === "contract") return true;
   // A propagation-discovered seed is intentionally re-routed through the
   // caller-supplied seeded builder, whose generic `why` no longer says
@@ -45686,6 +49150,7 @@ function buildCheckRecords(
   surfaces: TaskPackSurface[],
   workspace: string,
 ): PackCheckRecord[] {
+  surfaces = primaryEnumContextRows(surfaces);
   const records: PackCheckRecord[] = [];
   const push = (r: Omit<PackCheckRecord, "id">): void => {
     const id = deriveCheckId(r);
@@ -45747,6 +49212,7 @@ function buildCheckRecords(
     if (novelMembers.length > 0) {
       const siteSurfaces = surfaces
         .filter(isPerSiteCheckSurface)
+        .filter(s => s.role !== "style" || styleHasLiteralEnumSite(s, query, existing, workspace))
         .sort((a, b) => (a.required === b.required ? 0 : a.required ? -1 : 1)); // required first
       // IMPROVEMENT C: memoize the dynamic-consumer verdict per site file so a
       // file that consumes the enum ONLY via dynamic derivation gets an
@@ -46008,9 +49474,10 @@ function partialTreeSubPath(surfaces: TaskPackSurface[]): string {
  * tree. Runs BEFORE trimToCap so its bytes count toward the budget and the
  * trim ladder can drop it first when the pack is over cap.
  */
-function attachPartialTree(result: TaskPackResult, workspace: string): void {
+function attachPartialTree(result: TaskPackResult, workspace: string, unresolvedFileParents: readonly string[] = []): void {
   if (result.coverage !== "partial" || result.surfaces.length === 0) return;
-  const subPath = partialTreeSubPath(result.surfaces);
+  const subPath = unresolvedFileParents.find(candidate => isDirectoryWithin(candidate, workspace))
+    ?? partialTreeSubPath(result.surfaces);
   const compact = buildCompactTree(workspace, subPath || undefined, undefined, PARTIAL_TREE_CAP_BYTES);
   if (compact.tree.length === 0) return;
   result.tree = compact.tree;
@@ -46028,6 +49495,9 @@ function attachPartialTree(result: TaskPackResult, workspace: string): void {
 
 /** Cap on the number of `verify` command hints returned (DESIGN-v0.8 §C1 item 4: lowered from 5 to 2). */
 const MAX_VERIFY_HINTS = 2;
+
+/** Translation units the native verify hint's syntax check names (the edit kit's own check names up to 8). */
+const PACK_SYNTAX_CHECK_MAX_UNITS = 4;
 
 function discoverVerificationHints(workspace: string, query: string, surfaces: TaskPackSurface[]): string[] {
   void query;
@@ -46055,9 +49525,24 @@ function discoverVerificationHints(workspace: string, query: string, surfaces: T
     }
   }
 
-  if (paths.some((p) => p.endsWith(".go"))) hints.add("go test ./...");
+  const goHint = goVerificationHint(goVerificationEntry(workspace, paths));
+  if (goHint) hints.add(goHint);
   if (paths.some((p) => p.endsWith(".rs")) || fs.existsSync(path.join(workspace, "Cargo.toml"))) hints.add("cargo test");
-  if (paths.some((p) => p.endsWith(".py"))) hints.add("pytest");
+  const pythonPaths = paths.filter((p) => p.endsWith(".py"));
+  if (pythonPaths.length > 0) {
+    // 2026-10-20 (decision window 6t-7): when the PATH's python3 falls short
+    // of the project (requires-python, declared modules), a bare "pytest"
+    // runs under the wrong interpreter. State the check an edit kit carries
+    // instead (verificationPack.ts pythonSyntaxCheck), then which interpreter
+    // and why.
+    const check = pythonSyntaxCheck(workspace, pythonPaths, { maxUnits: PACK_SYNTAX_CHECK_MAX_UNITS });
+    if (check === undefined) {
+      hints.add("pytest");
+    } else {
+      hints.add(check.commands[0]!);
+      hints.add(check.note);
+    }
+  }
   if (paths.some((p) => p.endsWith(".java"))) {
     if (fs.existsSync(path.join(workspace, "pom.xml"))) hints.add("mvn test");
     if (fs.existsSync(path.join(workspace, "gradlew"))) hints.add("./gradlew test");
@@ -46087,7 +49572,21 @@ function discoverVerificationHints(workspace: string, query: string, surfaces: T
       }
       if (buildCmd) break;
     }
-    hints.add(buildCmd ?? "no build toolchain detected for this native module: verify by tracing the code path against the reported symptom");
+    if (buildCmd !== null) {
+      hints.add(buildCmd);
+    } else {
+      // 2026-10-19 (decision window 6t-6): with a compiler on PATH this said
+      // "no build toolchain detected" beside a plan.verification naming
+      // clang++. Now it states the check an edit kit carries
+      // (verificationPack.ts nativeSyntaxCheck), then how to read its result.
+      const check = nativeSyntaxCheck(workspace, nativePaths, { maxUnits: PACK_SYNTAX_CHECK_MAX_UNITS });
+      if (check === undefined) {
+        hints.add("no build toolchain detected for this native module: verify by tracing the code path against the reported symptom");
+      } else {
+        hints.add(check.commands[0]!);
+        hints.add(check.note);
+      }
+    }
   }
 
   return [...hints].slice(0, MAX_VERIFY_HINTS);
@@ -46594,6 +50093,9 @@ function whySummary(raw: string, symbol?: string, role?: string): string {
   // closure obligation.
   if (raw === "related-member-hit") return "related member reference";
   if (raw === "doc-contract-match") return "matched section in a contract/spec doc";
+  // A listed item's discharge row names the accessor that carries the new
+  // value and the item it answers; the 60-character cut below drops the item.
+  if (raw.startsWith(`${LISTED_ITEM_DERIVED_WHY}:`)) return raw;
   // Default: return the raw string truncated.
   return raw.length > 60 ? raw.slice(0, 60) : raw;
 }
@@ -46715,7 +50217,8 @@ function rawCapForResult(result: TaskPackResult): number {
   const hasHighConfCode = result.surfaces.some(
     (s) => s.code !== undefined && (s.required || isModuleClosureSurface(s)),
   );
-  const hasAnyCode = result.surfaces.some((s) => s.code !== undefined);
+  // Artifact consumers ride the pack's spare budget and never raise its tier.
+  const hasAnyCode = result.surfaces.some((s) => s.code !== undefined && !isArtifactConsumerSurface(s));
   // WP-S2 rule 2 (TL_SEEDED_GENEROUS): several files the CALLER NAMED have the
   // same additive evidence floor the multi_concern tier above exists for — a
   // four-file answer pack cannot prove four things inside the base tier. Taken
@@ -46793,6 +50296,9 @@ interface PackedBlockFingerprint {
   taskBinding: string | undefined;
 }
 
+/** Aggregate memory bound for exact-source capsules in the single-slot cache. */
+const MAX_PACK_SOURCE_CAPSULE_BYTES = 18 * 1024;
+
 /**
  * Last pack's embedded-code fingerprints, keyed by workspace. Intentionally
  * simple: ONE entry per workspace (the design's "module-level last-pack
@@ -46800,6 +50306,14 @@ interface PackedBlockFingerprint {
  * eviction policy needed since old entries are never appended, only replaced.
  */
 const lastPackBlocksByWorkspace = new Map<string, PackedBlockFingerprint[]>();
+const packFingerprintBinding = createPackFingerprintBinding(key => lastPackBlocksByWorkspace.get(key), shaOfText);
+
+export function stagePackFingerprintBinding(workspace: string, originalResult: object, binding: string, taskHandle: string): void {
+  const context = protocolCallContext();
+  if (!context || context.sizePreview === true) return;
+  const finalize = packFingerprintBinding.stage(originalResult, laneScopedKey(workspace), context, binding, taskHandle);
+  if (finalize) context.finalizePackFingerprintBinding = finalize;
+}
 
 /**
  * W4 (turn-economy wave 2): the REAL body of a surface whose `code`
@@ -46819,6 +50333,7 @@ const lastPackBlocksByWorkspace = new Map<string, PackedBlockFingerprint[]>();
  * dropped surface is garbage-collected with no eviction bookkeeping.
  */
 const dedupedSurfaceBody = new WeakMap<TaskPackSurface, string>();
+const priorBodyRestoration = createPriorBodyRestoration();
 
 /**
  * Test-only reset hook (mirrors handleTable.reset()/resetAllSessions()) so
@@ -46826,7 +50341,10 @@ const dedupedSurfaceBody = new WeakMap<TaskPackSurface, string>();
  * happen to reuse the same on-disk workspace path or run in the same process.
  */
 export function resetPackDedupeCache(): void {
+  priorBodyRestoration.reset();
   lastPackBlocksByWorkspace.clear();
+  clearSourceCapsules();
+  packFingerprintBinding.reset();
   servedPacksByWorkspace.clear();
   // WP-S11: the same-task read-only serve view is per-workspace serve state of
   // exactly this kind (see its own doc block), so it goes at the same boundary.
@@ -46870,6 +50388,7 @@ export function clearPackDedupeForWorkspace(workspace: string, lane?: string): v
   // function has always resolved, while captureServedPack keys on the raw
   // `workspace` string its caller passes); unifying it is a separate change.
   lastPackBlocksByWorkspace.delete(laneScopedKey(key));
+  clearSourceCapsules(laneScopedKey(key));
   servedPacksByWorkspace.delete(laneScopedKey(key));
   certifiedWorkingSets.delete(laneScopedKey(key));
   // WP-S11: `task.epoch:"new"` is the declared task boundary, so the same-task
@@ -46948,6 +50467,15 @@ interface ServedPackRecord {
    * tokens + paths + roles + workspace, nothing about the caller).
    */
   lane: string;
+  /**
+   * TL_EFF_MAP_ANSWER_FIRST: the pack was an answer-first map — its core served, the bodies it leaves owed named
+   * in its advisory. Its surface is the map's whole extent (`83-1552`), of which the served-range ledger proves only
+   * the served windows, so a receipt built from it lists the windows the ledger cannot prove (`surfaceRangeUnserved`)
+   * as `remaining`, as the pack itself did, instead of the extent whole.
+   */
+  answerFirst?: true;
+  /** Batching hint only, never proof: same-query continuations retain map paging. */
+  structureMapQueryKey?: string;
   /** hash of (normalized query tokens + sorted paths[] + surfaceRoles + workspace) — the dedup-eligible identity. */
   fingerprint: string;
   /** JSON of the "extra" args {path,symbol,lang,limit} the served call carried; a differing value forces recompute (those args change served content). */
@@ -47110,6 +50638,12 @@ interface ServedPackRecord {
  */
 const MAX_CACHED_PACKS_PER_WORKSPACE = 8;
 const servedPacksByWorkspace = new Map<string, ServedPackRecord[]>();
+
+function structureMapChainWasServed(workspace: string, query: string): boolean {
+  const key = shaOfText(query);
+  return (servedPacksByWorkspace.get(laneScopedKey(workspace)) ?? [])
+    .some(record => record.structureMapQueryKey === key);
+}
 
 /**
  * iter-3 F2: fraction of the LARGER of (current query tokens, prior record
@@ -47278,6 +50812,37 @@ function surfaceFileSha(workspace: string, relPath: string): string | undefined 
     if (size > MAX_FINGERPRINT_FILE_BYTES) return undefined;
     // served-bytes: not-served (surface fingerprint: sha only)
     return shaOfText(fs.readFileSync(real, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+function sourceBodyCapsuleForSurface(
+  workspace: string,
+  surface: TaskPackSurface,
+  body: string,
+): SourceBodyCapsule | undefined {
+  if (surface.appended_windows !== undefined && surface.appended_windows.length > 0) return undefined;
+  const abs = safeResolve(surface.path, workspace);
+  if (abs === undefined) return undefined;
+  try {
+    const real = fs.realpathSync(abs);
+    if (!isWithin(real, resolveReal(workspace))) return undefined;
+    if (fs.statSync(real).size > MAX_FINGERPRINT_FILE_BYTES) return undefined;
+    // Read once at capsule construction: both the digest and exact source slice
+    // are from the same file snapshot. A later comparison re-reads it.
+    // served-bytes: not-served (source capsule proof: exact-prefix comparison + sha only; the capsule keeps the already-served surf.code, never these bytes)
+    const source = fs.readFileSync(real, "utf8");
+    return makeSourceBodyCapsule({
+      path: surface.path,
+      handle: surface.handle,
+      range: surface.range,
+      body,
+      source,
+      sha: shaOfText(source),
+      remainingRanges: surface.remaining_ranges,
+      hasAppendedWindows: surface.appended_windows !== undefined && surface.appended_windows.length > 0,
+    });
   } catch {
     return undefined;
   }
@@ -47862,6 +51427,13 @@ function writeServedPackRecord(
   fingerprint: string,
   result: TaskPackResult,
 ): void {
+  const answerFirst = answerFirstPacks.has(result);
+  // Serialized receipt rows cannot retain the private source-context marker.
+  // Keep this optional data out of the semantic cache; range booking already
+  // captured the real response separately in captureServedPack.
+  if (result.surfaces.some(isAuxiliaryEnumSurface)) result = {...result,
+    surfaces: primaryEnumContextRows(result.surfaces),
+  };
   // Cached packs serialize code-surface identity (range+role). Artifact packs
   // deliberately bypass this optimization so their strict discovery shape is
   // never collapsed into, or re-served as, a code surface — so THIS pack is not
@@ -47911,6 +51483,9 @@ function writeServedPackRecord(
   }));
   const record: ServedPackRecord = {
     lane: currentSessionLane(),
+    ...(answerFirst ? { answerFirst: true as const } : {}),
+    ...(args.query && (servesStructureMap(result.surfaces) || structureMapChainWasServed(workspace, args.query))
+      ? { structureMapQueryKey: shaOfText(args.query) } : {}),
     fingerprint,
     extraArgsKey: computeExtraArgsKey(args),
     requestProfileKey: computeRequestProfileKey(args),
@@ -47995,7 +51570,7 @@ function applyCompleteStopRoute(
   // and say so explicitly.
   const stop = isAnswer
     ? (partialPrimary
-        ? "answer from resident handles; primary surface is partial — if the queried behavior lies in its remaining_ranges, ONE same-handle slice zoom is sanctioned first"
+        ? "answer from resident handles; primary surface is partial — if the queried behavior lies in its remaining lines, ONE same-handle slice zoom is sanctioned first"
         : COMPLETE_STOP_REASON_ANSWER)
     : COMPLETE_STOP_REASON;
   const budget = isAnswer && partialPrimary ? 1 : 0;
@@ -48906,6 +52481,38 @@ function surfaceRangeShipped(workspace: string, path: string, range: string): bo
 }
 
 /**
+ * `surfaceRangeShipped`'s other half, for an answer-first map's receipt: the windows of
+ * `range` the served-range ledger cannot prove were put on the wire for `path`, as
+ * "start-end" ranges in order — what is left of the row's extent once the clusters the
+ * caller was served are taken out. `undefined` where `surfaceRangeShipped` fails closed
+ * for want of an answer (an unparseable range, an unavailable file identity, a degenerate
+ * window): the caller then keeps the whole range, as it always has.
+ */
+function surfaceRangeUnserved(workspace: string, path: string, range: string): string[] | undefined {
+  const target = parseSurfaceSpan(range);
+  if (target === undefined) return undefined;
+  const identity = surfaceFileIdentity(workspace, path);
+  if (identity === undefined) return undefined;
+  const end = Math.min(target.end, identity.totalLines);
+  if (target.start > end) return undefined;
+  const clusters = servedClusterRanges(workspace, path)
+    .map(parseSurfaceSpan)
+    .filter((c): c is { start: number; end: number } => c !== undefined)
+    .sort((a, b) => a.start - b.start);
+  const gaps: string[] = [];
+  let cursor = target.start;
+  for (const cluster of clusters) {
+    if (cluster.end < cursor) continue;
+    if (cluster.start > end) break;
+    if (cluster.start > cursor) gaps.push(`${cursor}-${cluster.start - 1}`);
+    cursor = Math.max(cursor, cluster.end + 1);
+    if (cursor > end) break;
+  }
+  if (cursor <= end) gaps.push(`${cursor}-${end}`);
+  return gaps.length > 0 ? gaps : undefined;
+}
+
+/**
  * v0.15.1 runtime review (2026-10-06): true when a stored record's surface
  * says part of its range reached the caller — a body served partially
  * (`content_completeness:"partial"`) whose `remaining_ranges` leave some line
@@ -49654,7 +53261,12 @@ function compactReceiptFromRecord(
         range: s.range,
         role: s.role,
         ...(sha !== undefined ? { sha } : {}),
-        ...(shipped ? {} : { content_completeness: "partial" as const, remaining_ranges: [s.range] }),
+        ...(shipped ? {} : {
+          content_completeness: "partial" as const,
+          // An answer-first map names what it left owed: the receipt does too, as the windows the ledger cannot prove
+          // (the page's own `remaining`, less what a zoom read since), not the map's whole extent.
+          remaining_ranges: prev.answerFirst === true ? surfaceRangeUnserved(workspace, s.path, s.range) ?? [s.range] : [s.range],
+        }),
       };
     }),
     missing: [...prev.missing],
@@ -50758,19 +54370,29 @@ function hasCurrentEvidenceExpansionGap(
     ).explicitGap !== undefined);
 }
 
-function recordEpochTaskContract(
+export interface EpochTaskContractObservation extends TaskContractObservationUpdate {
+  readonly transition: boolean;
+}
+
+/**
+ * Compute the exact ordered task-contract observations for one finalized pack.
+ * This performs bounded, read-only workspace inspection through the existing
+ * surface-proof helpers (`namedAuthorityFacetProofs` may read source files;
+ * this is not a claim that every helper is pure or memo-free). Prior
+ * enumerated concerns are an explicit snapshot so this calculation does not
+ * read or mutate the task-contract store.
+ */
+export function computeEpochTaskContractObservation(
   workspace: string,
   result: TaskPackResult,
   query: string,
   expansion?: PersistedEvidenceExpansion,
   literalSourceUniverse = false,
-): boolean {
+  priorConcernTokens: readonly string[] = [],
+): EpochTaskContractObservation | undefined {
   const epochTokens = tokenizeForEpoch(query);
-  if (epochTokens.length === 0) return false;
+  if (epochTokens.length === 0) return undefined;
   const served = codeTaskPackSurfaces(result.surfaces).filter(hasServedCode);
-  // The satisfied half is harvested from the WHOLE query, not just the
-  // published gap: a token this pack's evidence matches is discharged for the
-  // epoch even though it was never a published requirement.
   const shaped = identifierShapedConcernSet(query);
   const queryTokens = concernAnchorTokens(query, 8).filter((token) => shaped.has(token.toLowerCase()));
   const requestedSymbols = explicitCodeIdentifiers(query).slice(0, 1);
@@ -50789,10 +54411,6 @@ function recordEpochTaskContract(
         gaps: local.explicitGap === undefined ? [] : [local.explicitGap],
       } satisfies PersistedEvidenceExpansion;
     });
-  // The imported expansion is advisory input from the selected primaries. The
-  // served primary itself is the authoritative current evidence, so always
-  // compute its local one-hop result as well. This prevents an empty/cached
-  // import-edge result from erasing an unsupported-language explicit gap.
   const expansionParts = [expansion, ...localExpansions].filter(
     (entry): entry is PersistedEvidenceExpansion => entry !== undefined,
   );
@@ -50801,7 +54419,7 @@ function recordEpochTaskContract(
     remaining: [...new Set(expansionParts.flatMap((entry) => entry.remaining))].sort((a, b) => a.localeCompare(b)),
     gaps: [...new Set(expansionParts.flatMap((entry) => entry.gaps))].sort((a, b) => a.localeCompare(b)),
   } satisfies PersistedEvidenceExpansion;
-  const enumeratedItems = enumeratedQueryItemsForEpoch(query, workspace);
+  const enumeratedItems = enumeratedQueryItemsForEpoch(query, workspace, priorConcernTokens);
   const literalSurfaceDuty = isLiteralFirstSurfaceDuty(query);
   const enumeratedProofs = namedAuthorityFacetProofs(
     served,
@@ -50811,121 +54429,97 @@ function recordEpochTaskContract(
   );
   const coveredEnumeratedIds = enumeratedItems
     .filter((item) => {
-      if (literalSurfaceDuty) {
-        return literalSurfaceDutyEvidence(served, item.facet).length > 0;
-      }
+      if (literalSurfaceDuty) return literalSurfaceDutyEvidence(served, item.facet).length > 0;
       const proof = enumeratedProofs.get(item.facet);
       return proof === "served" || proof === "authoritative-absent";
     })
     .map((item) => item.id);
-  recordTaskContract(workspace, epochTokens, {
+  const taskContract = Object.freeze({
     query,
-    requiredRoles: result.required_surfaces ?? [],
-    // Span-derived ids remain monotone epoch requirements. They become
-    // covered only from the same per-item proof used by readiness.
-    concernTokens: [
+    requiredRoles: Object.freeze([...(result.required_surfaces ?? [])]),
+    concernTokens: Object.freeze([
       ...epochConcernTokensFor(result, query),
       ...(literalSurfaceDuty ? [] : enumeratedItems.map((item) => item.id)),
-    ],
-    // Exact literal witnesses are implementation evidence even when their
-    // filesystem role is merely `unknown` (a common flat `src/foo.ts` shape).
-    // The authenticated cohort proof above is what permits this normalization;
-    // ordinary unknown surfaces retain their existing role accounting.
-    servedRoles: literalSourceUniverse ? ["implementation"] : served.map((surface) => surface.role),
-    coveredConcernTokens: [
+    ]),
+    servedRoles: Object.freeze(literalSourceUniverse ? ["implementation"] : served.map((surface) => surface.role)),
+    coveredConcernTokens: Object.freeze([
       ...queryTokens.filter((token) => concernTokenMatchesSurfaces(token, served)),
       ...(literalSurfaceDuty ? [] : coveredEnumeratedIds),
-    ],
+    ]),
   });
-  // One-hop dependency proof is the evidence model for an actual
-  // open-universe request.  Applying it to a finite generic list manufactures
-  // a new dependency requirement after all of that list's named roles have
-  // been served, making a cumulative same-epoch pack impossible to close.
-  //
-  // P2-16 (round-4 fable finding, 2026-09-28, manyCallers): the query's OWN
-  // named subject (`explicitCodeIdentifiers`, the same set `identifier:<X>`
-  // obligations already track) is never a "dependency" of the answer — it IS
-  // the answer. "Who calls fetchWithRetry?" served over 30 callers, each of
-  // which (correctly) names `fetchWithRetry` as a callee of ITS OWN body via
-  // `calleesOf` — but `fetchWithRetry`'s own DEFINITION is never required
-  // reading for a CALLERS question (its residency is proved by the separate,
-  // already-correct `identifier:fetchWithRetry` obligation, satisfied by any
-  // occurrence in served text), so listing it here only ever manufactured an
-  // unresolvable "dependency-definitions:fetchWithRetry" gap beside a
-  // response that had, in fact, served it throughout — confirmed live:
-  // `act.answer` disclosed `explicit-gap:dependency-definitions:fetchWithRetry`
-  // forever, never proved, even once its own file was served. Excluding it
-  // from the TARGET LIST (rather than relying on `recordEvidenceExpansion`'s
-  // keep-first "served" proof racing an earlier hop's premature explicit-gap
-  // proof for the same obligation) fixes it at the source for every hop, not
-  // only a hop lucky enough to resolve it before the capacity-gap fires.
   const queryOwnIdentifiers = new Set(explicitCodeIdentifiers(query));
   const expansionTargets = literalSourceUniverse || !hasOpenUniverseIntent(query) || isAdditiveEnumIntent(query)
     ? []
-    // Every candidate must pass expandOneHop's language gate. Feeding the raw
-    // TS/JS call regex here made Go/Python keywords into false dependencies.
     : [...(effectiveExpansion?.targets ?? [])].filter((target) => !queryOwnIdentifiers.has(target));
-  // -------------------------------------------------------------------------
-  // R2 (2026-08-28): THE SERVED-DEFINITION WITNESS IS THE BODY, NOT THE LABEL.
-  //
-  // `servedDefinitions` was `served.map(surface => surface.symbol)` — the
-  // per-surface NAMED-SELECTOR label. A whole-file serve carries no `symbol`,
-  // so a pack that served `export function applyDiscount(…)` in full proved
-  // NOTHING about `applyDiscount`: every expansion target stayed `open`, the
-  // open-universe obligation could never be discharged by success, and the
-  // `act.answer` it gated was suppressed over evidence the response actually
-  // held (measured on the `ledgerDecisionIntegration` TS 4-definition fixture:
-  // five open dependency obligations, zero resolved, five served bodies).
-  //
-  // The honest witness is a DECLARATION in a served body, which is exactly what
-  // `extractSymbolsFromLines` — `mode=map`/`digest`'s own declaration scanner —
-  // reports. Definition-grade by construction: it matches declaration forms,
-  // never call sites, so a body that merely CALLS `applyDiscount` still proves
-  // nothing. The old label witness is kept alongside it, since a symbol-scoped
-  // serve is a definition serve by construction.
-  // -------------------------------------------------------------------------
   const servedDefinitions = [...new Set([
     ...served.map((surface) => surface.symbol).filter((symbol): symbol is string => symbol !== undefined),
     ...served.flatMap((surface) => extractSymbolsFromLines(
       servedSurfaceText(surface),
       MAX_SERVED_DEFINITION_SYMBOLS,
-      // The expansion targets are the preferred names, so a large body's
-      // declaration scan runs to EOF for exactly the identifiers under proof
-      // instead of stopping at the first `maxSymbols` declarations.
       new Set(expansionTargets.map((target) => target.toLowerCase())),
     ).map((entry) => entry.name)),
   ])];
-  recordEvidenceExpansion(workspace, expansionTargets, servedDefinitions);
-  // The exact literal cohort uses the same ledger proof channel as successful
-  // one-hop expansion.  Its synthetic target is a stable obligation label,
-  // while the admission predicate above proves the substantive facts: complete
-  // ordinary-find universe, one root, no collision, and every source witness
-  // served.  This lets the normal readiness rebuild discharge `everywhere`
-  // without deleting the open-universe obligation or manually minting a
-  // prepared contract.
-  if (literalSourceUniverse) {
-    recordEvidenceExpansion(
-      workspace,
-      ["literal-source-universe"],
-      ["literal-source-universe"],
-    );
-  }
+  const expansionObservation = Object.freeze({
+    targets: Object.freeze(expansionTargets),
+    servedDefinitions: Object.freeze(servedDefinitions),
+  });
   const expansionGaps = !literalSourceUniverse && hasOpenUniverseIntent(query)
     ? [...new Set(effectiveExpansion?.gaps ?? [])].sort((a, b) => a.localeCompare(b))
     : [];
-  if (expansionGaps.length > 0) {
+  const explicitGap = expansionGaps.length > 0 ? Object.freeze({
+    parent: Object.freeze({kind: "dependency-definitions", target: "open-universe"}),
+    targets: Object.freeze([...expansionTargets]),
+    witness: expansionGaps.join("; "),
+  }) : undefined;
+  return Object.freeze({
+    epochTokens: Object.freeze([...epochTokens]),
+    query,
+    taskContract,
+    expansion: expansionObservation,
+    literalSourceUniverse,
+    ...(explicitGap === undefined ? {} : {explicitGap}),
+    transition: expansionGaps.length > 0 || literalSourceUniverse,
+  });
+}
+
+function applyEpochTaskContractObservation(workspace: string, observation: EpochTaskContractObservation): void {
+  recordTaskContract(workspace, observation.epochTokens, observation.taskContract);
+  recordEvidenceExpansion(
+    workspace,
+    observation.expansion.targets,
+    observation.expansion.servedDefinitions,
+  );
+  if (observation.literalSourceUniverse) {
+    recordEvidenceExpansion(workspace, ["literal-source-universe"], ["literal-source-universe"]);
+  }
+  if (observation.explicitGap !== undefined) {
     recordExpansionExplicitGap(
       workspace,
-      { kind: "dependency-definitions", target: "open-universe" },
-      expansionTargets,
-      // One immutable proof witnesses the whole extraction limitation. Calling
-      // prove once per diagnostic string attempted to overwrite the same
-      // parent/target proof on multi-gap packs.
-      expansionGaps.join("; "),
+      observation.explicitGap.parent,
+      observation.explicitGap.targets,
+      observation.explicitGap.witness,
     );
   }
-  return expansionGaps.length > 0 || literalSourceUniverse;
 }
+
+function recordEpochTaskContract(
+  workspace: string,
+  result: TaskPackResult,
+  query: string,
+  expansion?: PersistedEvidenceExpansion,
+  literalSourceUniverse = false,
+): boolean {
+  const epochTokens = tokenizeForEpoch(query);
+  if (epochTokens.length === 0) return false;
+  const priorConcernTokens = queryTaskContract(workspace, epochTokens)?.concernTokens ?? [];
+  const observation = computeEpochTaskContractObservation(
+    workspace, result, query, expansion, literalSourceUniverse, priorConcernTokens,
+  );
+  if (observation === undefined) return false;
+  applyEpochTaskContractObservation(workspace, observation);
+  return observation.transition;
+}
+
 /**
  * R2: bound on declarations scanned out of ONE served body when proving which
  * expansion targets are resident. Generous next to `MAX_EVIDENCE_EXPANSION_TARGETS`
@@ -51889,6 +55483,47 @@ function attachFunctionalValidationObligation(
   }
 }
 
+/**
+ * 2026-10-20 (decision window 6t-7, T10 arm A): the smoke run the line above
+ * asks for needs an interpreter, and on that host the PATH's python3 was
+ * 3.9.6 against requires-python >=3.10. Every arm-A cell spent 4-7 Bash turns
+ * finding /opt/homebrew/bin/python3.12, and one wrote a fake openpyxl package
+ * first. A Python artifact target's pack now carries the check and note the
+ * edit kit's harness.syntax_check would (verificationPack.ts
+ * pythonSyntaxCheck), with the module its artifact kind needs (xlsx:
+ * openpyxl) counted when the project declares it. The target is usually
+ * outside discoverVerificationHints' dominant root (its own pyproject.toml
+ * roots it apart from the docs it is built from), hence its own pass. Like
+ * the obligation, it is added after trimToCap and kept only when it fits.
+ */
+function attachPythonInterpreterHint(workspace: string, result: TaskPackResult): void {
+  if (result.route?.action === "answer_from_handles") return;
+  const target = runnableArtifactTarget(result);
+  if (target === undefined || path.posix.extname(target).toLowerCase() !== ".py") return;
+  const modules = [...new Set((result.artifact_requirements ?? [])
+    .map((source) => PY_ARTIFACT_MODULE[path.posix.extname(normalizedRequestPath(source)).toLowerCase()])
+    .filter((module): module is string => module !== undefined))];
+  const check = pythonSyntaxCheck(workspace, [target], { extraModules: modules, includeMissing: true });
+  if (check === undefined) return;
+  const verify = result.verify ?? [];
+  const at = verify.indexOf(check.commands[0]!);
+  if (at >= 0) {
+    // discoverVerificationHints already stated the command (the target shares
+    // the pack's root), with a note that could not count the artifact's
+    // module: swap this one in when that note is provably the one it wrote.
+    const plain = pythonSyntaxCheck(workspace, [target], { includeMissing: true });
+    if (plain !== undefined && plain.note !== check.note && verify[at + 1] === plain.note) {
+      const swapped = verify.map((line, index) => (index === at + 1 ? check.note : line));
+      if (fitsInCap({ ...result, verify: swapped })) result.verify = swapped;
+    }
+    return;
+  }
+  const lines = [check.commands[0]!, check.note];
+  if (fitsInCap({ ...result, verify: [...verify, ...lines] })) {
+    result.verify = [...verify, ...lines];
+  }
+}
+
 // ---------------------------------------------------------------------------
 // iter-3 F5: runtime hint (python interpreter + module presence, fs-stat only)
 // ---------------------------------------------------------------------------
@@ -52063,7 +55698,7 @@ function annotateEditZoomAffordance(result: TaskPackResult): void {
   if (partialDisclosed === 0) return;
   result.route = {
     ...route,
-    reason: `${route.reason}; ${partialDisclosed} surface(s) have remaining_ranges (re-slice to zoom, or ONE tl_read_file {targets:[{handle}], content:"full"} when most of the file is needed)`,
+    reason: `${route.reason}; ${partialDisclosed} surface(s) have remaining lines (re-slice to zoom, or ONE tl_read_file {targets:[{handle}], content:"full"} when most of the file is needed)`,
   };
 }
 
@@ -52105,7 +55740,9 @@ export function applyEnvelopeWeightTrim(
         // and stripping that leaves a full-bodied surface that reads exactly
         // like a verified one. Every other `why` is a provenance label the
         // caller has seen before, and keeps being dropped.
-        if (surf.why !== EXECUTED_SEARCH_UNCLASSIFIED_WHY) delete surf.why;
+        // Review provenance also constrains the certificate rebuilt later.
+        if (surf.why !== EXECUTED_SEARCH_UNCLASSIFIED_WHY && !isRequiredEnumReview(surf.why)
+          && surf.why?.startsWith(EDIT_CONTEXT_WHY) !== true) delete surf.why;
         delete surf.outline;
       }
     }
@@ -52565,7 +56202,10 @@ export function applyPackDedupe(
   taskBinding?: string,
   exempt?: (surface: TaskPackSurface) => boolean,
 ): void {
-  const prior = lastPackBlocksByWorkspace.get(laneScopedKey(workspace)) ?? [];
+  const cacheKey = laneScopedKey(workspace);
+  const context = protocolCallContext();
+  if (context?.sizePreview !== true) sourceCapsulePrior(cacheKey);
+  const prior = lastPackBlocksByWorkspace.get(cacheKey) ?? [];
   const running: PackedBlockFingerprint[] = prior.map((f) => ({ ...f, fromPriorPack: true }));
 
   for (const surf of result.surfaces) {
@@ -52588,6 +56228,7 @@ export function applyPackDedupe(
       // stay deterministic across identical re-calls; the response still ships
       // only the compact pointer below.
       dedupedSurfaceBody.set(surf, surf.code);
+      if (match.fromPriorPack && provenSameTask) priorBodyRestoration.capture(surf, `${surf.handle} — see prior pack`);
       surf.code_unchanged = match.fromPriorPack
         ? `${surf.handle} — see prior pack`
         : `${surf.handle} — duplicate of an earlier surface in this pack`;
@@ -52596,6 +56237,252 @@ export function applyPackDedupe(
     }
     running.push({ handle: surf.handle, range: surf.range, hash, fromPriorPack: false, taskBinding });
   }
+}
+
+/**
+ * Late pre-booking exact-source reuse for required context. Kept separate from
+ * the early body dedupe so proof passes inspect the original body first. The
+ * caller runs the normal priorBodyRestoration strip after this pass.
+ */
+export function applyRequiredSourceCapsuleDedup(
+  workspace: string,
+  result: TaskPackResult,
+  taskBinding?: string,
+  options?: {forceServe?: boolean; exempt?: (surface: TaskPackSurface) => boolean},
+): void {
+  if (options?.forceServe === true || !taskBinding || taskBinding.length === 0 || result.pack_unchanged === true) return;
+  const context = protocolCallContext();
+  if (context?.sizePreview === true) return;
+  const cacheKey = laneScopedKey(workspace);
+  const prior = sourceCapsulePrior(cacheKey);
+  let inspectedBytes = 0;
+  for (const surf of codeTaskPackSurfaces(result.surfaces)) {
+    if (surf.code === undefined || options?.exempt?.(surf) === true) continue;
+    const bytes = Buffer.byteLength(surf.code, "utf8");
+    if (inspectedBytes + bytes > MAX_PACK_SOURCE_CAPSULE_BYTES) break;
+    inspectedBytes += bytes;
+    const currentCapsule = sourceBodyCapsuleForSurface(workspace, surf, surf.code);
+    if (currentCapsule === undefined) continue;
+    const resident = prior.find((entry) =>
+      entry.taskBinding === taskBinding && sourceCapsuleCovers(entry.capsule, currentCapsule));
+    if (resident === undefined) continue;
+    const pointer = `${resident.capsule.handle} — see prior pack`;
+    dedupedSurfaceBody.set(surf, surf.code);
+    priorBodyRestoration.capture(surf, pointer);
+    surf.code_unchanged = pointer;
+    surf.code = undefined;
+  }
+}
+
+/**
+ * TL_PACK_CONTAINMENT_DEDUP (2026-10-19, default ON; util/flags.ts
+ * `packContainmentDedupEnabled`) — A ROW INSIDE ANOTHER ROW OF THE SAME FILE
+ * SHIPS ONCE.
+ *
+ * `applyPackDedupe` above catches a row IDENTICAL to another (same handle,
+ * range and content hash). Measured on the v0.16.0 decision runs 6t-2 and
+ * 6t-3 (arm A): every T03 first pack shipped OrderOrchestrator.java:144-153,
+ * 146-151, 145-150 and 147-152 — the constructor's signature and its three
+ * facet parameter lines, appended by `buildAnswerTaskPack`'s member loop to
+ * the class-head surface — while that same surface's body already served
+ * 107-165: about 2.4 KB, 17% of the pack, of lines the caller got twice.
+ *
+ * One rule, two shapes: a row whose lines another row of the same file in
+ * this pack already carries adds nothing. "Carries" is proved on the text,
+ * never on a range alone (a surface's own `range`/`remaining_ranges` can
+ * claim more than its body holds — T03's class head claims 45-1552 at this
+ * point with a body that ends at 270): the row's text must be its file's own
+ * lines at its range, occur nowhere else in that file, and be a substring of
+ * the container's body, whose range must cover it with none of its
+ * `remaining_ranges` crossing it.
+ *   - An APPENDED WINDOW (`appended_windows`) its own surface's head body, or
+ *     a wider kept window of the same surface, carries is cut from `code` with
+ *     its marker. Internally it is no row (the wire split makes it one), so
+ *     there is nothing for a pointer to sit on: it is dropped outright, the
+ *     way a window a trim cut away does not ship. Its container is always the
+ *     SAME surface, so that surface's `servedSurfaceText`, served spans and
+ *     handle keep every line and every character they had: the proof passes
+ *     and the certificate citations see what they saw before.
+ *   - A separate SURFACE another code-bearing surface of the same path
+ *     carries gets the `code_unchanged` pointer `applyPackDedupe` gives an
+ *     identical row, the real body kept in `dedupedSurfaceBody`. Never one
+ *     that is protected, `exempt`, required, edit-bearing (`likely_edits`/
+ *     `edit_intent`/`done_check`), on the certified action frontier or a
+ *     wiring frontier, caller-named (provenance, caller or explicit range),
+ *     explicit-identifier evidence (`why` naming "explicit"), partial,
+ *     carrying windows of its own, cited by the certificate this pack was
+ *     built with in a way its withdrawal would break (`wouldIntroduceBreach`),
+ *     or whose pointer would cost more than its body.
+ *
+ * Ties keep the first: of two rows with one range the later goes, and a row
+ * is only ever cut into a container that stays, so no line goes unserved.
+ * Runs once, right before `trimToCap`, so the bytes it frees go back to the
+ * trim ladder. Exported for packContainmentDedup.spec.ts.
+ */
+export function applyPackContainmentDedup(
+  result: TaskPackResult,
+  workspace: string,
+  options: {
+    protectedSurfaces?: ReadonlySet<TaskPackSurface>;
+    exempt?: (surface: TaskPackSurface) => boolean;
+    cache?: FileReadCache;
+  } = {},
+): void {
+  if (result.pack_unchanged === true) return;
+  const surfaces = codeTaskPackSurfaces(result.surfaces);
+  const sources = new Map<string, string | undefined>();
+  /** `text` is `filePath`'s own whole lines from line `start`, and occurs nowhere else in the file. */
+  const isUniqueSourceAt = (filePath: string, text: string, start: number): boolean => {
+    if (!sources.has(filePath)) sources.set(filePath, readCached(workspace, filePath, options.cache)?.replace(/\r\n?/g, "\n"));
+    const source = sources.get(filePath);
+    const probe = text.endsWith("\n") ? text.slice(0, -1) : text;
+    if (source === undefined || probe.trim() === "") return false;
+    const at = source.indexOf(probe);
+    if (at === -1 || source.indexOf(probe, at + 1) !== -1) return false;
+    if (at > 0 && source[at - 1] !== "\n") return false;
+    const after = at + probe.length;
+    if (after < source.length && source[after] !== "\n") return false;
+    let line = 1;
+    for (let newline = source.indexOf("\n"); newline !== -1 && newline < at; newline = source.indexOf("\n", newline + 1)) line += 1;
+    return line === start;
+  };
+  /** Verbatim source of `range` in `filePath`: exactly its lines, unique in the file. */
+  const isVerbatimRow = (filePath: string, range: string, text: string): boolean => {
+    const span = parsePackLineRange(range);
+    return span !== undefined
+      && countLines(text) === span[1] - span[0] + 1
+      && isUniqueSourceAt(filePath, text, span[0]);
+  };
+  for (const surface of surfaces) {
+    if (options.exempt?.(surface) === true) continue;
+    dropContainedAppendedWindows(surface, isVerbatimRow);
+  }
+
+  const spanOf = (surface: TaskPackSurface): [number, number] | undefined => parsePackLineRange(surface.range);
+  const position = new Map(surfaces.map((surface, index) => [surface, index] as const));
+  /** `outer` may hold `inner`: a wider span, or the same span earlier in the pack. */
+  const outranks = (outer: TaskPackSurface, inner: TaskPackSurface): boolean => {
+    const a = spanOf(outer);
+    const b = spanOf(inner);
+    if (a === undefined || b === undefined || a[0] > b[0] || a[1] < b[1]) return false;
+    return a[0] !== b[0] || a[1] !== b[1] || position.get(outer)! < position.get(inner)!;
+  };
+  const headOf = (surface: TaskPackSurface): string => {
+    const code = surface.code ?? "";
+    const first = surface.appended_windows?.[0];
+    const at = first === undefined ? -1 : code.indexOf(first.marker);
+    return at === -1 ? code : code.slice(0, at);
+  };
+  const certificate = result.execution_contract?.readiness_certificate;
+  const frontierHandles = new Set<string>([
+    ...(certificate?.action_frontier ?? []),
+    ...(result.wiring?.edit_frontier ?? []),
+    ...(result.wiring?.review_frontier ?? []),
+    ...(result.wiring?.connections ?? []).flatMap((connection) => [
+      connection.source?.handle,
+      connection.destination?.handle,
+      connection.insertion_handle,
+      ...connection.supporting_handles,
+    ].filter((handle): handle is string => typeof handle === "string")),
+  ]);
+  const namedOrExplicit = (surface: TaskPackSurface): boolean => {
+    const why = surfaceProvenance(surface);
+    return isCallerRangeSurface(surface)
+      || isExplicitRangeSurface(surface)
+      || (why !== undefined
+        && (why.includes("caller-supplied")
+          || why.includes("query-named-file")
+          || why.includes("header-source-pair")
+          || why.includes("explicit")));
+  };
+  const demotable = (surface: TaskPackSurface): boolean =>
+    surface.code !== undefined
+    && surface.code.trim() !== ""
+    && options.protectedSurfaces?.has(surface) !== true
+    && options.exempt?.(surface) !== true
+    && surface.required !== true
+    && surface.likely_edits === undefined
+    && surface.edit_intent === undefined
+    && surface.done_check === undefined
+    && !frontierHandles.has(surface.handle)
+    && surface.content_completeness !== "partial"
+    && (surface.remaining_ranges?.length ?? 0) === 0
+    && (surface.appended_windows?.length ?? 0) === 0
+    && !namedOrExplicit(surface);
+  // Widest spans first (ties in pack order), so every container a surface
+  // could be cut into has already settled whether it stays.
+  const order = surfaces
+    .filter((surface) => spanOf(surface) !== undefined)
+    .sort((a, b) => {
+      const [as, ae] = spanOf(a)!;
+      const [bs, be] = spanOf(b)!;
+      return (be - bs) - (ae - as) || position.get(a)! - position.get(b)!;
+    });
+  let certification: AnswerCertificationSnapshot | undefined;
+  for (const surface of order) {
+    if (!demotable(surface)) continue;
+    const body = surface.code!;
+    const container = order.find((candidate) =>
+      candidate !== surface
+      && candidate.path === surface.path
+      && candidate.code !== undefined
+      && outranks(candidate, surface)
+      && surfaceBodyCoversRange(candidate, surface.range)
+      && headOf(candidate).includes(body));
+    if (container === undefined) continue;
+    const pointer = `${surface.handle} — lines ${surface.range} are inside ${container.handle} (${container.range}) in this pack`;
+    if (Buffer.byteLength(pointer, "utf8") >= Buffer.byteLength(body, "utf8")) continue;
+    if (!isVerbatimRow(surface.path, surface.range, body)) continue;
+    certification ??= answerCertificationSnapshot(result);
+    if (certification.keep?.(surface, codeTaskPackSurfaces(result.surfaces)) === true) continue;
+    dedupedSurfaceBody.set(surface, body);
+    surface.code_unchanged = pointer;
+    surface.code = undefined;
+  }
+}
+
+/**
+ * `applyPackContainmentDedup`'s window half: cut every appended window of
+ * `surface` whose verbatim text (`isVerbatimRow`) the surface's own head body
+ * carries within its served range, or a wider kept window of it carries.
+ * Leaves the surface exactly as built when a recorded marker is not where it
+ * was recorded.
+ */
+function dropContainedAppendedWindows(
+  surface: TaskPackSurface,
+  isVerbatimRow: (filePath: string, range: string, text: string) => boolean,
+): void {
+  const code = surface.code;
+  const recorded = surface.appended_windows;
+  if (code === undefined || recorded === undefined || recorded.length === 0) return;
+  const found: Array<{ entry: { marker: string; range: string }; at: number; span: [number, number] }> = [];
+  let from = 0;
+  for (const entry of recorded) {
+    const at = code.indexOf(entry.marker, from);
+    const span = parsePackLineRange(entry.range);
+    if (at === -1 || span === undefined) return;
+    found.push({ entry, at, span });
+    from = at + entry.marker.length;
+  }
+  const segments = found.map((window, index) => code.slice(window.at, found[index + 1]?.at ?? code.length));
+  const texts = found.map((window, index) => segments[index]!.slice(window.entry.marker.length));
+  const head = code.slice(0, found[0]!.at);
+  const verbatim = found.map((window, index) => isVerbatimRow(surface.path, window.entry.range, texts[index]!));
+  const inHead = found.map((window, index) =>
+    verbatim[index]! && surfaceBodyCoversRange(surface, window.entry.range) && head.includes(texts[index]!));
+  const holds = (outer: number, inner: number): boolean => {
+    const [os, oe] = found[outer]!.span;
+    const [is, ie] = found[inner]!.span;
+    if (os > is || oe < ie) return false;
+    return (os !== is || oe !== ie || outer < inner) && texts[outer]!.includes(texts[inner]!);
+  };
+  const dropped = found.map((_, index) =>
+    inHead[index]! || (verbatim[index]! && found.some((__, other) => other !== index && !inHead[other]! && holds(other, index))));
+  if (!dropped.some(Boolean)) return;
+  surface.code = head + segments.filter((_, index) => !dropped[index]).join("");
+  const kept = recorded.filter((_, index) => !dropped[index]);
+  if (kept.length > 0) surface.appended_windows = kept;
+  else delete surface.appended_windows;
 }
 
 /**
@@ -52632,8 +56519,17 @@ export function applyPackDedupe(
  */
 export function persistPackFingerprints(workspace: string, result: TaskPackResult, taskBinding?: string): void {
   const fingerprints: PackedBlockFingerprint[] = [];
+  const stagedCapsules: {capsule: SourceBodyCapsule; taskBinding?: string; body: string; range: string}[] = [];
+  let capsuleBytes = 0;
   for (const surf of result.surfaces) {
     if (surf.code !== undefined) {
+      const bodyBytes = Buffer.byteLength(surf.code, "utf8");
+      const sourceCapsule = capsuleBytes + bodyBytes <= MAX_PACK_SOURCE_CAPSULE_BYTES
+        ? sourceBodyCapsuleForSurface(workspace, surf, surf.code) : undefined;
+      if (sourceCapsule !== undefined) capsuleBytes += bodyBytes;
+      if (sourceCapsule !== undefined) {
+        stagedCapsules.push({capsule: sourceCapsule, taskBinding, body: surf.code, range: surf.range});
+      }
       fingerprints.push({
         handle: surf.handle,
         range: surf.range,
@@ -52655,6 +56551,11 @@ export function persistPackFingerprints(workspace: string, result: TaskPackResul
     });
   }
   lastPackBlocksByWorkspace.set(laneScopedKey(workspace), fingerprints);
+  const context = protocolCallContext();
+  if (context?.sizePreview !== true) stageSourceCapsules(laneScopedKey(workspace), stagedCapsules);
+  if (context && context.sizePreview !== true) {
+    packFingerprintBinding.capture(result, laneScopedKey(workspace), context, fingerprints, result.surfaces);
+  }
 }
 
 /**
@@ -52736,6 +56637,8 @@ export function stampRollupContentCompleteness(result: TaskPackResult): void {
   }
 }
 
+export {changeScopeFollowupTarget} from "./changeScopeContinuation.js";
+
 function contentFollowupTarget(surface: TaskPackSurface, preferOutline = false): ContinuationCall | undefined {
   const outlineTargets = surface.outline
     ?.map((line) => line.match(/:\s+(tl_read_file\s+.+)$/)?.[1])
@@ -52803,6 +56706,9 @@ function reconcileContentSufficiency(result: TaskPackResult, workspace?: string)
     : editHandles.size > 0
       ? surfaces.filter((surface) => editHandles.has(surface.handle))
       : surfaces.filter((surface, index) => index === 0 || surface.required === true);
+  // A listed no-edit propagation claim needs its source proof too.
+  for (const surface of surfaces) if (isRequiredEnumReview(surface.why)
+    && !actionTargets.includes(surface)) actionTargets.push(surface);
   const hasFocusedTestEvidence = surfaces.some((surface) =>
     surface.role === "test"
     && hasServedCode(surface)
@@ -52849,7 +56755,8 @@ function reconcileContentSufficiency(result: TaskPackResult, workspace?: string)
     || (answerTask && !hasServedZoomAffordance(result))
     || (result.route === undefined && result.coverage !== "partial" && result.missing.length === 0);
   if (!canInspect) return;
-  const followup = contentFollowupTarget(incomplete, answerTask);
+  const followup = (!answerTask ? changeScopeFollowupTarget(result) : undefined)
+    ?? contentFollowupTarget(incomplete, answerTask);
   // No progressing read remains (see contentFollowupTarget's tail). Keep
   // content_sufficiency:"needs-followup" — that verdict is still true — but do
   // not install an inspect route whose one sanctioned action re-reads bytes the
@@ -53017,9 +56924,11 @@ function rebindPreparedCertificateToLedger(
   const ledger = taskContractDischargeCertificate(workspace, tokenizeForEpoch(query));
   const workspaceFingerprint = contract.workspace_state?.fingerprint;
   if (ledger === undefined || workspaceFingerprint === undefined) return;
-  const taskHash = shaOfText(`${profile}\u0000${query}`).replace(/^sha256:/, "").slice(0, 16);
+  const identityProfile = certificateIdentityProfile(result, profile);
+  const taskHash = shaOfText(`${identityProfile}\u0000${query}`).replace(/^sha256:/, "").slice(0, 16);
   const proofHash = shaOfText(JSON.stringify({
     taskHash,
+    ...(identityProfile !== profile ? {proofProfile: profile} : {}),
     obligations: certificate.obligations.map((obligation) => [
       obligation.id,
       obligation.status,
@@ -53154,10 +57063,12 @@ function applyCumulativeCoverage(
   if (required.size === 0) return false;
   const missingRequired = result.missing_required_surfaces ?? [];
   if (missingRequired.length === 0 || prior.length === 0) return false;
-  const priorRoles = new Set(prior.map((p) => p.role));
+  // A partial body proves only its shipped windows, never a whole missing role.
+  const completePrior = prior.filter((entry) => entry.fullyServed !== false);
+  const priorRoles = new Set(completePrior.map((p) => p.role));
   // Every currently-missing required role must be covered by a valid prior surface.
   if (missingRequired.some((role) => !priorRoles.has(role))) return false;
-  const servedEarlier = prior
+  const servedEarlier = completePrior
     .filter((p) => missingRequired.includes(p.role))
     .map((p) => ({ path: p.path, role: p.role, ...(p.handle ? { handle: p.handle } : {}) }));
   if (servedEarlier.length === 0) return false;
@@ -53288,7 +57199,7 @@ function attachFrontierIndex(
   // inventory. (Previously an overflowed-complete pack still attached it.)
   if (result.coverage === "complete" || result.coverage === "focused") return;
 
-  const surfaces = codeTaskPackSurfaces(result.surfaces);
+  const surfaces = primaryEnumContextRows(codeTaskPackSurfaces(result.surfaces));
   const seen = new Set<string>();
   const entries: Array<{ path: string; role: string; handle?: string }> = [];
   const add = (relPath: string, role: string, handle?: string): void => {
@@ -53497,6 +57408,10 @@ function bookShippedPackServeState(
 ): void {
   // THE projection. Computed once, from the final pack, and used by every
   // producer below.
+  // Auxiliary rows do not become cumulative role coverage, a certified working
+  // set, or primary edit bookings: `shippedSurfaces` leaves them out.
+  // captureServedPack retains actual source; the existing soft-frontier policy
+  // can ground a later explicit edit in it.
   const shipped = shippedSurfaces(returned);
   if (bookings.pack !== undefined) pendingOwnServedSurfaces.delete(bookings.pack);
 
@@ -54563,7 +58478,22 @@ export function applyFoldSmallRemainder(
   result: TaskPackResult,
   cache?: FileReadCache,
 ): void {
-  if (!foldSmallRemainderEnabled()) return;
+  // Tight host budgets make a tiny tail cost an entire extra model turn.
+  // Keep explicit opt-outs and every structural/fit guard below.
+  const boundedDefault = process.env["TL_FOLD_SMALL_REMAINDER"] === undefined
+    && clampToActiveCeiling(Number.MAX_SAFE_INTEGER) <= 20 * 1024;
+  if (!foldSmallRemainderEnabled() && !boundedDefault) return;
+  // v0.16.0 release verification (T01): a candidate-list pack is a choice between
+  // served candidates, not a remainder to complete. Widening one candidate to its
+  // whole file makes EVERY candidate look "served whole" to GATE-C1
+  // (canonicalDecision.ts `discoveryBundleNext`'s multi-concern gate), which then
+  // withholds the one bundle `next` and leaves a bare `await_input/choose-candidate`
+  // dead end. That holds whatever switched the fold on -- the bounded default of
+  // the small-ceiling hosts (Copilot CLI 18 KiB, VS Code 14,336 B), the
+  // TL_TURN_ECONOMY umbrella (the VS Code extension and `tl workspace setup`
+  // write it), or TL_FOLD_SMALL_REMAINDER itself -- so such a pack is never
+  // folded.
+  if (isCandidateListPack(result)) return;
   const surfaces = codeTaskPackSurfaces(result.surfaces);
   const surfacesForPath = new Map<string, number>();
   for (const surface of surfaces) {
@@ -54574,7 +58504,7 @@ export function applyFoldSmallRemainder(
     if (surf.code === undefined) continue; // body-less (prior/handle-only): nothing to widen
     if (isMarkdownPath(surf.path)) continue; // Markdown already has its own unconditional whole-file promotion
     if ((surfacesForPath.get(surf.path) ?? 0) > 1) continue; // multi-window file: each window owns its own remainder
-    if (isCallerRangeSurface(surf)) continue; // the caller chose this exact range — a hard window
+    if (isCallerRangeSurface(surf) && (!boundedDefault || isExplicitRangeSurface(surf))) continue; // explicit windows remain hard; a named-only seed may complete its tiny tail
     if (wasSemanticFrontierBodyWithheld(surf)) continue; // the semantic frontier already decided this surface's body
     const remaining = surf.remaining_ranges;
     if (remaining === undefined || remaining.length === 0) continue; // nothing left to fold
@@ -54590,7 +58520,7 @@ export function applyFoldSmallRemainder(
     const totalLines = countLines(content);
     if (totalLines <= 0) continue;
     const wholeRange = `1-${totalLines}`;
-    if (wholeRange === surf.range) continue; // already whole — nothing to widen
+    // range can already span the whole file while code still omits the tail.
 
     // The exact whole-file path a fits-the-cap serve already uses: at the
     // shared per-surface allowance, this returns a complete (empty
@@ -54773,6 +58703,50 @@ function reduceServedBodyTail(
 ): boolean {
   const code = surface.code;
   if (code === undefined || code.length === 0) return false;
+  // A structure map consists of exact separately addressed source windows.
+  // Give back whole tail windows before the generic multislice fallback;
+  // treating a small overflow as loss of the entire map forces many re-reads.
+  const appended = surface.appended_windows;
+  if (appended && appended.length > 0 && appended.every(entry =>
+    entry.marker === `\n\n/* structure map (${entry.range}) */\n` && /^\d+-\d+$/.test(entry.range))) {
+    const source = readCached(workspace, surface.path, cache)?.split(/\r?\n/);
+    if (source) {
+      let retainedCode = code;
+      const retained = [...appended];
+      const dropped: string[] = [];
+      let freed = 0;
+      let valid = true;
+      // Validate the exact source suffix, never guess a marker inside source.
+      for (let index = appended.length - 1; index >= 0; index--) {
+        const entry = appended[index]!;
+        const bounds = parsePackLineRange(entry.range)!;
+        const segment = entry.marker + source.slice(bounds[0] - 1, bounds[1]).join("\n");
+        if (!retainedCode.endsWith(segment)) { valid = false; break; }
+        retainedCode = retainedCode.slice(0, -segment.length);
+        if (freed < needed) {
+          freed += Buffer.byteLength(segment, "utf8");
+          dropped.push(entry.range); retained.pop();
+        }
+      }
+      if (valid && dropped.length > 0) {
+        // Validation walked every suffix. Rebuild precisely the prefix kept.
+        const keepThrough = appended.length - dropped.length;
+        const suffix = appended.slice(keepThrough).map(entry => {
+          const bounds = parsePackLineRange(entry.range)!;
+          return entry.marker + source.slice(bounds[0] - 1, bounds[1]).join("\n");
+        }).join("");
+        trace("structure_map_rows_shed", { path: surface.path, dropped, bytes_freed: freed }, workspace);
+        surface.code = code.slice(0, -suffix.length);
+        if (retained.length > 0) surface.appended_windows = retained;
+        else delete surface.appended_windows;
+        surface.remaining_ranges = mergeRangeStrings([...(surface.remaining_ranges ?? []), ...dropped]);
+        surface.content_completeness = "partial";
+        delete surface.anchors_served;
+        if (freed < needed) reduceServedBodyTail(surface, needed - freed, workspace, cache);
+        return true;
+      }
+    }
+  }
   const served = packServedSpans({ mode: "task_pack", coverage: "partial", surfaces: [surface], missing: [] }).get(surface.path) ?? [];
   const window = served.length === 1 && (surface.appended_windows?.length ?? 0) === 0 ? served[0] : undefined;
   const lines = code.split("\n");
@@ -54903,7 +58877,6 @@ async function runAnswerDependencyClosure(
   workspace: string,
   cache: FileReadCache | undefined,
 ): Promise<number> {
-  if (isStructuralOnlyRequest(query)) return 0;
   const fileCache = cache ?? new FileReadCache();
   const workspaceKey = facetPlanWorkspaceKey(workspace);
   const shaOf = (relPath: string): string | undefined => {
@@ -54911,6 +58884,36 @@ async function runAnswerDependencyClosure(
     return content === undefined ? undefined : shaOfText(content);
   };
   const plan = facetPlanFor(workspaceKey, query, shaOf);
+  // Binding statements are exact supplemental windows. Widening a focal
+  // with its import header clears its symbol and can make a whole-file
+  // expansion hide a still-needed falsification/dependency focal (retry's
+  // MAX_RETRIES beside retryDelay). Append after that pass, before proving
+  // the final evidence, and let the gate require anything the budget omits.
+  let bindingAdded = 0;
+  let bindingBytes = 0;
+  const bindingKeys = new Set<string>();
+  for (const entry of plan?.entries ?? []) {
+    for (const win of entry.windows) {
+      if (win.binding !== true) continue;
+      const range = `${win.start}-${win.end}`;
+      const key = `${win.path}\0${range}`;
+      if (bindingKeys.has(key)) continue;
+      bindingKeys.add(key);
+      const served = servedLineSpansOf(codeTaskPackSurfaces(result.surfaces).filter(surface => surface.path === win.path && hasServedCode(surface)));
+      if (lineSpansCover(served, win)) continue;
+      const content = readCached(workspace, win.path, fileCache);
+      if (content === undefined) continue;
+      const code = sliceLinesToText(content, win.start, win.end);
+      const bytes = Buffer.byteLength(code, "utf8");
+      if (bindingBytes + bytes > MAX_CLOSURE_BYTES_PER_PACK) continue;
+      bindingBytes += bytes;
+      const handle = handleTable.upsert({ kind: "range", path: win.path, range, workspaceRoot: workspace, sha: shaOfText(code) });
+      (result.surfaces as TaskPackResultSurface[]).push({ role: classifySurface(win.path), handle: handle.id,
+        path: win.path, range, required: true, why: `closure:${entry.facet} binding ${win.name}`, code });
+      bindingAdded++;
+    }
+  }
+  if (isStructuralOnlyRequest(query)) return bindingAdded;
   const planned = new Set((plan?.entries ?? [])
     .filter((entry) => entry.dependency !== true && (entry.facet === "value" || entry.facet === "condition") && entry.focal !== undefined)
     .map((entry) => `${entry.focal!.path}\u0000${entry.focal!.name}`));
@@ -54977,8 +58980,8 @@ async function runAnswerDependencyClosure(
     }
     return shas;
   };
-  let bytesUsed = 0;
-  let added = 0;
+  let bytesUsed = bindingBytes;
+  let added = bindingAdded;
   for (const [index, focal] of focals.entries()) {
     const focalEntry = { path: focal.path, name: focal.name, start: focal.startLine, end: focal.endLine };
     // Past the per-pack cap or the emergency deadline a callable is never
@@ -55082,6 +59085,21 @@ async function dedupeTrimAndPersist(
     ?? opts?.args?.symbol
     ?? opts?.args?.path
     ?? "";
+  const auxiliarySeed = auxiliaryEnumPool(opts?.cache) ?? auxiliaryEnumPool(opts?.args) ?? restoreAuxiliaryEnumPool(
+    getSession(workspace).activeTaskQuery, workspace, effectiveQuery,
+    opts?.args?.taskBinding, opts?.args?.taskQueryRefReplay === true,
+  );
+  // Capture names from actual selected source before any primary trim. This is
+  // a context subject, never an assertion that the consumers need no changes.
+  const auxiliaryPrimaryPaths = [...new Set([
+    ...(auxiliarySeed?.primaryPaths ?? []), ...result.surfaces.map(surface => surface.path),
+  ])];
+  const auxiliarySubjects = auxiliarySeed === undefined ? [] : [...new Set([
+    ...auxiliarySeed.subjects,
+    ...codeTaskPackSurfaces(result.surfaces).flatMap(surface =>
+      surface.role === "contract" && surface.code !== undefined
+        ? enumNamesDeclaredWith(surface.code, new Set(extractEnumValueTokens(effectiveQuery))) : []),
+  ])];
   const servedZoomScope = servedZoomScopeForArgs(opts?.args, effectiveQuery);
   // BLOCKER 25 (2026-09-14, review round 4): FIRST, before any contract,
   // gap or decision is computed over this pack — see the function's own
@@ -55417,17 +59435,14 @@ async function dedupeTrimAndPersist(
   // this same response, then every proof/risk decision below is recomputed
   // over the enriched surface set. This spends server I/O, not another agent
   // turn, and is deliberately capped at two surfaces / 120 files.
-  const artifactTargetNames = new Set([
-    ...moduleShapedQueryTokens(effectiveQuery).map(normIdent),
-    ...(effectiveQuery.match(/[A-Za-z_$][A-Za-z0-9_$.-]*\.(?:c|cc|cpp|cxx|go|java|js|jsx|py|rs|ts|tsx)\b/gi) ?? [])
-      .map((fileName) => normIdent(path.basename(fileName, path.extname(fileName)))),
-  ]);
+  const artifactTargetNames = queryNamedArtifactTargets(effectiveQuery);
   const exactArtifactTargetServed = profile === "artifact_build"
     && hasRequiredArtifactSections(result, effectiveQuery)
     && (
       result.create_target !== undefined
       || codeTaskPackSurfaces(result.surfaces).some((surface) =>
-        artifactTargetNames.has(normIdent(path.basename(surface.path, path.extname(surface.path))))
+        !isArtifactConsumerSurface(surface)
+        && artifactTargetNames.has(normIdent(path.basename(surface.path, path.extname(surface.path))))
         && hasServedCode(surface)
       )
     );
@@ -55695,10 +59710,28 @@ async function dedupeTrimAndPersist(
   // (so a rejected or accepted widen is what both of them see; the flag-off
   // path returns immediately and this call is inert).
   applyFoldSmallRemainder(workspace, result, opts?.cache);
+  // Inspect the complete focal after bounded widening, before budget admission.
+  // `profile` is the classifier selection, which can be artifact_build even
+  // when no required artifact sections were bound and this builder falls back
+  // to the generic code pack. Gate on the pack actually built, preserving the
+  // artifact route when its required sections are present.
+  const genericPack = profile === "generic"
+    || (profile === "artifact_build" && !hasRequiredArtifactSections(result, effectiveQuery));
+  if (genericPack) await attachGoReturnedLocalReviews(codeTaskPackSurfaces(result.surfaces), workspace, opts?.cache);
+  if ((profile === "generic" || profile === "change_propagation") && isEnumLikeQuery(effectiveQuery)) await attachEnumStyleReviews(codeTaskPackSurfaces(result.surfaces), workspace, effectiveQuery, opts?.cache);
+  if (profile === "answer") await attachJavaLoopGuardReviews(codeTaskPackSurfaces(result.surfaces), workspace, opts?.cache);
+  const deliveryVeto = writeAuthorityVeto(effectiveQuery);
+  for (const surface of codeTaskPackSurfaces(result.surfaces)) {
+    const action = result.change_contract?.obligations.find(row => row.path === surface.path && row.handle === surface.handle)?.action;
+    recordBudgetDeferredSurface(result, {path: surface.path, handle: surface.handle, range: surface.range,
+      action: action === "review" || deliveryVeto.reasonFor(surface.path, surface.why) !== undefined ? "review" : "edit",
+      evidenceRequired: isRequiredEnumReview(surface.why)});
+  }
   // Requirement 1 (P3 correction): snapshot every marked surface's body
   // BEFORE trimToCap can touch it, so reconciliation can tell "trimToCap
   // changed this body" from "trimToCap left it exactly as constructed" and
   // touch only the former.
+  priorBodyRestoration.strip(codeTaskPackSurfaces(result.surfaces), forceServePack);
   const callerRangePreTrim = snapshotCallerRangeSurfaces(result);
   // Surfaces added AFTER the early residency pass above (the readiness-
   // falsification counterexample, closure retries) get the same residency
@@ -55710,11 +59743,26 @@ async function dedupeTrimAndPersist(
   if (!forceServePack) {
     applyResidentFileDedup(workspace, result, tokenizeForEpoch(effectiveQuery), { allowRequiredDedup: profile === "answer", ...(dedupExempt ? { exempt: dedupExempt } : {}) });
   }
+  // TL_PACK_CONTAINMENT_DEDUP (2026-10-19, default ON): a row inside another
+  // row of the same file ships once — see `applyPackContainmentDedup`. Last
+  // before the trim ladder, so it sees every surface the passes above added
+  // and the bytes it frees go back to `trimToCap`. Inside the same
+  // `force_serve` guard as `applyPackDedupe`'s intra-pack half.
+  if (!forceServePack && packContainmentDedupEnabled()) {
+    applyPackContainmentDedup(result, workspace, {
+      ...(opts?.protectedSurfaces !== undefined ? { protectedSurfaces: opts.protectedSurfaces } : {}),
+      ...(dedupExempt !== undefined ? { exempt: dedupExempt } : {}),
+      ...(opts?.cache !== undefined ? { cache: opts.cache } : {}),
+    });
+  }
   const trimmed = trimToCap(
     result,
     opts?.protectedSurfaces,
     prefetchedCallerNamedArtifacts(workspace),
   );
+  // Retry the bounded fold after internal envelope compaction, before final
+  // settlement/certification. Only the final emitted body enters the ledger.
+  applyFoldSmallRemainder(workspace, trimmed, opts?.cache);
   // Settle caller-ranged remaining/coverage against what trimToCap actually
   // shipped — see reconcileCallerRangeRemaining's own doc comment above for
   // the pinned defect this closes.
@@ -55902,11 +59950,14 @@ async function dedupeTrimAndPersist(
   // R2-T1 (eval-0929 review P0-3/P1-1): the certificate every tier below is
   // judged against — see `ceilingCertificationSnapshot`'s section header.
   // Before the first compaction, which drops the per-obligation evidence.
-  const ceilingCertification = fitsInCap(trimmed)
+  const ceilingCertification = fitsInCapUncompacted(trimmed)
     ? undefined
     : ceilingCertificationSnapshot(trimmed, workspace);
   let ceilingDemoted = false;
-  if (!fitsInCap(trimmed) && trimmed.execution_contract) {
+  // The first rung admits the FULL contract (its capability gaps among it) only
+  // while the pack also fits with its `next` restated -- see
+  // `fitsInCapUncompacted`; the rungs after it judge what ships.
+  if (!fitsInCapUncompacted(trimmed) && trimmed.execution_contract) {
     // Preserve authoritative typestate when the rich proof payload is the
     // only thing pushing an otherwise valid pack over its byte cap. Dropping
     // execution_contract entirely recreates the exact ambiguity the contract
@@ -56038,9 +60089,15 @@ async function dedupeTrimAndPersist(
           return;
         }
       }
+      const deferredAction = trimmed.change_contract?.obligations.find(row => row.path === surface.path && row.handle === surface.handle)?.action;
+      const reviewOnly = writeAuthorityVeto(effectiveQuery).reasonFor(surface.path, surface.why) !== undefined;
+      recordBudgetDeferredSurface(trimmed, {path: surface.path, handle: surface.handle, range: surface.range,
+        action: deferredAction === "edit" && !reviewOnly ? "edit" : "review",
+        evidenceRequired: isRequiredEnumReview(surface.why)});
       trimmed.surfaces.splice(index, 1);
       shedMutatedSurfaces = true;
-      if (discloseAlways || explicitlyProvenanced(surfaceProvenance(surface))) {
+      if (discloseAlways || explicitlyProvenanced(surfaceProvenance(surface))
+        || isRequiredEnumReview(surface.why)) {
         // Never silently drop an explicitly requested file (or a query-named /
         // pair-contract enrichment surface): the caller cannot tell "trimmed
         // for byte budget" apart from "does not exist", and the observed
@@ -56082,10 +60139,25 @@ async function dedupeTrimAndPersist(
         packServedSpans(trimmed),
         packServedSpans({ ...trimmed, surfaces: trimmed.surfaces.filter((candidate) => candidate !== surface) }),
       );
+    // Already-incomplete caller windows will need a continuation anyway.
+    // Move only their exact tail before surrendering complete ready evidence.
+    if (trimmed.execution_contract?.typestate.phase !== "prepared") {
+      const partialBodies = codeTaskPackSurfaces(trimmed.surfaces)
+        .filter(surface => surface.content_completeness === "partial"
+          && (surface.code?.length ?? 0) > 0 && callerNamedSurface(surfaceProvenance(surface))
+          && !protectedHandles.has(surface.handle) && !withdrawalBreaksCertificate(surface))
+        .sort((a, b) => codeBytesOf(b) - codeBytesOf(a));
+      for (const surface of partialBodies) {
+        if (fitsInCap(trimmed)) break;
+        const overflow = packWireBytes(trimmed) - capForResult(trimmed);
+        if (overflow > 0 && reduceServedBodyTail(surface, overflow + SHED_REDUCTION_SLACK_BYTES, workspace, opts?.cache)) shedMutatedSurfaces = true;
+      }
+    }
     const optional = codeTaskPackSurfaces(trimmed.surfaces)
       .filter((surface) => surface.required !== true && !protectedHandles.has(surface.handle))
       .sort((a, b) => codeBytesOf(b) - codeBytesOf(a));
     for (const surface of optional) {
+      if (fitsInCap(trimmed)) break;
       // R2-T1 PREVENTION: an optional surface the certificate cites is not
       // "evidence nothing required" — it is the evidence (measured: the whole
       // 300-line focal body of eval-0929 review P0-3 went here, largest first).
@@ -56212,7 +60284,7 @@ async function dedupeTrimAndPersist(
     if (ceilingCertification !== undefined) {
       ceilingDemoted = enforceCeilingCertificateInvariant(trimmed, ceilingCertification, workspace, false) || ceilingDemoted;
     }
-    if (!fitsInCap(trimmed) && trimmed.execution_contract) {
+    if (!fitsInCapUncompacted(trimmed) && trimmed.execution_contract) {
       trimmed.execution_contract = contractForTrim(trimmed.execution_contract);
     }
     if (!fitsInCap(trimmed) && trimmed.execution_contract) {
@@ -56401,6 +60473,9 @@ async function dedupeTrimAndPersist(
   // runnable target — an honest verify line + a session-recorded OPEN item, never
   // a block. Runs before the guidance cap so its verify line is accounted for.
   attachFunctionalValidationObligation(workspace, trimmed);
+  // 2026-10-20: and for a Python target, the interpreter that smoke run needs
+  // when the PATH's python3 falls short of the project.
+  attachPythonInterpreterHint(workspace, trimmed);
   // iter-3 F5: for an Office-source → Python-module build, attach the compact
   // runtime hint (discovered interpreters + module presence) so the build cell
   // does not burn its tail hunting a python that can import the library.
@@ -56844,6 +60919,41 @@ async function dedupeTrimAndPersist(
   if (!forceServePack) {
     applyResidentFileDedup(workspace, returned, tokenizeForEpoch(effectiveQuery), { allowRequiredDedup: profile === "answer", ...(dedupExempt ? { exempt: dedupExempt } : {}) });
   }
+  priorBodyRestoration.strip(codeTaskPackSurfaces(returned.surfaces), forceServePack);
+  // Semantic/certification passes are complete. Auxiliary source consumes only
+  // remaining wire capacity and never participates in the primary decision.
+  if (auxiliarySeed !== undefined && auxiliarySubjects.length > 0
+    && returned.ok !== false && protocolCallContext()?.sizePreview !== true) {
+    carryAuxiliaryEnumPool(returned, {...auxiliarySeed, subjects: auxiliarySubjects,
+      primaryPaths: [...new Set([...auxiliaryPrimaryPaths,
+        ...primaryEnumContextRows(returned.surfaces).map(surface => surface.path)])],
+    });
+    const pool = auxiliaryEnumPool(returned)!;
+    const added = await attachAuxiliaryEnumContexts({
+      pool, primary: returned.surfaces,
+      read: relPath => readCached(workspace, relPath),
+      held: (plan, start, end, totalLines) => servedRangeReceipt(
+        workspace, plan.path, `sha256:${plan.sourceSha}`, start, end, totalLines, undefined, true,
+      ) !== undefined,
+      fits: rows => {
+        const candidate = {...returned, surfaces: [...rows]} as TaskPackResult;
+        const preview = auxiliaryEnumAttachmentSizePreview(candidate, protocolCallContext()?.clientId);
+        return preview !== undefined && preview <= Math.min(18 * 1024, capForResult(returned));
+      },
+      mint: (relPath, range) => handleTable.upsert({kind: "range", path: relPath, range, workspaceRoot: workspace}).id,
+      forceServe: forceServePack,
+    });
+    (returned.surfaces as TaskPackResultSurface[]).push(...added);
+  }
+  if (!forceServePack) {
+    applyRequiredSourceCapsuleDedup(workspace, returned, opts?.args?.taskBinding, {
+      forceServe: opts?.args?.forceServe === true,
+      ...(dedupExempt !== undefined ? {exempt: dedupExempt} : {}),
+    });
+  }
+  // New late demotions remain proof-visible through dedupedSurfaceBody, then
+  // this guarded strip removes only the unchanged body from the wire object.
+  priorBodyRestoration.strip(codeTaskPackSurfaces(returned.surfaces), forceServePack);
   // FX-J: THE SINGLE BOOKING PASS. Every producer that asserts what this
   // response served runs inside it, downstream of the seam, off one
   // `shippedSurfaces` projection over the pack that ships.
@@ -57334,6 +61444,11 @@ export function trimToCap(
    */
   protectedArtifactPaths?: ReadonlySet<string>,
 ): TaskPackResult {
+  // Artifact consumers are optional context: shed whole, lowest-ranked first,
+  // before any phase below touches the pack, so a pack that cannot afford them
+  // keeps every part it had without them. A no-op for any other pack.
+  shedAuxiliaryEnumContexts(result.surfaces, () => fitsInCap(result));
+  shedArtifactConsumerSurfaces(result);
   if (fitsInCap(result)) return result;
 
   // RV-4(c): caller-supplied windows are independent targets, not a ranked
@@ -57440,11 +61555,12 @@ export function trimToCap(
   }
   if (fitsInCap(result)) return result;
 
-  // Phase B: drop why from all surfaces.
+  // Phase B: compact authority-bearing review provenance; drop advisory why.
   for (const surf of result.surfaces) {
-    if (surf.why !== undefined) {
-      surf.why = undefined;
-    }
+    if (surf.why?.startsWith(LISTED_ITEM_DERIVED_WHY)) surf.why = `${LISTED_ITEM_DERIVED_WHY}:`;
+    else if (surf.why?.startsWith(REQUIRED_ENUM_REVIEW_PURPOSE)) surf.why = REQUIRED_ENUM_REVIEW_PURPOSE;
+    else if (surf.why?.startsWith(EDIT_CONTEXT_WHY)) surf.why = `${EDIT_CONTEXT_WHY}:`;
+    else surf.why = undefined;
   }
   if (fitsInCap(result)) return result;
 
@@ -57643,11 +61759,46 @@ export function trimToCap(
  * drift from it (see wireBudgetG8Fence.spec.ts's ratchet).
  */
 function packWireBytes(result: TaskPackResult): number {
-  return Buffer.byteLength(JSON.stringify(result), "utf8");
+  return taskPackSizePreview(result, protocolCallContext()?.clientId)
+    ?? Buffer.byteLength(JSON.stringify(result), "utf8");
 }
 
-function fitsInCap(result: TaskPackResult): boolean {
+/** Whether the pack, measured as the transport ships it, is within its cap. Exported for taskPackSizePreview.spec.ts. */
+export function fitsInCap(result: TaskPackResult): boolean {
   return packWireBytes(result) <= capForResult(result);
+}
+
+/**
+ * Whether the pack fits its cap AND still fits with its `next` as the model
+ * would have to send it (taskPackSizePreview.ts, "restated": the request
+ * restated, every owed window listed, no root `cwd`), not only as the transport
+ * compacts it into a cursor. The full execution contract — the capability gaps
+ * that ride a discover as `decision.gaps` — is OPTIONAL content: `contractForTrim`
+ * sheds it whole when the pack does not fit (a gap is semantic: no call rides it,
+ * more bytes never close it, and the certificate restates it, so the reply that
+ * closes the chain carries what it must). Compacting the `next` is a transport
+ * optimization, and the room it makes belongs to the reply's rows — the shed
+ * ladder, which counts what ships — not to advisory content; so the contract is
+ * admitted only when the pack fits both ways. Every build before the size preview
+ * counted the shipped `next` applied this admission by accident, since the preview
+ * counted the restated call, and the workspace's path with it; this keeps the
+ * admission and drops the path, so a reply does not move with it (codex-copilot-proxy
+ * r18 T03, 2026-10-23: the discover replies of the whole-body chain had carried 369 B
+ * of `gaps` the recording does not have). Exported for taskPackSizePreview.spec.ts.
+ */
+export function fitsInCapUncompacted(result: TaskPackResult): boolean {
+  if (!fitsInCap(result)) return false;
+  const restated = taskPackSizePreview(result, protocolCallContext()?.clientId, "restated");
+  return restated === undefined || restated <= capForResult(result);
+}
+
+/** trimToCap's first step: drop artifact consumers until the pack keeps ARTIFACT_CONSUMER_RESERVE_BYTES spare. */
+function shedArtifactConsumerSurfaces(result: TaskPackResult): void {
+  if (!result.surfaces.some(isArtifactConsumerSurface)) return;
+  for (let index = result.surfaces.length - 1; index >= 0; index--) {
+    if (packWireBytes(result) + ARTIFACT_CONSUMER_RESERVE_BYTES <= capForResult(result)) return;
+    if (isArtifactConsumerSurface(result.surfaces[index])) result.surfaces.splice(index, 1);
+  }
 }
 
 /**
@@ -57675,4 +61826,152 @@ function attachPlanAids(result: TaskPackResult, workspace: string, query: string
   };
   attachFrontierNeighbourIndex(result, workspace, query, opts);
   attachUsageInventory(result, workspace, query, opts);
+}
+
+/**
+ * TL_EFF_MAP_ANSWER_FIRST: the packs that went out as an answer-first map (the core served, the other
+ * bodies owed and named). A pack's record remembers it (`ServedPackRecord.answerFirst`), so a restated
+ * request can say which windows the page left owed instead of marking its whole extent.
+ */
+const answerFirstPacks = new WeakSet<TaskPackResult>();
+
+/** How an answer-first map's pack ended (`attachAnswerFirstAdvisory`). */
+type AnswerFirstShip =
+  /** The advisory rides the pack, which fits its ceiling with it (or nothing was owed, so nothing is stated). */
+  | "shipped"
+  /** The pack's decision is not the answer the map was planned for: it states nothing. */
+  | "not-answer"
+  /** The pack is the answer, but not even the first tier of the facts fits under the ceiling beside it. */
+  | "no-room";
+
+/**
+ * TL_EFF_MAP_ANSWER_FIRST: the facts about the member bodies an answer-first map
+ * left owed ride the reply's `advisory`, in the room the finished pack has left
+ * under its ceiling — attached after the shed ladder, like the plan aids above.
+ * The room is MEASURED, not allowed for: the facts are composed for the whole room the
+ * pack leaves, attached, and the pack is measured again as it will ship, with the
+ * advisory on it (`taskPackSizePreview`, the first measurement of the shed ladder's
+ * `packWireBytes`; a client whose bodies the preview cannot prove exact has the plan's
+ * estimate plus the advisory's own wire bytes); while it is over its ceiling the facts
+ * are composed for a smaller room — tiers and calls dropped from the end — until it
+ * fits, so no tuned allowance decides whether the reply fits. A pack whose decision is
+ * not the answer the map was planned for states nothing, and one that has no room for
+ * even the first tier (the unserved bodies) is not shipped as the answer-first reply:
+ * the caller withdraws it (`rederiveAfterPlanRestore`).
+ */
+function attachAnswerFirstAdvisory(result: TaskPackResult, map: AnswerStructureMap | undefined): AnswerFirstShip | undefined {
+  const plan = map?.answerFirst;
+  if (plan === undefined || activePackByteCeiling() === undefined) return undefined;
+  if (deriveCanonicalTaskDecision(result)?.kind !== "act-answer") return "not-answer";
+  delete result.advisory;
+  const clientId = protocolCallContext()?.clientId;
+  const ceiling = clampToActiveCeiling(Number.MAX_SAFE_INTEGER);
+  // The preview counts the finished pack as the transport ships it; a client whose bodies it cannot prove exact has the plan's estimate instead.
+  const preview = taskPackSizePreview(result, clientId);
+  const used = preview ?? plan.estimateBytes;
+  if (plan.facts.notServed.length === 0) {
+    answerFirstPacks.add(result);
+    return "shipped";
+  }
+  let room = ceiling - used;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const text = composeAnswerFirstAdvisory(plan.facts, room);
+    if (text === "") break;
+    result.advisory = text;
+    const total = (preview === undefined ? undefined : taskPackSizePreview(result, clientId)) ?? used + advisoryWireBytes(text);
+    if (total <= ceiling) {
+      answerFirstPacks.add(result);
+      return "shipped";
+    }
+    room -= total - ceiling;
+  }
+  delete result.advisory;
+  return "no-room";
+}
+
+/**
+ * TL_EFF_MAP_ANSWER_FIRST: an adopted answer-first page that did not ship as the answer
+ * (`AnswerFirstShip`) leaves the chain on the ordinary map's requirements — the facet plan
+ * the request would have had without the flag is recorded again (`restoreOrdinaryFacetPlan`)
+ * — and, if the pack still presents itself as the answer, its contract is derived again
+ * over the recorded plan (as `enforceCertificateWireInvariant` does after a late pass
+ * withdrew evidence), so the reply is the discover that names what the ordinary
+ * requirements still need instead of an answer over the core without its advisory.
+ */
+function rederiveAfterPlanRestore(result: TaskPackResult, args: TaskPackArgs, workspace: string): void {
+  certifiedWorkingSets.delete(laneScopedKey(path.resolve(workspace)));
+  const effectiveQuery = args.query ?? args.symbol ?? args.path ?? "";
+  const profile: TaskProfile = result.coverage_basis === "cumulative"
+    ? "generic"
+    : result.profile_binding?.selected ?? "answer";
+  result.execution_contract = buildTaskExecutionContract(
+    result,
+    profile,
+    effectiveQuery,
+    buildTaskWorkspaceState(result, workspace, computeWorkspaceInventoryState(workspace)),
+    workspace,
+    false,
+    servedZoomScopeForArgs(args, effectiveQuery),
+  );
+  reconcileTaskPackExecutionContract(result);
+  enforceNoDeadEndContract(result, effectiveQuery, { workspace, lane: normalizeContractLane(args.lane) });
+  applyCanonicalTaskDecision(result);
+  trimNextAgainstShippedEvidence(result);
+}
+
+/** What the `"advisory":` key and its comma cost on the wire when the pack had none. */
+/**
+ * A structure map is a map of ONE file. When the type has members in other files
+ * — the methods a Go package declares in its other files, the `impl` blocks a
+ * Rust crate keeps in other modules (structureMapElsewhere.ts) — the reply says
+ * so in one line of its `advisory`, appended to whatever advisory the pack
+ * already carries and never in its place: `38 more methods of Command are
+ * declared in other files of this package: completions.go (20), …`. Those
+ * members are in no row, no required window and no `remaining_ranges` of the map;
+ * the line is what tells the reader the map is not the whole type.
+ *
+ * Optional content, like the answer-first advisory and the plan aids: attached
+ * after the shed ladder, and under an active byte ceiling only in the room the
+ * finished pack has left under it (measured as the pack is, `packWireBytes`),
+ * so it can never push a reply that fits back over its ceiling. States nothing
+ * for a pack that did not serve the map.
+ */
+function attachStructureMapElsewhereNote(
+  result: TaskPackResult,
+  map: AnswerStructureMap | undefined,
+  rendered: boolean,
+  workspace: string,
+  cache: FileReadCache,
+): void {
+  if (map === undefined || !rendered || !map.type.members.some((member) => member.outOfLine === true)) return;
+  const lang = languageForPath(map.type.path);
+  if (lang === undefined || !codeTaskPackSurfaces(result.surfaces).some((surface) => surface.path === map.type.path)) return;
+  const note = structureMapElsewhereNote({
+    workspace,
+    lang,
+    typeName: map.type.name,
+    typePath: map.type.path,
+    read: (relPath) => readCached(workspace, relPath, cache),
+  });
+  const cppNote = lang === "cpp" && map.otherMemberFiles !== undefined
+    ? `The bounded C++ counterpart scan also found ${map.otherMemberFiles.reduce((sum, file) => sum + file.count, 0)} matching ${map.type.name} definition${map.otherMemberFiles.reduce((sum, file) => sum + file.count, 0) === 1 ? "" : "s"} in other source file${map.otherMemberFiles.length === 1 ? "" : "s"}: ${map.otherMemberFiles.map((file) => `${file.path} (${file.count})`).join(", " )}; this map includes only ${map.fileLayouts?.find((file) => file.path !== map.type.path)?.path ?? "the selected counterpart"}.`
+    : undefined;
+  const lines = [note, cppNote].filter((line): line is string => line !== undefined);
+  if (lines.length === 0) return;
+  const advisory = lines.reduce((current, line) => appendAdvisoryLine(current, line), result.advisory);
+  const previous = result.advisory;
+  result.advisory = advisory;
+  if (activePackByteCeiling() !== undefined
+    && packWireBytes(result) > clampToActiveCeiling(Number.MAX_SAFE_INTEGER)) {
+    if (previous === undefined) delete result.advisory;
+    else result.advisory = previous;
+  }
+}
+
+/** Bind optional candidate reuse only after normal qref/task authentication. */
+export function publishTaskPackAuxiliaryEnumPool(workspace: string, original: object,
+  qref: string, binding: string, taskHandle: string): void {
+  if (protocolCallContext()?.sizePreview === true) return;
+  publishAuxiliaryEnumPool(original, getSession(workspace).activeTaskQuery,
+    workspace, qref, binding, taskHandle);
 }

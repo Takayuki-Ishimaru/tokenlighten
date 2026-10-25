@@ -36,6 +36,7 @@ import { resolveReal, isWithin } from "../util/safePath.js";
 // `findReferences.ts`'s legacy cursor uses — and its page is sized against the
 // `search.tree` wire row and the funnel's tokens->bytes ratio.
 import { mintContinuationHandle, resolveContinuationHandle } from "../state/stateHandles.js";
+import { rememberTreeCursorRoot, treeCursorRoot } from "../state/session.js";
 import { shaOfText } from "../util/handles.js";
 import { budgetFor, estimateBytesFromTokens } from "../protocol/budget/wireBudget.js";
 
@@ -890,12 +891,17 @@ interface TreeCursorPayload {
   o: number;
 }
 
+/** A tree cursor's `r`: the digest of the normalized root its listing was rendered for. */
+function treeRootDigest(normalizedSub: string): string {
+  return digest16(`tree-root\u0000${normalizedSub}`);
+}
+
 /** `listingDigest` is `digest16` of the whole listing, computed once per call. */
 function treeCursorPayload(listing: TreeListing, listingDigest: string, offset: number): TreeCursorPayload {
   return {
     v: 1,
     t: "tree",
-    r: digest16(`tree-root\u0000${listing.normalizedSub}`),
+    r: treeRootDigest(listing.normalizedSub),
     d: listing.depth,
     s: listingDigest,
     o: offset,
@@ -964,7 +970,22 @@ export function buildTreeResponse(workspace: string, request: TreeRequest): Tree
     }
   }
 
-  const prepared = prepareTreeListing(workspace, request.subPath, request.depth);
+  // 2026-10-19 (DESIGN-v0.14-plan.md §20.26, v016 6t-3 T05c rep2 #8/#9): a
+  // cursor call's omitted scope is the cursor's own. The path comes from the
+  // root this session remembered when it issued the cursor (the cursor holds
+  // only its digest); the depth from the cursor, once the root is the
+  // cursor's. The recorded `{action:"tree", cwd, cursor}` was read as the
+  // workspace root at the default depth and refused twice; it now resumes.
+  // A root this session did not issue (another session, a restart) keeps the
+  // scope-change refusal below.
+  let subPath = request.subPath;
+  let depth = request.depth;
+  if (resume !== undefined) {
+    if (subPath === undefined) subPath = treeCursorRoot(workspace, resume.r);
+    if (depth === undefined && treeRootDigest(normalizeSubPath(workspace, subPath)) === resume.r) depth = resume.d;
+  }
+
+  const prepared = prepareTreeListing(workspace, subPath, depth);
   if (!prepared.ok) return { kind: "body", body: prepared.result };
   const { listing } = prepared;
   const { lines } = listing;
@@ -975,6 +996,11 @@ export function buildTreeResponse(workspace: string, request: TreeRequest): Tree
     const current = treeCursorPayload(listing, listingDigest, resume.o);
     const changed = current.r !== resume.r ? "scope.path" : current.d !== resume.d ? "scope.depth" : undefined;
     if (changed !== undefined) {
+      // 2026-10-19 (v016 6t-3 T05c rep2 #8/#9): a cursor binds only digests of
+      // its scope, so it never resumes under another one; `next` serves what
+      // this call asked for instead: the requested scope from its first page,
+      // no cursor, this call's budget. With no `next`, the recorded solver,
+      // which had sent the cursor with no scope at all, re-sent the same call.
       return {
         kind: "refusal",
         refusal: {
@@ -982,8 +1008,9 @@ export function buildTreeResponse(workspace: string, request: TreeRequest): Tree
           code: "invalid-input",
           field: changed,
           error: `tree cursor continuation cannot change '${changed}'`,
-          detail: "a tree cursor continuation accepts only budget overrides; re-issue the original tree call to change its scope",
+          detail: "a tree cursor continuation accepts only budget overrides; next lists the scope this call asked for from its first page (resuming the cursor needs the scope of the call that returned it)",
           retry: "call",
+          next: restart(listing.root, listing.depth),
         },
       };
     }
@@ -1062,6 +1089,7 @@ export function buildTreeResponse(workspace: string, request: TreeRequest): Tree
   if (truncated) {
     const cursor = mintContinuationHandle(workspace, treeCursorPayload(listing, listingDigest, end));
     if (cursor !== undefined) {
+      rememberTreeCursorRoot(workspace, treeRootDigest(listing.normalizedSub), listing.normalizedSub);
       body.next_call = {
         tool: "tl_search_files",
         arguments: { ...treeCallArguments(listing.root, listing.depth, request.budget), cursor },

@@ -821,6 +821,11 @@ const REFUSAL_ADVISORY_KEYS_BY_CODE: Readonly<Record<string, readonly string[]>>
    *      files matched, at which lines, how many times. Complete by
    *      construction; only the snippets (bytes the caller already holds) are
    *      withheld, which is the whole economy of the escalation.
+   *   `term_results` — the find's per-term verdicts, present only for a
+   *      multi-term find with a miss: which term matched, and which is
+   *      certified absent over the scanned scope. Not a byte the caller holds;
+   *      without it the caller re-searches for the absent term (2026-10-20,
+   *      bench 6t-7 T09 rep1 #10).
    *   `all_served`, `all_served_occurrence` — WHY this is a refusal and how
    *      many times it has now happened. `code` says the class; only the
    *      occurrence count distinguishes a first escalation from a loop.
@@ -832,7 +837,7 @@ const REFUSAL_ADVISORY_KEYS_BY_CODE: Readonly<Record<string, readonly string[]>>
    *      offers in place of the search (`content_matched` is its evidence).
    */
   "repeated-all-served-find": [
-    "files", "total_files", "total_matches",
+    "files", "total_files", "total_matches", "term_results",
     "all_served", "all_served_occurrence",
     "duplicate_of_query", "duplicate_call",
     "query", "receipt_note",

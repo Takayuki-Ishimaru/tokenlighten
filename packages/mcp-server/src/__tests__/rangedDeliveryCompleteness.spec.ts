@@ -47,16 +47,14 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { shortTmpDir } from "./helpers/shortTmpDir.js";
 import { rmDirWithRetry, waitForExit } from "./helpers/rmDirWithRetry.js";
+import { TSX_NODE_ARGS } from "./helpers/tsxNode.js";
 
-const nodeRequire = createRequire(import.meta.url);
-const TSX_CLI = nodeRequire.resolve("tsx/cli");
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BIN_TS = path.resolve(HERE, "..", "bin.ts");
 const HOME = process.env["HOME"] ?? process.env["USERPROFILE"] ?? os.homedir();
@@ -129,7 +127,7 @@ function serverArgv(cwd: string): string[] {
   const cli = process.env["TL_RDC_SERVER_CLI"];
   return cli !== undefined && cli !== ""
     ? [cli, "mcp", "start", "--stdio", "--workspace", cwd]
-    : [TSX_CLI, "--liftoff-only", BIN_TS, cwd];
+    : [...TSX_NODE_ARGS, BIN_TS, cwd];
 }
 
 function startServer(cwd: string, env: NodeJS.ProcessEnv): ServerHandle {
@@ -137,10 +135,9 @@ function startServer(cwd: string, env: NodeJS.ProcessEnv): ServerHandle {
     cwd,
     stdio: ["pipe", "pipe", "pipe"],
     env,
-    // Own process group (POSIX), so kill() below reaches the tsx/CLI wrapper
-    // AND the real server it execs underneath it (the CLI-wrapped
-    // `TL_RDC_SERVER_CLI` form nests a grandchild too) — killing only the
-    // direct child can orphan that real grandchild.
+    // Own process group (POSIX), so kill() below reaches the real server the
+    // CLI-wrapped `TL_RDC_SERVER_CLI` form execs underneath the CLI, and any
+    // child a server starts — killing only the direct child can orphan those.
     detached: process.platform !== "win32",
   });
 

@@ -1,0 +1,12 @@
+<!-- tokenlighten:mcp-instructions:start -->
+<!-- tl-instructions-version: {{VERSION}} -->
+<!-- tl-instructions-sha256: {{SHA256}} -->
+## TokenLighten
+
+Use TL for every workspace read, search and edit.
+FIRST source lookup: `tl_read_file {cwd,query:"<entire user request, verbatim>",task:{epoch:"new"}}`. Preserve all constraints/citations; unknown paths: omit targets. Read-only: task.profile:"answer"; change:"generic"; otherwise omit profile. Native only if requested, TL unavailable/native-bypass, or TL reported the scope incomplete/absent; otherwise never switch tools mid-task.
+Every call: top-level cwd; add no cwd to a next; alone omit lane; else fixed lane from call 1, never add/change later. Same request's later calls: returned task.id as task.handle, never epoch:"new"; expected_state_version only beside handle.
+Act on decision.kind: act.answer/act.edit => use exact evidence[].body and cited paths/lines without re-reading; later reads: targets[] (path|handle,range), no query. Batch independent reads in ONE targets[] and edits in ONE edits[]. Unknown kind => stop/report; never infer. Run next verbatim; hints are not calls. refusal.retry: call=>correct field; new-task=>re-pack; user-input=>ask; none=>stop. discover/await_input without next=>ask for missing scope.
+read.receipt=>already served: reuse earlier evidence bodies/handles, follow next when present, else act/stop. Use task.force_serve:true only if earlier bodies are actually lost. task.pull:"closure" returns verification checks, not source: use only after an edit response carries closure; omit when reading targets. Search: action:"find", one literal identifier per queries[] entry, never a phrase; scope.path if known; references=call sites, tree=listing; budgets: budget.bytes/tokens.
+Edit only served bytes this epoch: path/search/replace+precondition:"unique-match",allowPathFallback:false. A handle must cover search; multiple windows: prefer path. New file: path,create:true,content; empty frontier+create_target=>create. Writes require --allow-write. edit.applied=>landed; edit.rolled_back=>nothing landed; edit.state_unknown=>run recovery first. Never retry failed edits verbatim; operation_id replay is safe. Verification omitted=>run batched next before tests; discharge recipe.gaps. Shell only build/tests/git: never cat/sed/grep/rg/find/ls or native Read/Edit on workspace files. Stop after passing relevant check.
+<!-- tokenlighten:mcp-instructions:end -->

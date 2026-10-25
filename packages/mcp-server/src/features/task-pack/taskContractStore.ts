@@ -94,6 +94,47 @@ export interface TaskContractScope {
   readonly taskHandle?: string;
 }
 
+/** Immutable task-contract inputs for a bounded, detached readiness evaluation. */
+export interface TaskContractEvaluationSnapshot {
+  readonly epochTokens: readonly string[];
+  readonly query: string;
+  readonly ledger: ObligationLedgerSnapshot;
+}
+
+/** Ordered updates produced by one finalized pack; contains no store identity or callbacks. */
+export interface TaskContractObservationUpdate {
+  readonly epochTokens: readonly string[];
+  readonly query: string;
+  readonly taskContract: Readonly<{
+    query: string;
+    requiredRoles: readonly string[];
+    concernTokens: readonly string[];
+    servedRoles: readonly string[];
+    coveredConcernTokens: readonly string[];
+  }>;
+  readonly expansion: Readonly<{ targets: readonly string[]; servedDefinitions: readonly string[] }>;
+  readonly literalSourceUniverse: boolean;
+  readonly explicitGap?: Readonly<{
+    parent: Readonly<{ kind: string; target: string }>;
+    targets: readonly string[];
+    witness: string;
+  }>;
+}
+
+export interface TaskContractLedgerProjection {
+  readonly open: string[];
+  readonly explicitGaps: string[];
+  readonly resolved: string[];
+}
+
+function immutableLedgerSnapshot(snapshot: ObligationLedgerSnapshot): ObligationLedgerSnapshot {
+  const obligations = Object.freeze(snapshot.obligations.map((entry) => Object.freeze({
+    ...entry,
+    ...(entry.proof === undefined ? {} : { proof: Object.freeze({ ...entry.proof }) }),
+  })));
+  return Object.freeze({ obligations, digest: snapshot.digest });
+}
+
 interface WorkspaceTaskContract {
   /** The FIRST pack's significant tokens — the epoch's fixed identity anchor, never widened (see the module header). */
   epochTokens: string[];
@@ -481,6 +522,114 @@ function _prove(record: WorkspaceTaskContract, kind: "required-role" | "concern-
   }
 }
 
+/** Apply the same ordered ledger updates as the persisted writers to a detached record. */
+export function applyTaskContractObservationToSnapshot(
+  prior: TaskContractEvaluationSnapshot | undefined,
+  observation: TaskContractObservationUpdate,
+): TaskContractEvaluationSnapshot | undefined {
+  if (observation.epochTokens.length === 0) return prior;
+  let record: WorkspaceTaskContract;
+  if (prior !== undefined && !_sameTask(observation.epochTokens, prior.epochTokens)) {
+    record = {
+      epochTokens: [...observation.epochTokens],
+      query: "",
+      ledger: new ObligationLedger(),
+      scope: { lane: "detached-evaluation" },
+      pendingNexts: [],
+    };
+  } else if (prior === undefined) {
+    record = {
+      epochTokens: [...observation.epochTokens],
+      query: "",
+      ledger: new ObligationLedger(),
+      scope: { lane: "detached-evaluation" },
+      pendingNexts: [],
+    };
+  } else {
+    record = {
+      epochTokens: [...prior.epochTokens],
+      query: prior.query,
+      ledger: ObligationLedger.fromSnapshot(prior.ledger),
+      scope: { lane: "detached-evaluation" },
+      pendingNexts: [],
+    };
+  }
+
+  const observed = observation.taskContract;
+  if (record.query === "" && typeof observed.query === "string" && observed.query.trim() !== "") {
+    record.query = observed.query;
+  }
+  _add(record, "required-role", observed.requiredRoles, MAX_TRACKED_REQUIRED_ROLES);
+  _add(record, "concern-token", observed.concernTokens, MAX_TRACKED_CONCERN_TOKENS);
+  _prove(record, "required-role", observed.servedRoles, "served");
+  _prove(record, "concern-token", observed.coveredConcernTokens, "served");
+
+  const served = new Set(observation.expansion.servedDefinitions.map((value) => value.toLowerCase()));
+  for (const target of observation.expansion.targets) {
+    const obligation = { kind: "dependency-definitions", target, polarity: "evidence" as const };
+    record.ledger.add({ ...obligation, origin: "evidence-expansion" });
+    if (served.has(target.toLowerCase())) record.ledger.prove(obligation, { type: "served", witness: target });
+  }
+  if (observation.literalSourceUniverse) {
+    const obligation = { kind: "dependency-definitions", target: "literal-source-universe", polarity: "evidence" as const };
+    record.ledger.add({ ...obligation, origin: "evidence-expansion" });
+    record.ledger.prove(obligation, { type: "served", witness: "literal-source-universe" });
+  }
+  if (observation.explicitGap !== undefined) {
+    const applyGap = (kind: string, target: string, witness: string): void => {
+      const obligation = { kind, target, polarity: "evidence" as const };
+      if (!record.ledger.has(obligation)) record.ledger.add({ ...obligation, origin: "evidence-expansion" });
+      record.ledger.prove(obligation, { type: "explicit-gap", witness });
+    };
+    applyGap(observation.explicitGap.parent.kind, observation.explicitGap.parent.target, observation.explicitGap.witness);
+    for (const target of observation.explicitGap.targets) {
+      applyGap("dependency-definitions", target, observation.explicitGap.witness);
+    }
+  }
+  return Object.freeze({
+    epochTokens: Object.freeze([...record.epochTokens]),
+    query: record.query,
+    ledger: immutableLedgerSnapshot(record.ledger.snapshot()),
+  });
+}
+
+/** The production read path's epoch-gated record, exposed as immutable inputs for evaluation. */
+export function taskContractEvaluationSnapshot(
+  workspaceRoot: string,
+  epochTokens: readonly string[],
+  scope?: TaskContractScope,
+): TaskContractEvaluationSnapshot | undefined {
+  const record = _load(workspaceRoot, _effectiveScope(scope));
+  if (record === undefined || !_sameTask(epochTokens, record.epochTokens)) return undefined;
+  return Object.freeze({
+    epochTokens: Object.freeze([...record.epochTokens]),
+    query: record.query,
+    ledger: immutableLedgerSnapshot(record.ledger.snapshot()),
+  });
+}
+
+/** Existing ledger projections evaluated against an explicit immutable snapshot. */
+export function taskContractProjectionForSnapshot(
+  snapshot: TaskContractEvaluationSnapshot | undefined,
+  epochTokens: readonly string[],
+): { projection: TaskContractLedgerProjection; certificate: DischargeCertificate | undefined } {
+  if (snapshot === undefined || !_sameTask(epochTokens, snapshot.epochTokens)) {
+    return { projection: { open: [], explicitGaps: [], resolved: [] }, certificate: undefined };
+  }
+  const ledger = ObligationLedger.fromSnapshot(snapshot.ledger);
+  const entries = ledger.snapshot().obligations;
+  return {
+    projection: {
+      open: entries.filter((entry) => entry.proof === undefined).map((entry) => `${entry.kind}:${entry.target}`),
+      explicitGaps: entries.filter((entry) => entry.proof?.type === "explicit-gap")
+        .map((entry) => `${entry.kind}:${entry.target} (${entry.proof!.witness})`),
+      resolved: entries.filter((entry) => entry.proof?.type === "served")
+        .map((entry) => `${entry.kind}:${entry.target}`),
+    },
+    certificate: dischargeCertificate(ledger),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -763,9 +912,10 @@ export function taskContractDischargeCertificate(
   epochTokens: readonly string[],
   scope?: TaskContractScope,
 ): DischargeCertificate | undefined {
-  const record = _load(workspaceRoot, _effectiveScope(scope));
-  if (record === undefined || !_sameTask(epochTokens, record.epochTokens)) return undefined;
-  return dischargeCertificate(record.ledger);
+  return taskContractProjectionForSnapshot(
+    taskContractEvaluationSnapshot(workspaceRoot, epochTokens, scope),
+    epochTokens,
+  ).certificate;
 }
 
 /**
@@ -796,20 +946,10 @@ export function taskContractGapProjection(workspaceRoot: string, epochTokens: re
   explicitGaps: string[];
   resolved: string[];
 } {
-  const record = _load(workspaceRoot, _effectiveScope(scope));
-  if (record === undefined || !_sameTask(epochTokens, record.epochTokens)) return { open: [], explicitGaps: [], resolved: [] };
-  const entries = record.ledger.snapshot().obligations;
-  return {
-    open: entries.filter((entry) => entry.proof === undefined).map((entry) => `${entry.kind}:${entry.target}`),
-    explicitGaps: entries
-      .filter((entry) => entry.proof?.type === "explicit-gap")
-      .map((entry) => `${entry.kind}:${entry.target} (${entry.proof!.witness})`),
-    // Same `kind:target` spelling as `open`, so the two are directly
-    // comparable: an id appears in exactly one of the three columns.
-    resolved: entries
-      .filter((entry) => entry.proof?.type === "served")
-      .map((entry) => `${entry.kind}:${entry.target}`),
-  };
+  return taskContractProjectionForSnapshot(
+    taskContractEvaluationSnapshot(workspaceRoot, epochTokens, scope),
+    epochTokens,
+  ).projection;
 }
 
 /** Drop the requirement model for a workspace (epoch reset / taskEpoch:"new"). */

@@ -28,7 +28,7 @@
 //     by the time either runs, the ORIGINAL query string is no longer what
 //     matched — a definition/callers lookup for that exact string would not
 //     be the precise, targeted call this feature promises.
-//   - queries[] (buildFindResponseForQueries, the OR-batch of up to 5
+//   - queries[] (buildFindResponseForQueries, the OR-batch of up to 10
 //     literal tokens) is out of scope: "one identifier" does not describe a
 //     batch, and the primary/documented single-identifier call shape is
 //     `query=`, not `queries=[...]`.

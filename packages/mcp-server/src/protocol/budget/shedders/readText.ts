@@ -28,10 +28,12 @@ import { joinBodyLines } from "../../sourceFidelity.js";
 import {
   arrayAt,
   isRecord,
+  keptLinesPerPass,
   peelOrdered,
   carriesStripDisclosure,
   str,
   withKey,
+  type ShedContext,
   type ShedOutcome,
   type ShedPayload,
   type Shedder,
@@ -120,7 +122,7 @@ function shedTextProse(payload: ShedPayload): ShedOutcome | undefined {
  * again — geometric, terminating at one line, and never over-shooting by more
  * than one halving.
  */
-function truncateLargestBody(payload: ShedPayload): ShedOutcome | undefined {
+function truncateLargestBody(payload: ShedPayload, context: ShedContext): ShedOutcome | undefined {
   const evidence = arrayAt(payload, "evidence");
   if (evidence === undefined) return undefined;
 
@@ -154,7 +156,7 @@ function truncateLargestBody(payload: ShedPayload): ShedOutcome | undefined {
   const rawBody = String(entry["body"]);
   const lines = (rawBody.endsWith("\n") ? rawBody.slice(0, -1) : rawBody).split("\n");
   if (lines.length < 2) return undefined;
-  const keep = Math.ceil(lines.length / 2);
+  const keep = keptLinesPerPass(lines.length, context);
   if (keep >= lines.length) return undefined;
 
   const [start] = bounds;

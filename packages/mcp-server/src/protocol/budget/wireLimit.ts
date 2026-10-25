@@ -242,11 +242,43 @@ function extractReadFileTargets(call: ToolCall): Array<Record<string, unknown>> 
   return [bare];
 }
 
-/** `targets[]` de-duplication key: by `handle` first (the more specific address this tree mints), else `path`. */
+/**
+ * `targets[]` de-duplication key: by `handle` first (the more specific address
+ * this tree mints), else `path` -- and, for a ranged target, by the LAST LINE of
+ * its window too.
+ *
+ * 2026-10-24 (read-page ceiling): the key used to be the address alone, on the
+ * premise that one entry of a batch is one window of its handle. A batch of
+ * SEVERAL windows of one handle (the answer-first `remaining` list followed
+ * verbatim: 54 windows over a handful of handles) broke that premise: the
+ * emitter's `next` naming 43 of them, unioned with the two windows a trailing
+ * entry's drop named, collapsed to one window per handle -- two targets -- and
+ * the other 41 windows were owed by nothing. The window's END is what stays
+ * fixed while one entry is narrowed pass after pass (rung 4's `unkeptEnd` and
+ * rung 6's `unservedRangeFor` both keep the original end and move only the
+ * start), so `(address, end)` still names one entry across every pass and names
+ * two different windows of one handle as two. A target without a parsable
+ * `range` keeps the address-only key.
+ */
 function targetDescriptorKey(target: Record<string, unknown>): string {
-  if (typeof target["handle"] === "string") return `h:${target["handle"]}`;
-  if (typeof target["path"] === "string") return `p:${target["path"]}`;
-  return `?:${JSON.stringify(target)}`;
+  const base = typeof target["handle"] === "string"
+    ? `h:${target["handle"]}`
+    : typeof target["path"] === "string"
+      ? `p:${target["path"]}`
+      : undefined;
+  if (base === undefined) return `?:${JSON.stringify(target)}`;
+  const window = windowOf(target);
+  if (window !== undefined) return `${base}@${window[1]}`;
+  const ranges = target["ranges"];
+  return Array.isArray(ranges) && ranges.length > 0 ? `${base}@${JSON.stringify(ranges)}` : base;
+}
+
+/** `[start, end]` of a target's `N-M` `range`, or undefined. */
+function windowOf(target: Record<string, unknown>): [number, number] | undefined {
+  const range = target["range"];
+  if (typeof range !== "string") return undefined;
+  const match = /^(\d+)-(\d+)$/u.exec(range.trim());
+  return match === null ? undefined : [Number(match[1]), Number(match[2])];
 }
 
 /**
@@ -255,7 +287,11 @@ function targetDescriptorKey(target: Record<string, unknown>): string {
  * `incoming` OVERWRITES `previous`'s value: `incoming` was computed against
  * the more recent payload state, so it is the one that still describes what
  * the response actually ships (`previous` may be several rung-4 passes
- * stale).
+ * stale). A shared key shares the window's end (`targetDescriptorKey`), and the
+ * window kept never starts later than either side's: narrowing only ever moves
+ * the start EARLIER (more is owed), so for one entry that is `incoming` itself,
+ * and for two overlapping windows that happen to end on one line it is their
+ * union rather than the later of the two.
  */
 function mergeTargetDescriptors(
   previous: readonly Record<string, unknown>[],
@@ -270,8 +306,16 @@ function mergeTargetDescriptors(
   }
   for (const target of incoming) {
     const key = targetDescriptorKey(target);
-    if (!byKey.has(key)) order.push(key);
-    byKey.set(key, target);
+    const prior = byKey.get(key);
+    if (prior === undefined) order.push(key);
+    const priorWindow = prior === undefined ? undefined : windowOf(prior);
+    const window = windowOf(target);
+    byKey.set(
+      key,
+      priorWindow !== undefined && window !== undefined && priorWindow[0] < window[0]
+        ? { ...target, range: `${priorWindow[0]}-${window[1]}` }
+        : target,
+    );
   }
   return order.map((key) => byKey.get(key)!);
 }

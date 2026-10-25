@@ -491,7 +491,11 @@ describe("SPB: multi-file results", () => {
     const ws = freshWorkspace("breadth");
     const fixture = writeWideAndSmallFiles(ws, 300, 250, 1);
     expect(fixture.keys.size).toBe(550);
-    const server = await serverFor(ws);
+    // 2026-10-19: "too many footholds for one page" is 251 files each with its
+    // snippet; with TL_EFF_FIND_SNIPPET_CAP (default ON) only ten keep one, the
+    // page holds every file's line and the wide file's full preview, and the
+    // footholds-first fit this case pins never has to choose. Pinned off.
+    const server = await serverFor(ws, "default", { extraEnv: { TL_EFF_FIND_SNIPPET_CAP: "0" } });
     const { body, textBytes } = await server.callTool("tl_search_files", { action: "find", queries: ["needle_"], cwd: ws });
     const matches = matchesOf(body as Record<string, unknown>);
     const files = filesOf(body as Record<string, unknown>);

@@ -175,13 +175,17 @@ export function getInstallConsistency(): Record<string, unknown> | undefined {
 
 export async function spawnTl(
   args: string[],
-  options?: { cwd?: string },
+  options?: { cwd?: string; timeoutMs?: number; signal?: AbortSignal },
 ): Promise<SpawnResult> {
+  if (options?.signal?.aborted) {
+    return { stdout: "", stderr: "TokenLighten CLI cancelled", code: null };
+  }
   const invocation = getCliInvocation();
   return new Promise<SpawnResult>((resolve) => {
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let cancelled = false;
 
     // cross-spawn safely resolves npm's Windows .cmd shims while preserving
     // array-based arguments and shell:false.
@@ -196,21 +200,40 @@ export async function spawnTl(
       [...invocation.argsPrefix, ...args],
       spawnOptions,
     );
+    let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+    const abort = (): void => {
+      cancelled = true;
+      proc.kill();
+      if (!forceKillTimer) {
+        forceKillTimer = setTimeout(() => { proc.kill("SIGKILL"); }, 2500);
+        forceKillTimer.unref();
+      }
+    };
+    options?.signal?.addEventListener("abort", abort, { once: true });
+    if (options?.signal?.aborted) abort();
 
     proc.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
     proc.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
 
     const timer = setTimeout(() => {
       timedOut = true;
-      proc.kill();
+      abort();
       resolve({ stdout, stderr, code: null });
-    }, SPAWN_TIMEOUT_MS);
+    }, options?.timeoutMs !== undefined && Number.isFinite(options.timeoutMs)
+      ? Math.max(1, Math.min(900_000, options.timeoutMs)) : SPAWN_TIMEOUT_MS);
 
     proc.on("close", (code) => {
-      if (!timedOut) { clearTimeout(timer); resolve({ stdout, stderr, code }); }
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      options?.signal?.removeEventListener("abort", abort);
+      if (!timedOut) {
+        clearTimeout(timer);
+        resolve({ stdout, stderr: cancelled ? [stderr, "TokenLighten CLI cancelled"].filter(Boolean).join("\n") : stderr, code: cancelled ? null : code });
+      }
     });
 
     proc.on("error", (err: NodeJS.ErrnoException) => {
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      options?.signal?.removeEventListener("abort", abort);
       clearTimeout(timer);
       resolve({ stdout: "", stderr: err.code === "ENOENT" ? "tl not found" : err.message, code: null });
     });

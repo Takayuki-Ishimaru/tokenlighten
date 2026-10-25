@@ -199,7 +199,8 @@ function listJsonlFiles(root: string, limit: number): string[] {
       continue;
     }
     for (const entry of entries) {
-      if (files.length >= limit || entry.isSymbolicLink()) break;
+      if (files.length >= limit) break;
+      if (entry.isSymbolicLink()) continue;
       const path = join(directory, entry.name);
       if (entry.isDirectory()) pending.push(path);
       else if (entry.isFile() && JSONL_FILE.test(entry.name)) files.push(path);
@@ -294,13 +295,13 @@ function claudeRecords(
   return [...byModel.values()];
 }
 
-function codexRecord(
+function codexRecords(
   values: readonly unknown[],
   sinceMs: number | null,
-): AiUsageRecord | null {
+): AiUsageRecord[] {
   if (!values.some(
     (value) => isInUsageWindow(value, sinceMs) && containsTokenLightenTool(value),
-  )) return null;
+  )) return [];
   let model = "unknown";
   type Snapshot = {
     inputTokens: number;
@@ -308,9 +309,8 @@ function codexRecord(
     outputTokens: number;
     totalTokens: number;
   };
-  let baseline: Snapshot | undefined;
-  let latest: Snapshot | undefined;
-  let requestCount = 0;
+  let previous: Snapshot = { inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalTokens: 0 };
+  const byModel = new Map<string, AiUsageRecord>();
   for (const value of values) {
     const row = objectValue(value);
     const payload = objectValue(row?.["payload"]);
@@ -339,37 +339,25 @@ function codexRecord(
       const timestamp = rowTimestampMilliseconds(value);
       if (timestamp === null) continue;
       if (timestamp < sinceMs) {
-        baseline = snapshot;
+        previous = snapshot;
         continue;
       }
     }
-    latest = snapshot;
-    requestCount++;
+    // Attribute the increment when it was billed. A later turn_context must
+    // not move earlier requests onto a different model's price schedule.
+    const record = byModel.get(model) ?? {
+      client: "codex", model, inputTokens: 0, cacheWriteTokens: 0,
+      cacheReadTokens: 0, outputTokens: 0, totalTokens: 0, requestCount: 0,
+    };
+    record.inputTokens += Math.max(0, snapshot.inputTokens - previous.inputTokens);
+    record.cacheReadTokens += Math.max(0, snapshot.cacheReadTokens - previous.cacheReadTokens);
+    record.outputTokens += Math.max(0, snapshot.outputTokens - previous.outputTokens);
+    record.totalTokens += Math.max(0, snapshot.totalTokens - previous.totalTokens);
+    record.requestCount++;
+    byModel.set(model, record);
+    previous = snapshot;
   }
-  if (!latest) return null;
-  const previous = baseline ?? {
-    inputTokens: 0,
-    cacheReadTokens: 0,
-    outputTokens: 0,
-    totalTokens: 0,
-  };
-  const inputTokens = Math.max(0, latest.inputTokens - previous.inputTokens);
-  const cacheReadTokens = Math.max(
-    0,
-    latest.cacheReadTokens - previous.cacheReadTokens,
-  );
-  const outputTokens = Math.max(0, latest.outputTokens - previous.outputTokens);
-  const totalTokens = Math.max(0, latest.totalTokens - previous.totalTokens);
-  return {
-    client: "codex",
-    model,
-    inputTokens,
-    cacheWriteTokens: 0,
-    cacheReadTokens,
-    outputTokens,
-    totalTokens,
-    requestCount,
-  };
+  return [...byModel.values()];
 }
 
 function defaultCodexDirectory(): string {
@@ -461,9 +449,7 @@ export function readAiUsageLogs(options: AiLogReadOptions = {}): AiLogReadResult
       }
       const values = jsonLines(text);
       const sessionRecords = root.client === "codex"
-        ? [codexRecord(values, sinceMs)].filter(
-          (record): record is AiUsageRecord => record !== null,
-        )
+        ? codexRecords(values, sinceMs)
         : claudeRecords(values, sinceMs);
       // Sessions that never used TokenLighten are out of scope entirely, so
       // they must not count toward (or warn about) unattributable exclusions.

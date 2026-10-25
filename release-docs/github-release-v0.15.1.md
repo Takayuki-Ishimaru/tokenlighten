@@ -65,9 +65,8 @@ follow a returned `next` when they need current file contents.
   definitions may need to be checked separately.
 - Existing read, edit-window, budget and client limitations remain; see
   [MCP tools](mcp-tools.md) and the [v0.15.0 release notes](github-release-v0.15.0.md).
-- Savings depend on the task, client, model and caching. The README's
-  comparisons describe v0.15.0 observations; they are not new measurements
-  of v0.15.1.
+- Savings depend on the task, client, model and caching. No new savings
+  percentage is claimed for v0.15.1.
 
 ## Assets
 

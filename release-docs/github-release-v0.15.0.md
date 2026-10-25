@@ -84,15 +84,6 @@ Three MCP tools are available: `tl_read_file`, `tl_search_files`, and
   tool is updated; packaging a VSIX from source requires Node.js 22 or later.
   Installing a release archive or VSIX still needs no separate Node.js install.
 
-## Indicative savings
-
-In a Sonnet comparison, total task cost was 33.7% lower across the 11 pairs
-with verified outcomes in both configurations and complete billing records,
-calculated from recorded usage and token prices. Unfinished tasks and trials
-with incomplete records are excluded; task-level samples are small. See the
-[README comparison](../README.md#indicative-savings-v0150) for the task results
-and limitations.
-
 ## GitHub Copilot and shared agent guides
 
 - The tools now use the `tl_` prefix to distinguish them from built-in editor
@@ -113,13 +104,6 @@ and limitations.
 - Copilot's advertised tool definition is smaller while continuing to accept
   the server's recovery and continuation calls. Disabling TokenLighten or
   switching to the native profile also disables its managed Copilot guidance.
-
-In a small comparison using normal Copilot Agent chats, code-reading and
-explanation tasks with GPT-6 Luna used 9.8–11.9% fewer billed credits on
-average. MAI results varied with cache conditions; short reading tasks took
-two model round trips instead of three or four. These are limited observations,
-not guaranteed savings. See the [README comparison](../README.md#indicative-savings-v0150)
-for the tasks, sample sizes, and caveats.
 
 ## Compatibility and upgrade
 

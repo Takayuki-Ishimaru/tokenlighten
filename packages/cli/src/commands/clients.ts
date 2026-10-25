@@ -471,6 +471,7 @@ function copilotCliDetected(options: ClientsEngineOptions): boolean {
 function copilotEntry(
   launcher: StableLauncher,
   writePosture: "allow-write" | "read-only" = "allow-write",
+  deferTools: "auto" | "never" = "never",
 ): Record<string, unknown> {
   const postureArgs = writePosture === "allow-write" ? ["--allow-write"] : [];
   return {
@@ -481,6 +482,7 @@ function copilotEntry(
     args: [...launcher.argsPrefix, ...MCP_ARGS_PREFIX, ...postureArgs],
     env: { TOKENLIGHTEN_CLIENT: "copilot-cli", ...MANAGED_ENV, ...launcher.env },
     tools: ["*"],
+    deferTools,
   };
 }
 
@@ -839,13 +841,23 @@ async function registerClientsUnlocked(
   const changedClients: TokenLightenRegistrationClient[] = [];
   for (const status of actionable) {
     if (status.client === "copilot-cli") {
+      const file = copilotConfigPath(options);
+      const expectedArgsPrefix = [...launcher.argsPrefix, ...MCP_ARGS_PREFIX];
+      const existing = readManagedEntry(
+        { file, rootKey: COPILOT_CONFIG_ROOT_KEY, name: SERVER_ID },
+        expectedArgsPrefix,
+      );
+      const retainedDeferTools = existing.managed
+        && (existing.entry?.deferTools === "auto" || existing.entry?.deferTools === "never")
+        ? existing.entry.deferTools
+        : "never";
       const outcome = writeManagedEntry({
-        file: copilotConfigPath(options),
+        file,
         rootKey: COPILOT_CONFIG_ROOT_KEY,
         name: SERVER_ID,
-        entry: copilotEntry(launcher, options.writePosture),
+        entry: copilotEntry(launcher, options.writePosture, retainedDeferTools),
         force: true, // already gated above by the shared foreign/absent filter
-        expectedArgsPrefix: [...launcher.argsPrefix, ...MCP_ARGS_PREFIX],
+        expectedArgsPrefix,
       });
       if (outcome.ok) {
         changedClients.push(status.client);

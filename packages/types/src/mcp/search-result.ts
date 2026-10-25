@@ -71,6 +71,14 @@ export type SearchMatches =
   | {
       form: "find";
       query: string;
+      /** TL_EFF_FIND_SNIPPET_CAP (2026-10-19, additive). Emitted iff the find
+       *  matched more than `top` files and some of them lost their `snippets`:
+       *  snippets ride only on the `top` files with the most matched lines,
+       *  the `more` others list every matched line without them, and `scope`
+       *  (absent when no directory qualifies) is the `scope` argument that
+       *  narrows the same find to a directory matching at most `top` files.
+       *  Not a limit: the cap withholds no matched file or line. */
+      snippet_cap?: { top: number; more: number; scope?: { path: string } };
       files: FindFileGroup[];
       total_files: number;
       total_matches: number;
@@ -87,6 +95,12 @@ export type SearchMatches =
       did_you_mean?: string[];
       /** Prose; A.8 rule E-7. */
       hint?: string;
+      /** Optional estimate for opting into a larger all-results page. Executable next retains the caller's budget. */
+      pagination_advice?: {
+        remaining_lines: number;
+        estimated_remaining_bytes: number;
+        recommended_budget: { bytes: number };
+      };
       /** Prose; A.8 rule E-7. */
       note?: string;
       /** Emitted iff the response is truncated (findText.ts:700); absence means

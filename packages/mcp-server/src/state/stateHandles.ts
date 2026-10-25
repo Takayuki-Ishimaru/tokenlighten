@@ -42,6 +42,8 @@ import {
   type HandleFailure,
 } from "./handleCodec.js";
 import { stateStoreFor, type StoredRecord } from "./stateStore.js";
+import { taskAliasData } from "./taskHandleAliasFormat.js";
+import {noteReadCallTaskMutation} from "./readCallTaskMutation.js";
 
 // ---------------------------------------------------------------------------
 // Policy constants
@@ -131,6 +133,14 @@ export function mintTaskHandle(workspaceRoot: string, state: TaskHandleState): s
       const freshUntil = existing.updatedAtMs + TASK_HANDLE_TTL_MS * 0.75;
       if (typeof token === "string" && Date.now() < freshUntil) {
         const check = validateHandleToken({ token, expectedPurpose: "task", workspaceRoot });
+        // 2026-10-17 (DESIGN-v0.14-plan §20.9): the record's version is the
+        // CAS version `expected_state_version` is checked against, so a
+        // re-emit that changes nothing a task state holds (only `mintedAtMs`
+        // differs) writes nothing and leaves the version where a mismatch
+        // refusal reported it. Re-packing through that refusal's own `next`
+        // used to advance it every time, so a caller that passed the reported
+        // `actual` was refused again — an unending loop.
+        if (check.ok && sameTaskState(existing.data, state)) return token;
         if (check.ok) {
           // FX-M1/B4: the freshness/validity check above only ever decided
           // whether to keep the SAME token (the re-emit contract this
@@ -148,13 +158,14 @@ export function mintTaskHandle(workspaceRoot: string, state: TaskHandleState): s
           // between the `get` above and this `put`) is not an error here —
           // the token itself is still valid and is returned regardless; the
           // next mint call for this fingerprint will persist again.
-          store.put({
+          const updated = store.put({
             key,
             purpose: "task",
-            data: { ...state, token },
+            data: { ...existing.data, ...state, token, ...taskAliasData(existing.data, key, token, currentSessionLane(), check.decoded.expiresAtMs) },
             ttlMs: TASK_HANDLE_TTL_MS,
             expectedVersion: existing.version,
           });
+          if (updated.ok) noteReadCallTaskMutation(workspaceRoot,token,existing.version,updated.record.version);
           return token;
         }
       }
@@ -172,15 +183,24 @@ export function mintTaskHandle(workspaceRoot: string, state: TaskHandleState): s
     const put = store.put({
       key,
       purpose: "task",
-      data: { ...state, token: minted.token },
+      data: { ...existing?.data, ...state, token: minted.token, ...taskAliasData(existing?.data ?? {}, key, minted.token, currentSessionLane(), minted.decoded.expiresAtMs) },
       ttlMs: TASK_HANDLE_TTL_MS,
       expectedVersion: existing?.version ?? 0,
     });
     if (!put.ok) return undefined;
+    noteReadCallTaskMutation(workspaceRoot,minted.token,existing?.version ?? 0,put.record.version);
     return minted.token;
   } catch {
     return undefined;
   }
+}
+
+/** True when `next` carries exactly the task state `stored` already holds (`mintedAtMs` aside). */
+function sameTaskState(stored: Readonly<Record<string, unknown>>, next: TaskHandleState): boolean {
+  return stored["taskFingerprint"] === next.taskFingerprint
+    && stored["replay"] === next.replay
+    && stored["coverage"] === next.coverage
+    && stored["ledgerDigest"] === next.ledgerDigest;
 }
 
 /**
@@ -612,6 +632,12 @@ function qrefQueryHash(workspaceRoot: string, query: string): string {
  * requirements. Also exempt from R27 M1 (an opaque handle, never query
  * text); also omitted when absent, so a slot with only a `taskBinding` (or
  * neither) is byte-identical to before this field existed.
+ *
+ * Wire-compaction review F1 (2026-10-23): a 6th field, `surfaceRoles` — only
+ * the fact (`true`) that the task's first request passed `surfaceRoles`, never
+ * the roles; omitted when false, so every slot minted without them is
+ * byte-identical to before. A continuation page re-packs by qref and names no
+ * roles of its own; see `state/session.ts`'s `resolveTaskQueryRefSurfaceRoles`.
  */
 export function persistQueryRef(
   workspaceRoot: string,
@@ -619,6 +645,7 @@ export function persistQueryRef(
   query: string,
   taskBinding?: string,
   taskHandle?: string,
+  surfaceRoles?: boolean,
 ): void {
   if (ref === "" || query === "") return;
   const store = stateStoreFor(workspaceRoot);
@@ -633,6 +660,7 @@ export function persistQueryRef(
         queryHash: qrefQueryHash(workspaceRoot, query),
         ...(typeof taskBinding === "string" && taskBinding !== "" ? { taskBinding } : {}),
         ...(typeof taskHandle === "string" && taskHandle !== "" ? { taskHandle } : {}),
+        ...(surfaceRoles === true ? { surfaceRoles: true } : {}),
       },
       ttlMs: QUERY_REF_TTL_MS,
     });
@@ -714,6 +742,16 @@ export function rehydrateQueryRefBinding(workspaceRoot: string, ref: string): st
 export function rehydrateQueryRefHandle(workspaceRoot: string, ref: string): string | undefined {
   const handle = _rehydrateQueryRecord(workspaceRoot, ref)?.data["taskHandle"];
   return typeof handle === "string" && handle !== "" ? handle : undefined;
+}
+
+/**
+ * Wire-compaction review F1 (2026-10-23): companion to `rehydrateQueryRefHandle`
+ * — whether `persistQueryRef` recorded that the task's first request passed
+ * `surfaceRoles`; false for a slot minted without them or before this field
+ * existed. Same validation via `_rehydrateQueryRecord`.
+ */
+export function rehydrateQueryRefSurfaceRoles(workspaceRoot: string, ref: string): boolean {
+  return _rehydrateQueryRecord(workspaceRoot, ref)?.data["surfaceRoles"] === true;
 }
 
 /** Explicit epoch boundary, mirrored onto the durable slot. */

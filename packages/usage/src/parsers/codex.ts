@@ -2,18 +2,17 @@
  * parsers/codex.ts — V11-08 Attribution & Calibration v2.
  *
  * Parses Codex CLI's local JSONL session log lines — the exact shape
- * aiLogs.ts's `codexRecord()` already reads (`session_meta` / `turn_context`
+ * aiLogs.ts's `codexRecords()` already reads (`session_meta` / `turn_context`
  * / `response_item` function_call / `token_count` event rows) — into the
  * richer, per-turn NormalizedSessionUsage shape.
  *
  * Codex reports `info.total_token_usage` as a CUMULATIVE running total for
- * the whole session on every `token_count` event (confirmed by aiLogs.ts's
- * own baseline/latest whole-session delta logic in `codexRecord()`). This
- * parser deltas CONSECUTIVE snapshots into one NormalizedTurnUsage per
- * `token_count` event instead of aiLogs.ts's single whole-session delta, to
+ * the whole session on every `token_count` event. Both readers delta
+ * consecutive snapshots; this parser retains one NormalizedTurnUsage per
+ * `token_count` event instead of aiLogs.ts's per-model aggregate, to
  * expose per-turn granularity for sessionMatcher.ts's fingerprint scoring.
  *
- * This is a NEW, stricter SIBLING of aiLogs.ts's `codexRecord()` — that
+ * This is a NEW, stricter SIBLING of aiLogs.ts's `codexRecords()` — that
  * function keeps shipping the coarser whole-session shape index.ts's
  * summarizeUsage() already depends on; this parser does not replace it.
  */
@@ -70,7 +69,7 @@ function readSnapshot(usage: Record<string, unknown>): CumulativeSnapshot {
 }
 
 /** Codex's `input_tokens` includes `cached_input_tokens` (mirrors
- *  aiLogs.ts's codexRecord: `allInputTokens - cacheReadTokens`) — this
+ *  aiLogs.ts's codexRecords: `allInputTokens - cacheReadTokens`) — this
  *  returns the UNCACHED portion, matching Anthropic's convention of
  *  input / cache-read being mutually exclusive buckets. Null propagates
  *  when either raw field is missing, never silently substituting 0. */

@@ -66,8 +66,7 @@ workspace refresh, rollback and uninstall.
 ## Known limitations
 
 - Savings depend on the task, client, model and caching. No new savings
-  percentage is claimed for v0.15.2. The README comparisons describe
-  v0.15.0 observations.
+  percentage is claimed for v0.15.2.
 - Questions with multiple subjects can require a continuation before all
   evidence is returned. Follow the server's `next` and preserve disclosed
   unresolved points.

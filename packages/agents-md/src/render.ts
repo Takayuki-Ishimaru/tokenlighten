@@ -164,7 +164,7 @@ Do not fetch AGENTS.md/CLAUDE.md for this protocol.
 - Replies are \`{v:1,kind,...}\`; an unknown \`kind\` => stop and report. \`act.answer\`/\`act.edit\` => act NOW; \`discover\`/\`await_input\` => run its \`next\` (else re-pack ONCE with \`{qref, targets:[<candidate paths>]}\`, or ask); \`done\` => stop.
 - Run every \`next\` verbatim. \`refusal.retry\`: \`call\` => fix \`field\`; \`new-task\` => re-pack; \`user-input\` => ask; \`none\` => stop that shape. \`read.receipt\` => already served; lost context => same call with \`task.force_serve:true\`.
 - Edits: ONE \`mcp__tokenlighten_tl_edit_file\` call for all of them; \`edit.state_unknown\` => run its \`recovery\`; \`edit.rolled_back\` => nothing landed. Stop after a passing check.
-- Every call: own \`cwd\`; shared workspace: fixed \`lane\`. Continue via returned \`task.id\` as \`task.handle\`; \`expected_state_version\` only beside that handle. New files/tests: \`edits:[{path,create:true,content}]\`+\`cwd\`; edit only served bytes this epoch. Never retry a failed edit verbatim. Verification kit \`omitted\` => run its \`next\` before compile/tests; discharge \`recipe.gaps\`.
+- Every call: own \`cwd\`; add no \`cwd\` to a \`next\`; shared workspace: fixed \`lane\`. Continue via returned \`task.id\` as \`task.handle\`; \`expected_state_version\` only beside that handle. New files/tests: \`edits:[{path,create:true,content}]\`+\`cwd\`; edit only served bytes this epoch. Never retry a failed edit verbatim. Verification kit \`omitted\` => run its \`next\` before compile/tests; discharge \`recipe.gaps\`.
 - "Large tool result ... written to file" => re-issue with \`budget.bytes\` <= 7000; otherwise omit \`budget\`.
 - Subagent: \`agentName:"tokenlighten-explore"\`; large jobs only.
 ${SENTINEL_END}
@@ -318,7 +318,7 @@ export function renderTargetPreamble(target: StubTargetId | undefined): string {
  * @param locale  "en" (default) or "jp".
  * @param version Override version string (defaults to INSTRUCTIONS_VERSION).
  */
-export type GuideProfile = "full" | "medium" | "compact";
+export type GuideProfile = "full" | "medium" | "compact" | "portable";
 
 // P2-3(1): re-exported unchanged for existing consumers (packages/cli,
 // index.ts) — guideProfileDefault.ts is now the source of truth, split out
@@ -346,6 +346,10 @@ function loadTemplateForProfile(
   copilotGuide: CopilotGuideMode = "agents-md",
 ): string {
   if (target === "claude") return applyToolSurface(CLAUDE_IMPORT_TEMPLATE, toolSurface);
+  // Explicit portable profile: one English bootstrap across hosts/models.
+  // Import-mode stubs still avoid duplicating AGENTS.md; exploration remains read-only.
+  if (profile === "portable" && target === "copilot" && copilotGuide === "standalone") return readFileSync(join(TEMPLATE_DIR, "portable-code.md.tmpl"), "utf8");
+  if (profile === "portable" && target === "copilot-agent" && copilotGuide === "standalone") return readFileSync(join(TEMPLATE_DIR, "read-only-code.md.tmpl"), "utf8").replace("{{VERSION}}-read-only-code", "{{VERSION}}");
   // Copilot standard-setup evaluation (2026-10-02): `standalone` swaps both
   // Copilot files for their self-contained variants (copilotGuide.ts).
   if (target === "copilot" && copilotGuide === "standalone") return applyToolSurface(COPILOT_STANDALONE_TEMPLATE, toolSurface);
@@ -358,6 +362,7 @@ function loadTemplateForProfile(
   // Same reasoning as "copilot" above: a custom-agent file body stays fixed
   // across every guide profile/tool surface.
   if (target === "copilot-agent") return applyToolSurface(COPILOT_AGENT_IMPORT_TEMPLATE, toolSurface);
+  if (profile === "portable") return readFileSync(join(TEMPLATE_DIR, "portable-code.md.tmpl"), "utf8");
   if (profile === "medium") return applyToolSurface(loadMediumTemplate(locale), toolSurface);
   if (profile === "compact") return applyToolSurface(loadCompactTemplate(locale), toolSurface);
   return applyToolSurface(loadTemplateForTarget(target, locale), toolSurface);
@@ -450,4 +455,14 @@ export function renderMediumBlock(locale: Locale = "en", version: string = INSTR
  */
 export function renderCompactBlock(locale: Locale = "en", version: string = INSTRUCTIONS_VERSION): string {
   return renderTemplate(loadCompactTemplate(locale), version);
+}
+
+/** Opt-in model-independent bootstrap for read/write code hosts. */
+export function renderPortableCodeBlock(version: string = INSTRUCTIONS_VERSION): string {
+  return renderTemplate(readFileSync(join(TEMPLATE_DIR, "portable-code.md.tmpl"), "utf8"), version);
+}
+
+/** Opt-in English guide for a host exposing only TL read/search; the host must deny writes and shell. */
+export function renderReadOnlyCodeBlock(version: string = INSTRUCTIONS_VERSION): string {
+  return renderTemplate(readFileSync(join(TEMPLATE_DIR, "read-only-code.md.tmpl"), "utf8"), version);
 }

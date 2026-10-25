@@ -65,8 +65,7 @@ for setup, refresh, rollback and uninstall.
 ## Known limitations
 
 - Savings depend on the task, client, model and caching. No new savings
-  percentage is claimed for v0.15.3. The README comparisons describe
-  v0.15.0 observations.
+  percentage is claimed for v0.15.3.
 - Some questions and large reads need continuation before all evidence is
   returned. Preserve disclosed unresolved points.
 - Import and caller lookup uses supported syntax and textual relationships,

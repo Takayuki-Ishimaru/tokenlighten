@@ -6,15 +6,13 @@
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
-import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { semanticFrontierPathId } from "../features/task-pack/semanticFrontier.js";
+import { TSX_NODE_ARGS } from "./helpers/tsxNode.js";
 
-const nodeRequire = createRequire(import.meta.url);
-const TSX_CLI = nodeRequire.resolve("tsx/cli");
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BIN_TS = path.resolve(HERE, "..", "bin.ts");
 const tmpDirs: string[] = [];
@@ -53,7 +51,7 @@ function writeProject(root: string): void {
 async function connect(root: string, home: string, guard: "0" | "1"): Promise<Client> {
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [TSX_CLI, "--liftoff-only", BIN_TS, root],
+    args: [...TSX_NODE_ARGS, BIN_TS, root],
     cwd: root,
     env: {
       ...process.env,

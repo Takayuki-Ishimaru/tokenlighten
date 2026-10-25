@@ -1,6 +1,8 @@
 {
   "extension.description": "Copilot、Codex、Claude Code向けに、ワークスペース単位のTokenLighten設定・削減率・ログを提供します",
   "command.status": "TokenLighten: ステータスを表示",
+  "command.licenses.show": "TokenLighten: ライセンス一覧を表示",
+  "command.engines.show": "TokenLighten: ローカル解析エンジンを管理",
   "command.setup": "TokenLighten: このワークスペースをセットアップ",
   "command.usage.show": "TokenLighten: このワークスペースの使用状況と削減率を表示",
   "command.logs.export": "TokenLighten: このワークスペースの使用ログを出力",
@@ -12,5 +14,7 @@
   "config.language.auto": "自動（VS Codeの表示言語を使用）",
   "config.language.en": "英語",
   "config.language.ja": "日本語",
-  "config.updateCheck.enabled": "VS Codeの起動時にGitHub Releasesで新しいTokenLighten VSIXを確認します。"
+  "config.autoUpdate.enabled": "更新確認が有効なとき、新しいTokenLighten VSIXを自動でダウンロード・インストールします。無効にすると更新通知のみになります。",
+  "config.updateCheck.enabled": "起動時と6時間ごとにGitHub Releasesで新しいTokenLighten VSIXを確認します。無効にすると自動更新も停止します。",
+  "config.confirmResetOnUpdate": "TokenLightenが新しいバージョンに更新された後（自動・手動とも）、デフォルト値と異なるユーザー設定があれば、TokenLightenのユーザー設定をデフォルト値に戻すかを確認します。答えずに通知を閉じた場合は、次回起動時にもう一度確認します。ワークスペースとフォルダーの設定は変更しません。"
 }

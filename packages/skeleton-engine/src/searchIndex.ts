@@ -29,6 +29,8 @@ export interface SearchInput {
    */
   path?: string;
   limit?: number;
+  /** Zero-based page offset into the complete ranked result list. */
+  offset?: number;
   includeScores?: boolean;
 }
 
@@ -144,6 +146,7 @@ export function searchSymbols(
   const { manifest, fileScores, recentFiles } = ctx;
   const queryLower = input.query.toLowerCase();
   const limit = Math.min(input.limit ?? 10, 50);
+  const offset = Math.max(0, Math.floor(input.offset ?? 0));
 
   // Fix A (2026-07-12c): hasQuery/hasPathScope gate the empty-query
   // repo-wide fan-out bug (see isUnderPath's doc comment and the gate/dedup
@@ -340,8 +343,8 @@ export function searchSymbols(
   // total reflects the number of distinct files matched (after dedup), which
   // is the most useful count for callers deciding whether to broaden their query.
   const total = deduped.length;
-  const truncated = total > limit;
-  const sliced = deduped.slice(0, limit);
+  const truncated = offset + limit < total;
+  const sliced = deduped.slice(offset, offset + limit);
 
   // Build output, conditionally including score and reasons.
   const locations: RankedLocation[] = sliced.map((r) => {

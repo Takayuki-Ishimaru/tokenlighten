@@ -19,7 +19,7 @@ import { createHash } from "crypto";
 import type { TaskExecutionContract, TaskVerifyObligation } from "@tokenlighten/types";
 import { currentSessionLane, laneScopedKey, rootOfLaneScopedKey } from "../util/laneKey.js";
 import { batchEditFrontierEnabled, frontierStrictWritesEnabled, receiptCoverageEnabled } from "../util/flags.js";
-import { persistQueryRef, rehydrateQueryRef, rehydrateQueryRefBinding, rehydrateQueryRefHandle, clearPersistedQueryRef } from "./stateHandles.js";
+import { persistQueryRef, rehydrateQueryRef, rehydrateQueryRefBinding, rehydrateQueryRefHandle, rehydrateQueryRefSurfaceRoles, clearPersistedQueryRef } from "./stateHandles.js";
 // M1 (2026-09-05 R28 remediation): the ONE production reset for
 // packServeLog.ts's served-surface ledger (see `clearServedSurfaces`'s own
 // doc comment for why an explicit `task.epoch:"new"` must retire it here, not
@@ -29,6 +29,7 @@ import { persistQueryRef, rehydrateQueryRef, rehydrateQueryRefBinding, rehydrate
 import { clearServedSurfaces } from "../util/packServeLog.js";
 // TL-REVIEW-2: pure window arithmetic (formatCompress.ts has no imports — no cycle).
 import { spansExcludingWindows } from "../util/formatCompress.js";
+import { wholeOrOpenEndedRange } from "../util/rangeWords.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -144,6 +145,14 @@ export interface ServedRangeLedgerState {
    * of the ledger's receipt surface, and never serialized to the wire.
    */
   _elisionCursor?: { call: number; range: string; next: number };
+  /**
+   * 2026-10-19 (DESIGN-v0.14-plan.md §20.26): the file-line window each
+   * `symbol` read resolved its name to at `fileSha` (`noteSymbolWindow`),
+   * whether it served the lines or answered from this ledger. Not a residency
+   * claim: what is held is still decided from `spans`. It says only what a
+   * repeat of that read denotes. Dropped when an edit re-keys the state.
+   */
+  symbols?: Map<string, [number, number]>;
 }
 
 /** One contiguous run of file lines one call actually served, plus its provenance. */
@@ -160,6 +169,20 @@ export interface ServedRangeSpan {
    * one), and retracting the wrong one would delete a genuine serve.
    */
   id: number;
+  /**
+   * 2026-10-20 (decision run 6t-7, T03 rep0 #6): the lines inside this span
+   * that the reply which booked it carried only as a disclosed `elided`
+   * window (protocol/sourceFidelity.ts), never as bytes — ascending and
+   * disjoint. Only a task-pack span has any: the pack books its surface's
+   * semantic window with the comment blocks in it (W14 L1), and its rows ship
+   * the code and disclose those blocks, so settlement needs the disclosed
+   * windows to corroborate the span (`_settleSessionServeBookings`, which
+   * sets this). Every other booking site books around the windows its own
+   * rendering elides. A default-policy receipt still counts these lines as
+   * held (servedReceiptElisionHonesty.spec.ts's task_pack rule); a request
+   * that keeps comments never does (`_byteHeldRanges`).
+   */
+  disclosed?: Array<[number, number]>;
 }
 
 /**
@@ -259,11 +282,13 @@ export interface PackCheckRecord {
   token?: string;
   /** Wiring: exactly 2 tokens, [source, dest] — see the WIRING variant note above. */
   tokens?: string[];
-  /** Structural closure: every token must occur in one comment-stripped file matched by glob. */
+  /** Structural closure: every token must occur in one comment-stripped file matched by glob (or by one of altGlobs). */
   allTokens?: string[];
   /** Legacy proximity window — no longer read by satisfaction; kept for `desc` phrasing. */
   proximity?: number;
   glob?: string;
+  /** Structural closure: further files that may hold all of allTokens instead of `glob` (any one suffices). */
+  altGlobs?: string[];
   role?: string;
   /**
    * Wiring: workspace-relative dirname of the SOURCE endpoint. Satisfaction
@@ -315,8 +340,13 @@ export function deriveCheckId(r: Omit<PackCheckRecord, "id">): string {
     : Array.isArray(r.tokens) && r.tokens.length === 2
       ? ["pair", ...r.tokens].sort()
     : typeof r.token === "string" && r.token !== "" ? [r.token] : [];
+  // Alternates widen where a structural check is satisfied, so they are part
+  // of its identity; a record without them keeps the id it always had.
+  const altGlobs = Array.isArray(r.altGlobs) && r.altGlobs.length > 0
+    ? ["alt", ...[...r.altGlobs].sort()]
+    : [];
   const basis = isVerifiableCheck(r)
-    ? ["v", r.role ?? "", r.glob ?? "", ...tokenSet]
+    ? ["v", r.role ?? "", r.glob ?? "", ...tokenSet, ...altGlobs]
     : ["a", r.role ?? "", r.desc];
   return `chk-${createHash("sha256").update(basis.join("\u0000")).digest("hex").slice(0, 8)}`;
 }
@@ -527,6 +557,16 @@ export interface ServedFindLedgerState {
   signatures: Set<string>;
   /** The query string of the first find that produced each fingerprint. */
   firstQueryByFingerprint: Map<string, string>;
+  /**
+   * 2026-10-18 (DESIGN-v0.14-plan.md §20.15): how many lines the
+   * served-range ledger held when the latest all-served find was recorded. A
+   * later find that sees MORE held lines comes after a read that served new
+   * bytes — progress, like a find that reaches an unserved location — so it
+   * starts a fresh ledger. Before multi-target reads became plain
+   * `read.batch` replies, the task pack each of them minted reset this ledger
+   * through its new certificate; this keeps that reset without the pack.
+   */
+  heldLines: number;
 }
 
 /** Bounded so a long session cannot grow either set without limit. */
@@ -702,7 +742,15 @@ export interface WorkspaceSession {
    * obligation ledger scope (`taskContractStore.ts`) matches the scope an
    * earlier pack of this same task was relocated to.
    */
-  activeTaskQuery: { ref: string; query: string; taskBinding?: string; taskHandle?: string } | undefined;
+  activeTaskQuery: {
+    ref: string; query: string; taskBinding?: string; taskHandle?: string;
+    /**
+     * The task's first request passed `surfaceRoles` (2026-10-23, wire-compaction review F1). A continuation page
+     * re-packs by `qref` or by the query alone, so its own call names no roles; this is what lets the reply's
+     * emission read the page as a page of a call that did (`ProtocolCallContext.surfaceRolesPassed`).
+     */
+    surfaceRoles?: true;
+  } | undefined;
 
   /** Per-path full-read tracking. Key is workspace-relative or absolute path. */
   fullExpansionsPerPath: Map<string, PathExpansionEntry>;
@@ -763,6 +811,13 @@ export interface WorkspaceSession {
 
   /** Content-hash-bound cumulative line ranges served for each path. */
   servedRangeLedger: Map<string, ServedRangeLedgerState>;
+
+  /**
+   * 2026-10-19 (DESIGN-v0.14-plan.md §20.26): the root each workspace tree
+   * cursor this session issued was rendered for, by the cursor's root digest
+   * (`rememberTreeCursorRoot`).
+   */
+  treeCursorRoots: Map<string, string>;
 
   /**
    * TL-06 (plan-0143 §4/§8.1, R04, 2026-09-21): paths a CALLER-RANGED
@@ -904,11 +959,12 @@ export interface WorkspaceSession {
    * were serving, for the CURRENT response — the largest `provenance.range`
    * end seen so far for that path (`_parseHandleLineRange`, the same parse
    * `_stageElisionGap` already runs). RENDERER ACCOUNTING, written
-   * automatically by `recordServedRange` for EVERY caller (`server.ts`,
-   * `tools/readCodeSmallFile.ts`, `features/task-pack/readCodeTaskPack.ts`,
-   * `features/search/find/servedFindEscalation.ts`, `protocol/coverageReceipt.ts`)
-   * without any of them needing to know this map exists — never derived from
-   * wire text.
+   * automatically by `recordServedRange` for every caller (`server.ts`,
+   * `tools/readCodeSmallFile.ts`, `features/search/find/servedFindEscalation.ts`,
+   * `protocol/coverageReceipt.ts`) without any of them needing to know this map
+   * exists — never derived from wire text. Never for a task-pack span
+   * (`features/task-pack/readCodeTaskPack.ts`): it is a semantic window minus a
+   * disclosed remainder, not a rendered reach (see `recordServedRange`).
    *
    * WHY IT EXISTS. A `mode=full`/`small_file` serve's WIRE `range` is
    * synthesized from DISPLAY line count (`readFamily.ts`), which under-reaches
@@ -1045,6 +1101,43 @@ export interface WorkspaceSession {
 
   /** One-shot advisory for prepared handles invalidated by a later pack. */
   pendingPreparedHandleAdvisory: string | undefined;
+
+  /**
+   * 2026-10-18 (DESIGN-v0.14-plan.md §20.15, bench 6t-2 T13 rep0): how many
+   * `tl_read_file` calls this session declared `task.epoch:"new"` since the
+   * current request opened (a query-only epoch:"new" read restarts the count
+   * at 1 and a completed task clears it, §20.17), and the one-shot advisory a
+   * repeated one with explicit targets earns.
+   * That shape is a follow-up read sent as a new task: each restarts
+   * discovery and re-serves context the caller already holds (T13 rep0 sent
+   * twelve of them, 141,844 B of packs). The server cannot tell whether
+   * the caller is the same conversation, so the epoch boundary itself stays;
+   * the advisory only names the cheaper continuation.
+   *
+   * 2026-10-20 (decision run 6t-8, T13 rep2): that cell sent all 25 calls
+   * after its first pack with task.epoch:"new" and no query, as targets-only
+   * reads and finds, and none was advised; its two two-target reads were
+   * fresh packs (10,213 B and 8,847 B) instead of read.batch. A read with
+   * targets and no query, and a tl_search_files call (never counted), now
+   * earn the advisory once the request has handed out a task handle
+   * (`requestTaskHandedOut`): the continuation it names needs one, and a
+   * caller whose epoch:"new" reads only ever got read.text holds none. A
+   * task pack carries the advisory in `advisory`
+   * (`takePreparedHandleAdvisory`), any other reply that keeps a `hint`
+   * carries it there (protocol/envelope.ts, `takeEpochRepeatAdvisory`).
+   */
+  taskEpochNewReads: number;
+  pendingEpochRepeatAdvisory: string | undefined;
+
+  /**
+   * 2026-10-20 (decision run 6t-8): a wire task handle has been handed out
+   * since the current request opened (server.ts's `withTaskHandle`, through
+   * `noteTaskHandleHandedOut`). Cleared with the count: by a query-only
+   * epoch:"new" read (whose own pack sets it again) and by a completed task.
+   * An epoch:"new" follow-up leaves it set, because the handle that call
+   * superseded is still accepted.
+   */
+  requestTaskHandedOut: boolean;
 
   /** Proof provenance retained for serving-ledger receipts after an epoch reset. */
   lastExecutionCertificateId: string | undefined;
@@ -1322,9 +1415,10 @@ export interface WorkspaceSession {
    * SCOPE is the CERTIFICATE, not the session: "you already hold this" is
    * only a protocol-grade claim while the decision it belongs to is live.
    * A new certificate resets the ledger wholesale (see recordAllServedFind),
-   * and so does any find that surfaces a NOT-yet-served location — a
-   * legitimate scope change is progress and must never inherit escalation
-   * pressure earned by a different scope.
+   * and so does any find that surfaces a NOT-yet-served location, or a read
+   * that served lines this session did not hold yet — a legitimate scope
+   * change is progress and must never inherit escalation pressure earned by
+   * a different scope.
    */
   servedFindLedger?: ServedFindLedgerState;
 
@@ -1411,6 +1505,16 @@ export interface WorkspaceSession {
    * and is served in full.
    */
   verificationSurfacesServed: Map<string, string>;
+  /**
+   * TL_EFF_EDIT_DIET (2026-10-19, v016 decision 6t-3): identities of the
+   * verification-kit ENTRIES (a surface, compile fact, link-set entry, harness
+   * field, toolchain, recipe, note, next_call) an `edit.applied` reply already
+   * carried in this lane during the current task. server.ts's
+   * `editKitDelta` sends only entries not in this set. Task-shaped, so it
+   * resets with `verificationManifestPathsServed` at every epoch boundary:
+   * a new task gets its first kit whole.
+   */
+  verificationKitEntriesSent: Set<string>;
 
   /**
    * Feature 4 (2026-07-12b2, 12b/t10r2 stale-worktree forensics): wall-clock
@@ -1932,6 +2036,7 @@ function _emptySession(): WorkspaceSession {
     pathOrSearchEditsWithoutHandle: 0,
     repeatedReadsPerPathRange: new Map(),
     servedRangeLedger: new Map(),
+    treeCursorRoots: new Map(),
     epochRangeWatch: new Set(),
     acknowledgedStaleSha: new Map(),
     mintedRangedWindows: new Map(),
@@ -1950,6 +2055,9 @@ function _emptySession(): WorkspaceSession {
     intentEditObserved: false,
     recordedVerifyObligations: undefined,
     pendingPreparedHandleAdvisory: undefined,
+    taskEpochNewReads: 0,
+    pendingEpochRepeatAdvisory: undefined,
+    requestTaskHandedOut: false,
     lastExecutionCertificateId: undefined,
     revokedCertificateIds: new Set(),
     admissibleEditHandles: [],
@@ -1977,6 +2085,7 @@ function _emptySession(): WorkspaceSession {
     closureSatisfied: false,
     verificationManifestPathsServed: new Set(),
     verificationSurfacesServed: new Map(),
+    verificationKitEntriesSent: new Set(),
     lastTouchedMs: now(),
     closureOpenStreak: 0,
     closureOpenStreakIds: [],
@@ -2058,7 +2167,13 @@ export function taskQueryRef(workspaceRoot: string, query: string): string {
  * restructuring the caller's own control flow, a larger change than this
  * NOTE-level finding warrants.
  */
-export function rememberTaskQuery(workspaceRoot: string, query: string, taskBinding?: string): string {
+export function rememberTaskQuery(
+  workspaceRoot: string,
+  query: string,
+  taskBinding?: string,
+  /** This call passed `surfaceRoles`; carried over, like the binding, to a re-issue of the same query that passes none. */
+  surfaceRolesPassed?: boolean,
+): string {
   const normalized = query.trim();
   const ref = taskQueryRef(workspaceRoot, normalized);
   const session = getSession(workspaceRoot);
@@ -2068,18 +2183,23 @@ export function rememberTaskQuery(workspaceRoot: string, query: string, taskBind
     ? taskBinding
     : (carriedOver ? previous.taskBinding : undefined);
   const effectiveHandle = carriedOver ? previous.taskHandle : undefined;
+  // Review F1 (2026-10-23): a task whose first request passed `surfaceRoles` keeps saying so across its continuation
+  // pages (a qref or a cursor re-pack carries no scope). A different query is a different task and starts over.
+  const effectiveSurfaceRoles = surfaceRolesPassed === true || (carriedOver && previous.surfaceRoles === true);
   const unchanged = carriedOver
     && previous.query === normalized
     && previous.taskBinding === effectiveBinding
-    && previous.taskHandle === effectiveHandle;
+    && previous.taskHandle === effectiveHandle
+    && (previous.surfaceRoles === true) === effectiveSurfaceRoles;
   session.activeTaskQuery = {
     ref,
     query: normalized,
     ...(typeof effectiveBinding === "string" && effectiveBinding !== "" ? { taskBinding: effectiveBinding } : {}),
     ...(typeof effectiveHandle === "string" && effectiveHandle !== "" ? { taskHandle: effectiveHandle } : {}),
+    ...(effectiveSurfaceRoles ? { surfaceRoles: true as const } : {}),
   };
   if (!unchanged) {
-    persistQueryRef(workspaceRoot, ref, normalized, effectiveBinding, effectiveHandle);
+    persistQueryRef(workspaceRoot, ref, normalized, effectiveBinding, effectiveHandle, effectiveSurfaceRoles);
   }
   return ref;
 }
@@ -2141,7 +2261,7 @@ export function attachTaskQueryRefBinding(
     ...(nextHandle !== undefined ? { taskHandle: nextHandle } : {}),
   };
   if (!unchanged) {
-    persistQueryRef(workspaceRoot, ref, active.query, taskBinding, taskHandle);
+    persistQueryRef(workspaceRoot, ref, active.query, taskBinding, taskHandle, active.surfaceRoles === true);
   }
 }
 
@@ -2171,11 +2291,13 @@ export function resolveTaskQueryRef(workspaceRoot: string, ref: string): string 
   if (rehydrated === undefined) return undefined;
   const taskBinding = rehydrateQueryRefBinding(workspaceRoot, ref);
   const taskHandle = rehydrateQueryRefHandle(workspaceRoot, ref);
+  const surfaceRoles = rehydrateQueryRefSurfaceRoles(workspaceRoot, ref);
   getSession(workspaceRoot).activeTaskQuery = {
     ref,
     query: rehydrated,
     ...(taskBinding !== undefined ? { taskBinding } : {}),
     ...(taskHandle !== undefined ? { taskHandle } : {}),
+    ...(surfaceRoles ? { surfaceRoles: true as const } : {}),
   };
   return rehydrated;
 }
@@ -2211,6 +2333,20 @@ export function resolveTaskQueryRefHandle(workspaceRoot: string, ref: string): s
   if (active !== undefined) return active.ref === ref ? active.taskHandle : undefined;
   if (resolveTaskQueryRef(workspaceRoot, ref) === undefined) return undefined;
   return getSession(workspaceRoot).activeTaskQuery?.taskHandle;
+}
+
+/**
+ * Wire-compaction review F1 (2026-10-23): whether the task behind this qref was first requested with `surfaceRoles`
+ * — a continuation page re-packs by qref (or by the query alone) and names no roles itself, yet reads its `role`
+ * absences exactly as the first page does (types `Evidence.role`). Same delegation discipline as the other qref
+ * accessors: the in-process-hit-or-rehydrate resolution runs through `resolveTaskQueryRef`, so a ref that does not
+ * resolve never reports a flag.
+ */
+export function resolveTaskQueryRefSurfaceRoles(workspaceRoot: string, ref: string): boolean {
+  const active = getSession(workspaceRoot).activeTaskQuery;
+  if (active !== undefined) return active.ref === ref && active.surfaceRoles === true;
+  if (resolveTaskQueryRef(workspaceRoot, ref) === undefined) return false;
+  return getSession(workspaceRoot).activeTaskQuery?.surfaceRoles === true;
 }
 
 /**
@@ -2656,11 +2792,12 @@ function classifyEditRefusal(
     // only ever be about a path this server has NOT written. A create that
     // SUCCEEDS is enrolled into the admissible union at write time
     // (recordCreatedEditAdmissibility, called by the dispatcher's create arm
-    // in server.ts), so the follow-up edit of a just-created file is admitted
-    // by the frontier-membership checks in guardExecutionEdit and never
-    // reaches any refusal. "can never enter this certificate's path frontier"
-    // below therefore states a property of UNWRITTEN targets only; the union
-    // the frontier is merged with holds what this server served OR wrote.
+    // and its edits[] batch arm in server.ts), so the follow-up edit of a
+    // just-created file is admitted by the frontier-membership checks in
+    // guardExecutionEdit and never reaches any refusal. "can never enter this
+    // certificate's path frontier" below therefore states a property of
+    // UNWRITTEN targets only; the union the frontier is merged with holds
+    // what this server served OR wrote.
     return {
       kind: "terminal",
       reason: "create-target-not-servable",
@@ -2726,6 +2863,136 @@ function refusalTargetKey(args: Record<string, unknown>): string {
 /** How many distinct refused targets one demand tracks before evicting oldest. */
 const DEMAND_TARGET_CAP = 8;
 
+// ---------------------------------------------------------------------------
+// ADDRESS-LESS `edits[]` ITEMS (2026-10-22, codex-copilot-proxy cohort r16:
+// T07 tl-0 / tl-1, T09 tl-0).
+//
+// MEASURED. After an `act.edit` pack, three agents sent `tl_edit_file` with
+// items that carried only `search`/`replace`. The guard refused them
+// `execution-typestate` / "edit has no certificate-backed handle or path", and
+// the wire said `retry:"challenge"` plus `certificate_id`. A challenge contests
+// a certified DECISION; it cannot supply a missing address. The two agents that
+// followed it collected three more refusals (a rejected challenge,
+// unknown-arguments, a rejected challenge) and gave up without editing; the one
+// that put `path` on each item was applied on its very next call.
+//
+// THE CORRECTION replaces the challenge prescription for exactly this request
+// shape: a non-create `edits[]` call in which at least one item carries
+// neither a `handle` nor a `path`, and which names no file at the top level
+// either. It says WHAT to fix instead of offering a transition that cannot fix
+// it:
+//   - `retry:"call"`, `field:"edits[<i>].path"` (the first such item) and
+//     `fields` (all of them, capped);
+//   - a `detail` saying each item needs its own `path` (or a served `handle`
+//     whose window covers `search`) beside `search`/`replace`, and naming the
+//     certificate's write targets;
+//   - `candidates:[{path, handle}]`, the fence's own write targets, which the
+//     caller can copy; the `frontier` block rides unchanged;
+//   - no `challenge`, no `certificate_id`, never terminal, and no demand: the
+//     remedy is a field on the request, not a frontier batch, so no "the
+//     prescribed batch already ran" verdict can ever make it final.
+// STRICTNESS IS UNCHANGED. Nothing is inferred and no file is chosen for the
+// item, not even when the certificate has exactly one write target: the
+// candidates are information, the caller still writes the address.
+// ---------------------------------------------------------------------------
+
+/** At most this many `edits[<i>].path` names ride one correction's `fields`. */
+const EDIT_ADDRESS_FIELD_CAP = 16;
+/** The correction's prose names at most this many items / write targets before "and N more". */
+const EDIT_ADDRESS_PROSE_ITEM_CAP = 4;
+const EDIT_ADDRESS_PROSE_TARGET_CAP = 3;
+/**
+ * ...and stops adding write targets once the list would pass this many
+ * characters (the first is always named). `candidates` carries every target in
+ * full; the prose list only has to NAME them, and a wire `detail` is capped
+ * (protocol/refusal.ts DETAIL_MAX_CHARS) -- long monorepo paths would otherwise
+ * push a repeated refusal's "already refused" notice off the end of it.
+ */
+const EDIT_ADDRESS_PROSE_TARGET_CHARS = 80;
+
+/** What a refusal adds when the request's own `edits[]` items name no file. */
+interface EditAddressCorrection {
+  detail: string;
+  field: string;
+  fields: string[];
+  candidates: Array<{ path?: string; handle?: string }>;
+}
+
+/**
+ * The 0-based `edits[]` indexes of the items that name no file: an object with
+ * neither a `handle` nor a `path` string (the same two predicates
+ * `requestedEditHandles` / `requestedEditPaths` and the dispatcher's own
+ * targetless-item pre-pass read), and not a `create:true` item. Empty unless
+ * the call is a batch that names no file at the top level: a top-level
+ * `handle`/`path` is the dispatcher's own per-item check's business (it answers
+ * `edits-item-missing-target` and reports the top-level handle as a candidate).
+ */
+function addresslessEditItemIndexes(args: Record<string, unknown>): number[] {
+  const edits = args["edits"];
+  if (!Array.isArray(edits)) return [];
+  if (typeof args["handle"] === "string" || typeof args["path"] === "string") return [];
+  const indexes: number[] = [];
+  edits.forEach((raw, index) => {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return;
+    const item = raw as Record<string, unknown>;
+    if (item["create"] === true) return;
+    if (typeof item["handle"] === "string" || typeof item["path"] === "string") return;
+    indexes.push(index);
+  });
+  return indexes;
+}
+
+/**
+ * The correction for the items at `indexes` (non-empty). Built from the same
+ * `capTargetPairs(fence.actionTargetPairs, …)` the refusal's own
+ * `frontier.write_targets` uses, so `candidates` and the frontier block always
+ * describe the same write targets. One the certificate named by handle alone
+ * (a frontier handle minted outside its evidence pairing, which the frontier
+ * block can only show with an empty path) gets its path from the dispatcher's
+ * own handle table -- the resolver the capped recovery already reads -- which
+ * reports what the server minted and infers nothing. A side that stays unknown
+ * ("" in a HandlePathPair) is left out of its candidate rather than sent as an
+ * empty address.
+ */
+function editAddressCorrection(
+  fence: ExecutionFenceState,
+  indexes: readonly number[],
+  resolveHandlePath?: (handle: string) => string | undefined,
+): EditAddressCorrection {
+  const fields = indexes.slice(0, EDIT_ADDRESS_FIELD_CAP).map((index) => `edits[${index}].path`);
+  const candidates = capTargetPairs(fence.actionTargetPairs, FRONTIER_PATH_CAP)
+    .map((pair) => ({
+      handle: pair.handle,
+      path: pair.path !== "" ? pair.path : pair.handle !== "" ? resolveHandlePath?.(pair.handle) ?? "" : "",
+    }))
+    .filter((pair) => pair.path !== "" || pair.handle !== "")
+    .map((pair) => ({
+      ...(pair.path !== "" ? { path: pair.path } : {}),
+      ...(pair.handle !== "" ? { handle: pair.handle } : {}),
+    }));
+  const named = indexes.slice(0, EDIT_ADDRESS_PROSE_ITEM_CAP).map((index) => `edits[${index}]`).join(", ")
+    + (indexes.length > EDIT_ADDRESS_PROSE_ITEM_CAP ? ` and ${indexes.length - EDIT_ADDRESS_PROSE_ITEM_CAP} more` : "");
+  const namedTargets: string[] = [];
+  let namedChars = 0;
+  for (const candidate of candidates.slice(0, EDIT_ADDRESS_PROSE_TARGET_CAP)) {
+    const label = candidate.path ?? `handle ${candidate.handle}`;
+    const chars = namedChars + (namedTargets.length > 0 ? 2 : 0) + label.length;
+    if (namedTargets.length > 0 && chars > EDIT_ADDRESS_PROSE_TARGET_CHARS) break;
+    namedTargets.push(label);
+    namedChars = chars;
+  }
+  const targets = namedTargets.join(", ")
+    + (candidates.length > namedTargets.length ? ` (+${candidates.length - namedTargets.length} more in candidates)` : "");
+  return {
+    detail: "each edits[] item needs its own path (or a served handle whose window covers search) beside search/replace; "
+      + `${named} ${indexes.length === 1 ? "has" : "have"} neither.`
+      + (targets !== "" ? ` This certificate's write targets: ${targets}.` : ""),
+    field: fields[0]!,
+    fields,
+    candidates,
+  };
+}
+
 function executionRefusal(
   session: WorkspaceSession,
   fence: ExecutionFenceState,
@@ -2778,8 +3045,16 @@ function executionRefusal(
     // stay the strict outside-of-frontier subset for `alsoAdmissiblePairs`
     // and the `cause:"capped"` diagnosis.
     knownOutsideRepack?: { paths: readonly string[]; pairs: readonly HandlePathPair[]; recoveryPaths: readonly string[] };
+    /**
+     * 2026-10-22: the request's own `edits[]` items name no file (see
+     * ADDRESS-LESS `edits[]` ITEMS above). The refusal then names the missing
+     * `path` field and the write targets instead of offering a challenge, and
+     * is never classified terminal nor recorded as a frontier demand.
+     */
+    addressCorrection?: EditAddressCorrection;
   },
 ): ExecutionGuardDecision {
+  const addressCorrection = opts?.addressCorrection;
   const advanceableChallenge = challengeTemplate(fence, CHALLENGE_LEAD_EVIDENCE);
   // D10 (2026-08-14): `TL_REFUSAL_PROGRESS` is deleted. Progressive refusals
   // (terminal classification, path-keyed demand ledger, escape-preserving
@@ -3101,7 +3376,12 @@ function executionRefusal(
   // refuseExecutionEdit never compacts it. Classified HERE, after the
   // prescription exists, because the discharged-demand rule is scoped to the
   // step actually being prescribed (2026-08-02 review blocker B).
-  if (opts?.editContext === true) {
+  //
+  // An address correction is neither: its remedy is a field on the request, so
+  // no earlier-landed batch can have "discharged" it, and the terminal verdict
+  // ("still outside the certificate frontier") would be false for it and would
+  // re-advertise the challenge it exists to withhold.
+  if (opts?.editContext === true && addressCorrection === undefined) {
     const terminality = classifyEditRefusal(fence, opts.editArgs ?? {}, detail);
     if (terminality.kind === "terminal") {
       // Blocker B (lifetime): "you ran the prescribed step and it did not
@@ -3195,8 +3475,9 @@ function executionRefusal(
 
   // C5 (clauses 3 + 5): record the edit-shaped demand this refusal just
   // emitted, keyed by PATH. `satisfiedPaths` survives re-emission so a demand
-  // discharged by an earlier batch is not silently re-armed.
-  if (opts?.editContext === true && isEditContext && nextCall["tool"] === "tl_edit_file") {
+  // discharged by an earlier batch is not silently re-armed. (An address
+  // correction prescribes no frontier batch -- see above -- so it records none.)
+  if (opts?.editContext === true && isEditContext && addressCorrection === undefined && nextCall["tool"] === "tl_edit_file") {
     const previous = fence.demand;
     // Blocker C (durability): NEVER shrink `paths`. Recomputing them from
     // whatever the handle registry still resolves silently DELETES outstanding
@@ -3242,7 +3523,9 @@ function executionRefusal(
       ...(fence.phase === "verifying" && opts?.editContext === true
         ? { phase_note: "verifying phase, but this refusal is a frontier membership refusal, not a verify instruction" }
         : {}),
-      certificate_id: fence.certificateId,
+      // An address correction names no certificate: `certificate_id` is how a
+      // `retry:"challenge"` is authored, and this refusal offers none.
+      ...(addressCorrection === undefined ? { certificate_id: fence.certificateId } : {}),
       next_action: verifying ? "verify" : fence.terminalAction,
       required_action: requiredAction,
       discovery_closed: !verifying,
@@ -3332,7 +3615,7 @@ function executionRefusal(
             },
           }
         : {}),
-      challenge_required: !verifying,
+      challenge_required: !verifying && addressCorrection === undefined,
       detail: detail ?? (verifying
         ? "the certified edit already committed; do not retry edit, verify with closure or diff and finish"
         : "discovery is closed; execute required_action now, or supply a concrete decision-changing challenge"),
@@ -3350,10 +3633,21 @@ function executionRefusal(
       // explicit `retry` before it ever looks for a `challenge` affordance, so
       // declaring it here is sufficient to route the wire's `retry` to
       // `"call"` and let the real `next_call` ride as `next`.
-      ...(!verifying && knownOutsideRepack === undefined && advanceableChallenge !== undefined
+      ...(!verifying && knownOutsideRepack === undefined && addressCorrection === undefined && advanceableChallenge !== undefined
         ? { challenge: advanceableChallenge }
         : {}),
-      ...(knownOutsideRepack !== undefined ? { retry: "call" as const } : {}),
+      ...(knownOutsideRepack !== undefined || addressCorrection !== undefined ? { retry: "call" as const } : {}),
+      // The address correction (see ADDRESS-LESS `edits[]` ITEMS above): the
+      // field to fix, every such item, and the write targets as data. `retry`
+      // above is what the wire reads first, so no challenge affordance can
+      // outrank it.
+      ...(addressCorrection !== undefined
+        ? {
+            field: addressCorrection.field,
+            fields: addressCorrection.fields,
+            ...(addressCorrection.candidates.length > 0 ? { candidates: addressCorrection.candidates } : {}),
+          }
+        : {}),
     },
   };
 }
@@ -3430,6 +3724,14 @@ function compactEditRefusal(
   // compaction below is the only compaction. The former escape-erasing variant
   // is gone with it.
   const compactCall = compactNextCall(full["next_call"]);
+  // An address correction (ADDRESS-LESS `edits[]` ITEMS above) IS its field,
+  // fields, candidates and prose: a receipt that kept none of them would tell
+  // a caller sending the same address-less batch again only that nothing
+  // changed, about a refusal whose whole content is what to change -- the
+  // escape-erasing compaction C3 removed, in miniature. Declared by the full
+  // refusal's own `retry:"call"` + `field`, so a receipt can never carry a
+  // correction its refusal did not.
+  const correction = typeof full["field"] === "string" && full["retry"] === "call";
   // C3 (2026-08-02 T05c): the compact receipt used to erase the ONE universal
   // escape. rep0 saw `challenge` in refusal #1 and never again across four
   // more refusals; rep1 attached it to the byte-identical call and was through
@@ -3442,9 +3744,18 @@ function compactEditRefusal(
     reason: "execution-typestate",
     required_action: full["required_action"],
     retry_same_call: false,
-    certificate_id: full["certificate_id"],
+    ...(full["certificate_id"] !== undefined ? { certificate_id: full["certificate_id"] } : {}),
     ...(delta ? { remaining: delta } : { unchanged: "unchanged since previous refusal" }),
     ...(full["challenge"] ? { challenge: full["challenge"] } : {}),
+    ...(correction
+      ? {
+          retry: "call",
+          field: full["field"],
+          ...(full["fields"] !== undefined ? { fields: full["fields"] } : {}),
+          ...(full["candidates"] !== undefined ? { candidates: full["candidates"] } : {}),
+          detail: full["detail"],
+        }
+      : {}),
     // FX-L: `cause` rides the compact receipt for the same reason `challenge`
     // does — it is the DIAGNOSIS, and this shape is what a caller sees on every
     // retry after the first. A compact receipt that keeps the recovery call but
@@ -3471,6 +3782,7 @@ function refuseExecutionEdit(
   editArgs?: Record<string, unknown>,
   resolveHandlePath?: (handle: string) => string | undefined,
   knownOutsideRepack?: { paths: readonly string[]; pairs: readonly HandlePathPair[]; recoveryPaths: readonly string[] },
+  addressCorrection?: EditAddressCorrection,
 ): ExecutionGuardDecision {
   const full = executionRefusal(session, fence, detail, workspaceRoot, {
     editContext: true,
@@ -3478,6 +3790,7 @@ function refuseExecutionEdit(
     ...(editArgs !== undefined ? { editArgs } : {}),
     ...(resolveHandlePath !== undefined ? { resolveHandlePath } : {}),
     ...(knownOutsideRepack !== undefined ? { knownOutsideRepack } : {}),
+    ...(addressCorrection !== undefined ? { addressCorrection } : {}),
   });
   // W6: do not alter the refusal verdict or sanctioned transition.  A
   // byte-identical retry is useful only insofar as it repeats the concrete
@@ -3487,7 +3800,13 @@ function refuseExecutionEdit(
     const currentDetail = typeof full.refusal["detail"] === "string"
       ? `${full.refusal["detail"]} `
       : "";
-    full.refusal["detail"] = `${currentDetail}This tl_edit_file shape was already refused in this task (attempt ${repeatedShape.count}); retrying it unchanged cannot change the result. First correction: ${repeatedShape.firstDetail}`;
+    // An address correction whose wording is the first refusal's own already
+    // STARTS this detail with that correction; echoing it again would only push
+    // the notice into the wire's detail cap (a truncated "First correction:").
+    const firstCorrection = addressCorrection !== undefined && repeatedShape.firstDetail === detail
+      ? ""
+      : ` First correction: ${repeatedShape.firstDetail}`;
+    full.refusal["detail"] = `${currentDetail}This tl_edit_file shape was already refused in this task (attempt ${repeatedShape.count}); retrying it unchanged cannot change the result.${firstCorrection}`;
   }
   // C2: a terminal refusal is already minimal and byte-idempotent — compacting
   // it would strip the very `unlock` it exists to advertise, which is the
@@ -3495,7 +3814,9 @@ function refuseExecutionEdit(
   // is still recorded below so the ring behaves identically for other shapes.
   const isTerminal = full.allowed === false && full.refusal["terminal"] === true;
   if (!isTerminal && full.allowed === false && session.recentEditRefusalSignatures.includes(editSignature)) {
-    const demand = fence.demand;
+    // An address correction owes no frontier batch (it records no demand), so
+    // whatever demand another refusal left on the fence is not its delta.
+    const demand = addressCorrection === undefined ? fence.demand : undefined;
     const remainingPaths = demand !== undefined
       ? demand.paths.filter((candidate) => !demand.satisfiedPaths.includes(candidate))
       : [];
@@ -3952,10 +4273,13 @@ export function recordServedEditAdmissibility(
  * edit) and desertion to native tools (6 native escapes in one cell).
  *
  * Why this cannot widen containment or the answer fence:
- *   - It is called ONLY after createFile.ts returned ok:true, i.e. after the
- *     --allow-write gate, the lexical workspace-prefix check and the realpath
- *     walk to the nearest existing ancestor all passed. A create that never
- *     happened enrolls nothing, and none of those checks are reachable here.
+ *   - It is called ONLY after a create landed: createFile.ts returned ok:true
+ *     (the single-create arm), or applyEditsMulti returned ok:true for an
+ *     edits[] batch with create items (all-or-nothing, through the same
+ *     createFileCore.ts; added 2026-10-19), i.e. after the --allow-write
+ *     gate, the lexical workspace-prefix check and the realpath walk to the
+ *     nearest existing ancestor all passed. A create that never happened
+ *     enrolls nothing, and none of those checks are reachable here.
  *   - The path is workspace-relative and the union is keyed by workspace root
  *     (getSession), so it is admissible in exactly the tree it was written
  *     into and in no other.
@@ -4464,14 +4788,21 @@ function namedMaterialSelector(args: Record<string, unknown>): string | undefine
  * The line windows a call asks for, in request order. An `undefined` entry
  * marks a window this server cannot parse; callers must read one as "I do not
  * know what this call denotes", never as "this call names no window".
+ *
+ * 2026-10-18 (DESIGN-v0.14-plan.md §20.17): with the file's line count, the
+ * range words the slice reader accepts ("full", "120-end", …) read as the
+ * same windows here (`util/rangeWords.ts`), so the third identical
+ * `range:"full"` read of held material gets the receipt a numeric window
+ * gets, not the brake's refusal. Without a line count they stay unparseable.
  */
-function requestedLineWindows(args: Record<string, unknown>): Array<[number, number] | undefined> {
+function requestedLineWindows(args: Record<string, unknown>, totalLines?: number): Array<[number, number] | undefined> {
   const raw = [
     ...(Array.isArray(args["ranges"]) ? args["ranges"].map(String) : []),
     ...(typeof args["range"] === "string" ? [args["range"] as string] : []),
   ];
   return raw.map((spec) => {
-    const parsed = /^L?(\d+)\s*-\s*L?(\d+)$/.exec(spec.trim());
+    const worded = totalLines === undefined ? undefined : wholeOrOpenEndedRange(spec, totalLines);
+    const parsed = /^L?(\d+)\s*-\s*L?(\d+)$/.exec((worded ?? spec).trim());
     return parsed === null ? undefined : ([Number(parsed[1]), Number(parsed[2])] as [number, number]);
   });
 }
@@ -4764,23 +5095,104 @@ function newTaskQueryMismatch(
   return _sameTaskQuery(query, incoming, fence.epochQuery, fence.epochTokens) ? undefined : query;
 }
 
+/**
+ * The comment windows a read's OWN default representation elides inside file
+ * lines `[start, end]` of `path`, while the file on disk still has `sha` (the
+ * served-range ledger entry's sha). Supplied by the dispatcher, which alone
+ * can read the file and knows the request's comment policy: it answers
+ * `undefined` for a request that keeps comments, an unreadable file, or a sha
+ * that moved, and the caller then counts every line of the window as owed.
+ * Read-only.
+ */
+export type RequestElisionProbe = (
+  path: string,
+  sha: string,
+  start: number,
+  end: number,
+) => ReadonlyArray<readonly [number, number]> | undefined;
+
+/**
+ * The file-line window a `symbol` read of `symbol` resolved at this ledger
+ * state's sha (§20.26, `ServedRangeLedgerState.symbols`), clamped to the
+ * file; `undefined` when no such read was recorded.
+ */
+function servedSymbolWindow(state: ServedRangeLedgerState, symbol: unknown): [number, number] | undefined {
+  if (typeof symbol !== "string" || symbol === "") return undefined;
+  const recorded = state.symbols?.get(symbol);
+  if (recorded === undefined) return undefined;
+  const start = Math.max(1, recorded[0]);
+  const end = Math.min(state.totalLines, recorded[1]);
+  return end >= start ? [start, end] : undefined;
+}
+
+/**
+ * 2026-10-20 (decision run 6t-7): what the read dispatcher knows about the
+ * read the fence is judging, beyond its arguments.
+ */
+export interface FenceReadView {
+  /**
+   * The request renders comments (`select.comments:"keep"`, or a ranged
+   * `content:"full"`): it is owed every requested line as bytes, so a line a
+   * reply carried only as a disclosed `elided` window is not held for it
+   * (T03 rep0 #6: a receipt for the Javadoc the task pack had only disclosed).
+   */
+  keepComments: boolean;
+  /**
+   * A request with no window that the dispatcher answers with the file's
+   * content (a file under the auto small-file threshold). Like
+   * `content:"full"` (W14 L1), a partly held file passes to it and is served
+   * as its unserved remainder plus `prior` for the held part, in one reply
+   * (T07 rep1 #5: a receipt whose `next` named the rest of a 159-line file).
+   */
+  servesWholeFileContent: boolean;
+}
+
 function heldSelfMaterialReceipt(
   session: WorkspaceSession,
   fence: ExecutionFenceState,
   args: Record<string, unknown>,
   resolveHandlePath?: (handle: string) => string | undefined,
+  /**
+   * 2026-10-19 (the loop brake's elision gap): passed by the brake only. A
+   * requested window none of whose lines outside these windows is unheld
+   * answers with the receipt for those lines — see the window loop below.
+   */
+  requestElisionFor?: RequestElisionProbe,
+  readView?: FenceReadView,
+  /**
+   * 2026-10-20: the caller lets the read through when this answers nothing
+   * (the prepared path), so a default-policy window holding lines a pack only
+   * disclosed goes to the read dispatcher instead of taking a receipt here.
+   * The loop brake and a ready batch would refuse or close such a call, so
+   * they keep the receipt from every booked line.
+   */
+  deferUnheldDefaultWindows = false,
 ): Record<string, unknown> | undefined {
   const selfMaterial = brakeTargetPath(session, fence, args, resolveHandlePath);
   if (selfMaterial === undefined) return undefined;
   const state = session.servedRangeLedger.get(selfMaterial);
   if (state === undefined || state.spans.length === 0) return undefined;
 
+  const keepComments = readView?.keepComments === true;
   const covered = mergeServedRanges(
     state.spans.map((span) => [span.start, span.end] as [number, number]),
   );
-  const windowFor = (start: number, end: number): Record<string, unknown> | undefined => {
-    if (!covered.some(([rangeStart, rangeEnd]) => rangeStart <= start && rangeEnd >= end)) return undefined;
-    const servedBy = servedByLabel(state, start, end);
+  // 2026-10-20 (decision run 6t-7, T03 rep0 #6): a named window is held only
+  // where a reply carried its bytes. A line a task pack only disclosed as
+  // `elided` is no receipt here for a request that keeps comments, which is
+  // owed it; on the prepared path a default-policy read of it goes to the
+  // read dispatcher, which knows what this request's own rendering shows
+  // (server.ts `sliceReceiptCommentWindows`). Elsewhere, and in the
+  // whole-file branch below, a default-policy request is still answered from
+  // every booked line, as before.
+  const byteHeld = _byteHeldRanges(state);
+  const windowFor = (
+    start: number,
+    end: number,
+    held: ReadonlyArray<readonly [number, number]> = byteHeld,
+  ): Record<string, unknown> | undefined => {
+    if (!held.some(([rangeStart, rangeEnd]) => rangeStart <= start && rangeEnd >= end)) return undefined;
+    const servedBy = servedByLabel(state, start, end, held === byteHeld);
     return {
       range: `${start}-${end}`,
       code_unchanged: true,
@@ -4788,17 +5200,61 @@ function heldSelfMaterialReceipt(
     };
   };
 
-  const requested = requestedLineWindows(args);
+  const requested = requestedLineWindows(args, state.totalLines);
+  // 2026-10-19 (DESIGN-v0.14-plan.md §20.26): a `symbol` read names no lines,
+  // but the symbol read before it recorded the window it resolved the name
+  // to at this sha (`ServedRangeLedgerState.symbols`). A repeat of that read
+  // denotes exactly those lines, so they are its requested window:
+  // held, it gets the receipt naming them, and the comment windows its
+  // rendering elides are not owed, as for any window. ND-1 below used to ask
+  // for the WHOLE file instead, and the brake refused the third identical
+  // symbol read with a rescope `next` naming lines outside the symbol (rc
+  // spec readPathAdviceAgreement f).
+  if (requested.length === 0 && namedMaterialSelector(args) === "symbol") {
+    const symbolWindow = servedSymbolWindow(state, args["symbol"]);
+    if (symbolWindow !== undefined) requested.push(symbolWindow);
+  }
   const windows: Array<Record<string, unknown>> = [];
+  let remainingRanges: string[] = [];
   for (const window of requested) {
     // An unparseable window is "I do not know what this call denotes", which
     // can never ground a residency claim.
     if (window === undefined) return undefined;
     const held = windowFor(window[0], window[1]);
+    if (held !== undefined) {
+      windows.push(held);
+      continue;
+    }
+    const booked = keepComments || deferUnheldDefaultWindows ? undefined : windowFor(window[0], window[1], covered);
+    if (booked !== undefined) {
+      windows.push(booked);
+      continue;
+    }
+    // 2026-10-19 (the loop brake's elision gap, v016 6t-3 replay; rc spec
+    // readPathAdviceAgreement d): a default-policy read never sends the
+    // comment blocks its own rendering elides, so they were never booked as
+    // held — and the brake counted them as owed. Under a verifying fence the
+    // third identical `range:"full"` read of a file whose doc-comment header
+    // the first read elided met the ~1.9 KB execution-typestate refusal
+    // (whose rescope `next` named the elided header itself) instead of a
+    // receipt. Those windows are not owed, exactly as
+    // `servedRangeReceipt`'s `policyElided` treats them. They are never
+    // claimed either (FX-W3 ruling (x)): the receipt names only the held
+    // lines outside them, each proven against the ledger's spans, and the
+    // probe derives the windows from the file's own text, never from the
+    // ledger's elided-window record.
+    const policyWindows = requestElisionFor?.(selfMaterial, state.fileSha, window[0], window[1]);
+    const owed = policyWindows === undefined || policyWindows.length === 0
+      ? []
+      : spansExcludingWindows(window[0], window[1], policyWindows);
     // One unheld window means this call is NOT a pure repeat of bytes the
     // caller holds — fall back to the refusal rather than overclaim.
-    if (held === undefined) return undefined;
-    windows.push(held);
+    if (owed.length === 0) return undefined;
+    for (const [owedStart, owedEnd] of owed) {
+      const piece = windowFor(owedStart, owedEnd);
+      if (piece === undefined) return undefined;
+      windows.push(piece);
+    }
   }
   if (requested.length === 0 && namedMaterialSelector(args) !== undefined) {
     // ND-1 (2026-08-08): the ledger vouches LINES; a NAMED selector
@@ -4815,13 +5271,33 @@ function heldSelfMaterialReceipt(
     // broad full request, leave the guard open when any complement remains so
     // the normal full dispatcher can serve the fresh ranges (W14 L1/L3).
     const unserved = unservedServedRanges(state.ranges, state.totalLines);
-    if (fence.phase === "prepared" && args["mode"] === "full" && unserved.length > 0) {
+    // 2026-10-20 (decision run 6t-7, T07 rep1 #5): the same holds for a
+    // request the dispatcher answers with the content of a small file
+    // (`FenceReadView.servesWholeFileContent`). The recorded receipt named
+    // 1-8 and 46-159 of compute_test.go as its `next`, and the solver spent
+    // a call running it.
+    if (
+      fence.phase === "prepared"
+      && (args["mode"] === "full" || readView?.servesWholeFileContent === true)
+      && unserved.length > 0
+    ) {
       return undefined;
     }
+    // A whole-file request that keeps comments is owed every line a reply
+    // carried only as a disclosed `elided` window, too.
+    if (keepComments && unservedServedRanges(byteHeld, state.totalLines).length > 0) return undefined;
+    // 2026-10-18 (DESIGN-v0.14-plan.md §20.15, bench 6t-2 T13 rep1 call 13):
+    // any other whole-file request answered from the held clusters says what
+    // is NOT held. A bare receipt for lines 199-259 of a 342-line file read as
+    // "you already hold this file", and the caller had to guess the gaps in a
+    // second call. `remaining_ranges` becomes the receipt's `next`
+    // (protocol/envelope.ts's `priorOnlyTextReceipt`), naming exactly the
+    // unserved lines.
+    remainingRanges = unserved.slice(0, SELF_MATERIAL_RECEIPT_WINDOW_CAP);
     // No explicit window — a whole-handle/whole-file repeat (the observed 3rd
     // `mode=full`). The ledger's own clusters ARE what those calls served.
     for (const [start, end] of covered.slice(0, SELF_MATERIAL_RECEIPT_WINDOW_CAP)) {
-      const held = windowFor(start, end);
+      const held = windowFor(start, end, covered);
       if (held !== undefined) windows.push(held);
     }
   }
@@ -4875,6 +5351,7 @@ function heldSelfMaterialReceipt(
     ...(coveredBy !== undefined && coveredBy.length > 0 ? { covered_by: coveredBy } : {}),
     phase: fence.phase,
     certificate_id: fence.certificateId,
+    ...(remainingRanges.length > 0 ? { remaining_ranges: remainingRanges } : {}),
     detail: "these lines are already in your context, unchanged since this session served them — act on them, or ask for a window you do not hold",
   };
 }
@@ -4936,12 +5413,12 @@ function brakedCallServesNoBytes(
   resolveHandlePath?: (handle: string) => string | undefined,
 ): boolean {
   if (fence.zeroByteSignatures.has(signature)) return true;
-  const requested = requestedLineWindows(args);
-  if (requested.length === 0 || requested.some((window) => window === undefined)) return false;
   const path = brakeTargetPath(session, fence, args, resolveHandlePath);
   if (path === undefined) return false;
   const state = session.servedRangeLedger.get(path);
   if (state === undefined) return false;
+  const requested = requestedLineWindows(args, state.totalLines);
+  if (requested.length === 0 || requested.some((window) => window === undefined)) return false;
   // EVERY window must lie past EOF. One window that still overlaps the file
   // means the call serves bytes, and the brake keeps its teeth.
   return requested.every((window) => window![0] > state.totalLines);
@@ -5011,6 +5488,11 @@ function brakeRescopeNextCall(
  * the handle table; it is read-only and used solely to decide whether a
  * repeated read targets this session's own material. Absent, handle-addressed
  * repeats simply fall through to the refusal — never to a wrong receipt.
+ *
+ * `requestElisionFor` (2026-10-19), also from the dispatcher, lets the loop
+ * brake's held check leave out the comment windows the request's own
+ * rendering elides (see `heldSelfMaterialReceipt`). Absent, every line of a
+ * requested window counts as owed, as before.
  */
 export function guardExecutionDiscovery(
   workspaceRoot: string,
@@ -5018,12 +5500,35 @@ export function guardExecutionDiscovery(
   args: Record<string, unknown>,
   resolveHandlePath?: (handle: string) => string | undefined,
   exactPreparedTaskPackReceipt = false,
+  requestElisionFor?: RequestElisionProbe,
+  readView?: FenceReadView,
 ): ExecutionDiscoveryDecision {
   const session = getSession(workspaceRoot);
   // taskEpoch:"new" opens a genuinely new task even when no fence is
   // installed (candidate-list packs never install one) — release the
   // candidate-pack full-read brake before the fence checks below.
   if (args["taskEpoch"] === "new") {
+    if (tool === "tl_read_file") {
+      // 2026-10-18 (§20.17): a read with a query and no targets is how the
+      // guides open a new request, so it starts the count over; the task's
+      // completion (`recordClosureOpenStreak`, phase `done`) clears it too.
+      // Only later epoch:"new" reads of that request, the ones with targets,
+      // count up toward the advisory.
+      const opensRequest = _hasQueryWithoutTargets(args);
+      session.taskEpochNewReads = opensRequest ? 1 : session.taskEpochNewReads + 1;
+      if (opensRequest) session.requestTaskHandedOut = false;
+      // §20.15: a repeated read with a query and targets. 6t-8: a read with
+      // targets and no query, once this request has handed out a task handle.
+      const repeated = _hasQuery(args) ? session.taskEpochNewReads > 1 : session.requestTaskHandedOut;
+      if (repeated && _hasExplicitTargets(args)) {
+        session.pendingEpochRepeatAdvisory = EPOCH_REPEAT_ADVISORY;
+      }
+    } else if (session.requestTaskHandedOut) {
+      // 6t-8: a search sent as a new task drops the task this request handed
+      // out the same way. It does not count: the guides open a request with a
+      // read, and §20.15 keeps searches out of the count.
+      session.pendingEpochRepeatAdvisory = EPOCH_REPEAT_SEARCH_ADVISORY;
+    }
     session.candidatePackPending = false;
     session.candidatePackFullReads = 0;
     session.revokedCertificateIds.clear();
@@ -5040,6 +5545,8 @@ export function guardExecutionDiscovery(
     // `verificationSurfacesServed`'s doc comment for why that ledger is
     // session-scoped and deliberately survives the epoch boundary.
     session.verificationManifestPathsServed.clear();
+    // TL_EFF_EDIT_DIET: the kit-entry ledger is task-shaped the same way.
+    session.verificationKitEntriesSent.clear();
     // DESIGN-v0.15-sf-intent-layers.md §4.2 (IL-W2): "an edit already landed
     // THIS task" is exactly as task-shaped as the ledgers above — a NEW
     // declared task has observed no edit of its own yet, even when reached
@@ -5125,12 +5632,28 @@ export function guardExecutionDiscovery(
     // W5b: a prepared edit certificate trims the first broad full read.
     // A concrete decision-changing challenge above revokes the fence and is
     // the explicit escape hatch; force_serve remains unconditional recovery.
+    //
+    // 2026-10-19 (v016 decision 6t-3, T13 rep1 #2): a whole-file read
+    // addressed by a HANDLE this server minted is not broad discovery — it
+    // zooms into material a response already pointed at, and it is the zoom
+    // the pack's own hub excerpt advises ("ONE tl_read_file
+    // {targets:[{handle}], content:"full"}"). Trimming it answered that
+    // advice with a 2.2 KB `read.map` whose `next` named one of the four
+    // unserved ranges, and the solver left for native reads. It reaches the
+    // ordinary full read instead, under that read's own rules (the byte cap
+    // and per-path/per-task governor, the served-range difference that sends
+    // only unheld lines, the held receipt); a path-addressed full read is
+    // still trimmed.
+    const handleAddressed = typeof args["handle"] === "string"
+      && args["handle"] !== ""
+      && resolveHandlePath?.(args["handle"]) !== undefined;
     if (
       !batchFenceActive
       && fence.terminalAction === "edit"
       && tool === "tl_read_file"
       && args["mode"] === "full"
       && args["force_serve"] !== true
+      && !handleAddressed
     ) {
       return { allowed: true, postReadyTrim: true };
     }
@@ -5170,7 +5693,7 @@ export function guardExecutionDiscovery(
     if (batchFenceActive) {
       if (args["force_serve"] === true) return { allowed: true };
       if (tool === "tl_read_file") {
-        const receipt = heldSelfMaterialReceipt(session, fence, args, resolveHandlePath);
+        const receipt = heldSelfMaterialReceipt(session, fence, args, resolveHandlePath, undefined, readView);
         if (receipt !== undefined) return { allowed: false, servedReceipt: receipt };
       }
       return { allowed: false, servedReceipt: preparedDiscoveryReceipt(session, fence, workspaceRoot, seen > 0, tool, args) };
@@ -5210,8 +5733,11 @@ export function guardExecutionDiscovery(
     // A residency proof over the fence's OWN evidence/edit material: "content
     // the caller already has" (required semantics #1(b)) — keeps its receipt
     // unconditionally, including past the change below. `tl_read_file` only —
-    // `tl_search_files` is bypassed above (F-V12-1).
-    const receipt = heldSelfMaterialReceipt(session, fence, args, resolveHandlePath);
+    // `tl_search_files` is bypassed above (F-V12-1). Only a read the
+    // fallthrough below lets through may leave a window to the dispatcher.
+    const receipt = heldSelfMaterialReceipt(
+      session, fence, args, resolveHandlePath, undefined, readView, args["mode"] !== "task_pack",
+    );
     if (receipt !== undefined) {
       return { allowed: false, servedReceipt: receipt };
     }
@@ -5248,7 +5774,7 @@ export function guardExecutionDiscovery(
     if (brakedCallServesNoBytes(session, fence, signature, args, resolveHandlePath)) {
       return { allowed: true };
     }
-    const receipt = heldSelfMaterialReceipt(session, fence, args, resolveHandlePath);
+    const receipt = heldSelfMaterialReceipt(session, fence, args, resolveHandlePath, requestElisionFor, readView);
     if (receipt !== undefined) return { allowed: false, servedReceipt: receipt };
     return executionRefusal(session, fence, DISCOVERY_LOOP_BRAKE_DETAIL, workspaceRoot, {
       discoveryBrake: true,
@@ -5836,6 +6362,7 @@ function guardExecutionEditCore(
     session.searchDedupLedger.clear();
     // L2 (2026-08-07): same epoch reset as the discovery guard — see there.
     session.verificationManifestPathsServed.clear();
+    session.verificationKitEntriesSent.clear();
     // DESIGN-v0.15-sf-intent-layers.md §4.2 (IL-W2): same epoch reset as the
     // discovery guard's identical clear above — see there.
     session.intentEditObserved = false;
@@ -6266,7 +6793,17 @@ function guardExecutionEditCore(
   const outsidePaths = checkPaths.filter((candidate) =>
     !fence.actionPaths.includes(candidate) && !session.admissibleEditPaths.includes(candidate)
     && !(opts?.uniqueMatchPaths?.has(candidate) === true && uniqueMatchWithheld?.has(candidate) !== true));
+  // 2026-10-22 (see ADDRESS-LESS `edits[]` ITEMS above): items that name no
+  // file are refused with the correction -- the missing `path` field and the
+  // write targets -- never with a challenge that cannot supply an address.
+  // Strictness is unchanged: it is still a refusal, and nothing is inferred.
+  const addresslessItems = anyCreateRequested ? [] : addresslessEditItemIndexes(args);
+  const refuseAddressless = (): ExecutionGuardDecision => {
+    const correction = editAddressCorrection(fence, addresslessItems, resolveHandlePath);
+    return refuseExecutionEdit(session, fence, workspaceRoot, editSignature, correction.detail, undefined, args, resolveHandlePath, undefined, correction);
+  };
   if (!anyCreateRequested && handles.length === 0 && paths.length === 0) {
+    if (addresslessItems.length > 0) return refuseAddressless();
     return refuseExecutionEdit(session, fence, workspaceRoot, editSignature, "edit has no certificate-backed handle or path", undefined, args, resolveHandlePath);
   }
   if (outsideHandles.length > 0 || outsidePaths.length > 0) {
@@ -6352,6 +6889,12 @@ function guardExecutionEditCore(
       knownOutsideRepack,
     );
   }
+  // A mixed batch: every item that names a file is inside the frontier (the
+  // check above) and at least one names none. The frontier refusal above keeps
+  // its precedence; this one reports what the dispatcher's own targetless-item
+  // pre-pass would, with the field and the write targets, before anything is
+  // dispatched.
+  if (addresslessItems.length > 0) return refuseAddressless();
   return createAuthorization !== undefined ? { allowed: true, createAuthorization } : { allowed: true };
 }
 
@@ -6519,9 +7062,53 @@ export function recordedVerifyObligations(workspaceRoot: string): readonly TaskV
 /** Consume the one-shot advisory generated when a prepared frontier is superseded. */
 export function takePreparedHandleAdvisory(workspaceRoot: string): string | undefined {
   const session = getSession(workspaceRoot);
-  const advisory = session.pendingPreparedHandleAdvisory;
+  const parts = [session.pendingPreparedHandleAdvisory, session.pendingEpochRepeatAdvisory]
+    .filter((part): part is string => part !== undefined);
   session.pendingPreparedHandleAdvisory = undefined;
+  session.pendingEpochRepeatAdvisory = undefined;
+  return parts.length > 0 ? parts.join("; ") : undefined;
+}
+
+/**
+ * Consume only the epoch-repeat advisory, for a reply that is not a task pack
+ * (protocol/envelope.ts's funnel tail). A pack takes it with the
+ * superseded-handles advisory in `takePreparedHandleAdvisory`, before the
+ * funnel runs.
+ */
+export function takeEpochRepeatAdvisory(workspaceRoot: string): string | undefined {
+  const session = getSession(workspaceRoot);
+  const advisory = session.pendingEpochRepeatAdvisory;
+  session.pendingEpochRepeatAdvisory = undefined;
   return advisory;
+}
+
+/** A wire task handle was handed out (server.ts's `withTaskHandle`): see `WorkspaceSession.requestTaskHandedOut`. */
+export function noteTaskHandleHandedOut(workspaceRoot: string): void {
+  getSession(workspaceRoot).requestTaskHandedOut = true;
+}
+
+/** See `WorkspaceSession.pendingEpochRepeatAdvisory`. */
+export const EPOCH_REPEAT_ADVISORY =
+  'task.epoch:"new" restarts discovery and re-serves context you hold; a later read of the same request sends targets with task.handle and no query';
+
+/** The tl_search_files form of EPOCH_REPEAT_ADVISORY (see `WorkspaceSession.pendingEpochRepeatAdvisory`). */
+export const EPOCH_REPEAT_SEARCH_ADVISORY =
+  'task.epoch:"new" restarts discovery and drops the task this request opened; a later search of the same request sends task.handle';
+
+/** A read that names files, ranges or handles (the normalized legacy shape the guard sees). */
+function _hasExplicitTargets(args: Record<string, unknown>): boolean {
+  const listed = (key: string): boolean => Array.isArray(args[key]) && (args[key] as unknown[]).length > 0;
+  const named = (key: string): boolean => typeof args[key] === "string" && args[key] !== "";
+  return listed("paths") || listed("handles") || named("path") || named("handle");
+}
+
+function _hasQuery(args: Record<string, unknown>): boolean {
+  return typeof args["query"] === "string" && args["query"].trim() !== "";
+}
+
+/** The guides' first-read shape for a new request: a query and no targets. */
+function _hasQueryWithoutTargets(args: Record<string, unknown>): boolean {
+  return _hasQuery(args) && !_hasExplicitTargets(args);
 }
 
 /**
@@ -6868,14 +7455,11 @@ export function recordArtifactServedRange(workspaceRoot: string, path: string, s
 
 const SERVED_RANGE_LEDGER_PATH_CAP = 128;
 /**
- * Per-file bounds. Both follow the same eviction idiom as the path cap above
- * (drop the OLDEST entries), and both fail SAFE: a dropped cluster or request
- * makes the ledger claim LESS coverage than was actually served, so the worst
- * outcome is one redundant normal serve — never a receipt for bytes the caller
- * does not hold.
+ * Per-file request metadata is bounded separately from exact served spans.
+ * Coverage remains bounded by the span cap below; a smaller cluster cap would
+ * evict an early declaration merely because later disjoint windows were read.
  */
 const SERVED_RANGE_LEDGER_REQUEST_CAP = 32;
-const SERVED_RANGE_LEDGER_CLUSTER_CAP = 64;
 /**
  * F2: bound on the UNMERGED per-serve spans. Same drop-the-oldest idiom and
  * the same fail-safe direction — an evicted span is coverage the ledger stops
@@ -6909,24 +7493,43 @@ function mergeServedRanges(ranges: Array<[number, number]>): Array<[number, numb
 
 /**
  * F2: re-derive the merged `ranges` projection from the unmerged `spans`
- * ground truth, applying both caps. Called on every record so the two views
- * can never drift. Cap order matters: spans are trimmed first, then the merged
- * result, and any span left entirely below the surviving cluster floor is
- * dropped too — so `spans` never claims coverage `ranges` no longer reports.
+ * ground truth. Called on every record so the two views never drift.
+ * The existing span cap also bounds the merged cluster count. Keep every
+ * surviving span regardless of source coordinate: dropping the lowest 64+
+ * clusters caused map continuations to re-request their header indefinitely.
  */
 function materializeServedRanges(state: ServedRangeLedgerState): void {
   if (state.spans.length > SERVED_RANGE_LEDGER_SPAN_CAP) {
     state.spans = state.spans.slice(-SERVED_RANGE_LEDGER_SPAN_CAP);
   }
-  let merged = mergeServedRanges(
+  state.ranges = mergeServedRanges(
     state.spans.map((span) => [span.start, span.end] as [number, number]),
   );
-  if (merged.length > SERVED_RANGE_LEDGER_CLUSTER_CAP) {
-    merged = merged.slice(-SERVED_RANGE_LEDGER_CLUSTER_CAP);
-    const floor = merged[0]![0];
-    state.spans = state.spans.filter((span) => span.end >= floor);
+}
+
+/**
+ * 2026-10-20 (decision run 6t-7, T03 rep0 #6): the spans' pieces whose BYTES
+ * some reply carried — each span minus its `disclosed` lines, which a reply
+ * carried only as an `elided` window. What a request that keeps comments
+ * holds; a default-policy request still holds the whole spans.
+ */
+function _byteHeldSpans(state: ServedRangeLedgerState): Array<{ start: number; end: number; by: string }> {
+  const pieces: Array<{ start: number; end: number; by: string }> = [];
+  for (const span of state.spans) {
+    if (span.disclosed === undefined || span.disclosed.length === 0) {
+      pieces.push(span);
+      continue;
+    }
+    for (const [start, end] of spansExcludingWindows(span.start, span.end, span.disclosed)) {
+      pieces.push({ start, end, by: span.by });
+    }
   }
-  state.ranges = merged;
+  return pieces;
+}
+
+/** `_byteHeldSpans`, merged like `ranges`. */
+function _byteHeldRanges(state: ServedRangeLedgerState): Array<[number, number]> {
+  return mergeServedRanges(_byteHeldSpans(state).map((span) => [span.start, span.end] as [number, number]));
 }
 
 /**
@@ -6938,11 +7541,14 @@ function servedByLabel(
   state: ServedRangeLedgerState,
   start: number,
   end: number,
+  /** Name only the calls whose BYTES reached the window (`_byteHeldRanges`). */
+  keepComments = false,
 ): string | undefined {
-  const exact = state.spans.find((span) => span.start <= start && span.end >= end);
+  const spans = keepComments ? _byteHeldSpans(state) : state.spans;
+  const exact = spans.find((span) => span.start <= start && span.end >= end);
   if (exact !== undefined) return exact.by;
   const labels: string[] = [];
-  for (const span of state.spans) {
+  for (const span of spans) {
     if (span.end < start || span.start > end) continue;
     if (!labels.includes(span.by)) labels.push(span.by);
   }
@@ -7020,11 +7626,35 @@ export function servedRangeReceipt(
    * the historical elision-blind probe.
    */
   policyElided?: ReadonlyArray<readonly [number, number]>,
+  /**
+   * 2026-10-20 (decision run 6t-7, T03 rep0 #6): the request keeps comments
+   * (`select.comments:"keep"`, or a ranged `content:"full"`), so it is owed
+   * every line of the window as bytes. A line some reply carried only as a
+   * disclosed `elided` window (`ServedRangeSpan.disclosed`) is not held for
+   * it, and `policyElided` does not apply (such a request elides nothing).
+   */
+  keepComments = false,
 ): ServedRangeLedgerReceipt | undefined {
   const state = getSession(workspaceRoot).servedRangeLedger.get(filePath);
   if (state === undefined || state.fileSha !== fileSha) return undefined;
   const start = Math.max(1, Math.min(totalLines, startLine));
   const end = Math.max(start, Math.min(totalLines, endLine));
+  if (keepComments) {
+    const held = _byteHeldRanges(state);
+    if (!held.some(([rangeStart, rangeEnd]) => rangeStart <= start && rangeEnd >= end)) return undefined;
+    const keptBy = servedByLabel(state, start, end, true);
+    const keptUnserved = unservedServedRanges(held, totalLines);
+    return {
+      sha: fileSha.slice(0, 12),
+      served: held.map(([rangeStart, rangeEnd]) => `${rangeStart}-${rangeEnd}`),
+      unserved: keptUnserved,
+      added_lines: 0,
+      requests: state.requests.length,
+      clusters: held.length,
+      complete: keptUnserved.length === 0,
+      ...(keptBy !== undefined ? { served_by: keptBy } : {}),
+    };
+  }
   const covered = mergeServedRanges(
     state.spans.map((span) => [span.start, span.end] as [number, number]),
   );
@@ -7416,7 +8046,21 @@ export function recordServedRange(
   // coordinates, e.g. `1-40` for a whole-file serve, `50-200` for a slice),
   // never the wire's synthesized display range, so a narrow slice's own
   // extent never widens past its own request.
-  if (provenance !== undefined) {
+  //
+  // Never a task-pack span (decision runs 6t-4/6t-5, T03, 2026-10-19).
+  // `recordPackServedRanges` books a surface's semantic window minus its
+  // DISCLOSED remainder, and `centeredSliceForCap` discloses only the 200
+  // lines nearest the window it served (T3): OrderOrchestrator.java's surface
+  // (range 45-1552, body 45-270, remaining_ranges 271-470 and 1-44) booked
+  // 471-1552, no line of which any body rendered. Staged here as the call's
+  // extent, 1552 widened every window the reply carried and the span survived
+  // settlement, so later reads of those lines were answered code-unchanged /
+  // already-served (nine receipts over the two runs) and the follow-up's
+  // certificate counted them as served. A task pack's rows declare file
+  // coordinates verbatim (faithful segments plus their `elided` windows,
+  // protocol/sourceFidelity.ts), so its spans settle against exactly those
+  // and never need widening (taskPackSpanRenderedExtent.spec.ts).
+  if (provenance !== undefined && provenance.mode !== "task_pack") {
     const declaredWindow = _parseHandleLineRange(provenance.range);
     if (declaredWindow !== undefined) {
       const priorExtent = session.pendingRenderedExtent.get(filePath);
@@ -7524,6 +8168,24 @@ function _coveredPiecesOfSpan(
     }
   }
   return merged;
+}
+
+/**
+ * 2026-10-24 (read-page ceiling): a producer that cuts an item it has already
+ * booked -- after `recordServedRange` staged the item's whole window and its
+ * true extent -- tells the settle where the cut fell. `pendingRenderedExtent`
+ * widens a window the wire declared up to the extent recorded for its path
+ * whenever the emit ladder shed nothing, and a cut made by the PRODUCER is not
+ * a ladder shed: a 483-line window cut at line 580 was widened back to line
+ * 682, the settle credited 581-682 as delivered, and the read request that was
+ * paging the batch found nothing owed there (measured: a `content:"full"` batch
+ * of a bare file and a ranged one lost the ranged tail). Lowering the extent to
+ * what shipped leaves the settle exactly the window the wire carried.
+ */
+export function capPendingRenderedExtent(workspaceRoot: string, filePath: string, shippedEnd: number): void {
+  const session = getSession(workspaceRoot);
+  const recorded = session.pendingRenderedExtent.get(filePath);
+  if (recorded !== undefined && recorded > shippedEnd) session.pendingRenderedExtent.set(filePath, shippedEnd);
 }
 
 export function settleServedRanges(
@@ -7684,7 +8346,7 @@ function _settleSessionServeBookings(
   // ledger's own, settled span by span below).
   const shippedPaths = new Set<string>();
   const retractedByPath = new Map<string, Set<number>>();
-  const narrowedByPath = new Map<string, Array<{ start: number; end: number; by: string }>>();
+  const narrowedByPath = new Map<string, Array<{ start: number; end: number; by: string; disclosed: Array<[number, number]> }>>();
   for (const span of pending) {
     // CONTAINMENT, not intersection (R11 A-5, independent review 2026-09-03).
     // The emitters already narrow each span to the marker-free text they put
@@ -7716,13 +8378,28 @@ function _settleSessionServeBookings(
     // exactly the range the body used to declare. Only ever a span a BODY
     // window already reached: a response that shipped no byte of the span
     // corroborates none of it, as before (FX-N/A).
+    //
+    // 2026-10-20 (6t-7 T03 rep0 #6): the lines only a disclosed window
+    // reached are remembered on the span (`ServedRangeSpan.disclosed`), so a
+    // later request that keeps comments is never told it holds them.
+    let disclosedOnly: Array<[number, number]> = [];
     if (covered.length > 0 && corroboration.elidedWindows !== undefined) {
       const disclosed = corroboration.elidedWindows.filter((window) =>
         _servePathsMatch(window.path, span.path));
-      if (disclosed.length > 0) covered = _coveredPiecesOfSpan(span, [...matchingWindows, ...disclosed]);
+      if (disclosed.length > 0) {
+        const carried = covered;
+        covered = _coveredPiecesOfSpan(span, [...matchingWindows, ...disclosed]);
+        disclosedOnly = covered.flatMap((piece) => spansExcludingWindows(
+          piece.start, piece.end, carried.map((window) => [window.start, window.end] as [number, number]),
+        ));
+      }
     }
     if (covered.length > 0) shippedPaths.add(span.path);
     if (covered.length === 1 && covered[0]!.start === span.start && covered[0]!.end === span.end) {
+      if (disclosedOnly.length > 0) {
+        const booked = session.servedRangeLedger.get(span.path)?.spans.find((s) => s.id === span.id);
+        if (booked !== undefined) booked.disclosed = disclosedOnly;
+      }
       continue; // fully carried — unchanged, byte-identical to the old rule's outcome here.
     }
     let ids = retractedByPath.get(span.path);
@@ -7733,7 +8410,14 @@ function _settleSessionServeBookings(
         .find((s) => s.id === span.id)?.by ?? `read ${span.start}-${span.end}`;
       let pieces = narrowedByPath.get(span.path);
       if (pieces === undefined) { pieces = []; narrowedByPath.set(span.path, pieces); }
-      for (const piece of covered) pieces.push({ start: piece.start, end: piece.end, by: originalBy });
+      for (const piece of covered) {
+        pieces.push({
+          start: piece.start,
+          end: piece.end,
+          by: originalBy,
+          disclosed: disclosedOnly.filter(([start, end]) => start >= piece.start && end <= piece.end),
+        });
+      }
     }
   }
 
@@ -7758,6 +8442,7 @@ function _settleSessionServeBookings(
         end: piece.end,
         by: piece.by,
         id: (session.serveSpanSerial += 1),
+        ...(piece.disclosed.length > 0 ? { disclosed: piece.disclosed } : {}),
       });
     }
     materializeServedRanges(state);
@@ -8082,6 +8767,8 @@ export function transformServedRangesAcrossServerEdit(
   state.totalLines = afterTotalLines;
   state.deltaFromSha = beforeSha;
   state.spans = kept;
+  // §20.26: a symbol's window was resolved against the pre-edit lines.
+  delete state.symbols;
   // FX-V1 (round-20A finding 1, 2026-09-04): discard rather than re-project.
   // `elided` spans are only ever trusted for the WRITE-AUTHORITY coverage
   // predicate (`_foreignHandleRangeCovered`), never a receipt, but an
@@ -8099,6 +8786,82 @@ export function transformServedRangesAcrossServerEdit(
   materializeServedRanges(state);
   const heldLines = state.ranges.reduce((sum, [start, end]) => sum + (end - start + 1), 0);
   return { kept: state.spans.length, dropped, shifted, heldLines };
+}
+
+/**
+ * TL_EFF_EDIT_DIET (2026-10-19, v016 decision 6t-2/6t-3): move `relPath`'s
+ * served-range entry to the revision THIS SERVER's own edit just wrote, for an
+ * `edit.applied` entry whose post-edit window was left out as an echo of the
+ * caller's own text (server.ts `postEditEchoTexts`).
+ *
+ * WHY IT MUST EXIST. Without TL_DELTA_CONTEXT nothing at the write seam
+ * re-keys the entry; what moved it to the post-edit sha was the shipped
+ * window's own booking (`bookShippedPostEditWindows`, `recordServedRange` at
+ * the new sha). An echo window ships nothing, so the entry kept the PRE-edit
+ * sha, and the caller's next caller-ranged read of the file it had just edited
+ * through this server tripped `servedRangeStaleness` — measured on the 6t-2
+ * replay, T13 rep1 #23: `cursor-stale` ("the source revision … moved since this
+ * task last served it") instead of the 8,602 B read.text it was before.
+ *
+ * WHAT IT CLAIMS, AND WHY THAT IS HONEST. Only `authored`: the lines of the
+ * post-edit file that consist ENTIRELY of text the caller sent in this edit's
+ * `replace`/`content` (server.ts `authoredFullLineSpans`: a line the caller's
+ * text covers only in part keeps bytes the caller did not send, so it is not
+ * claimed). The caller holds those bytes because it wrote them, not because a
+ * window shipped them, so they are recorded directly as settled spans
+ * labelled `edit-authored …` — never staged for the funnel's corroboration,
+ * which can only ever confirm bytes the RESPONSE carried, and never touching
+ * the admissible union or byte residency (the edited path is already
+ * admissible: the write enrolled it). The context lines around the
+ * replacement are not claimed: the caller was not sent them at this revision.
+ *
+ * The pre-edit spans are dropped, exactly as the shipped window's own booking
+ * dropped them (a new sha resets the entry): pre-edit coordinates no longer
+ * describe the file. An entry already AT the post-edit sha (TL_DELTA_CONTEXT
+ * carried it through the write seam) keeps what it carried and gains the
+ * authored lines. With no authored line to hold, the entry is deleted rather
+ * than left empty — the same rule as `settleServedRanges` and the delta
+ * transformation: an emptied state would pin a sha and make the next serve
+ * look like a reset instead of the first serve of this content.
+ */
+export function holdServerEditAuthoredLines(
+  workspaceRoot: string,
+  relPath: string,
+  postSha: string,
+  totalLines: number,
+  authored: ReadonlyArray<readonly [number, number]>,
+  call: number,
+): void {
+  const session = getSession(workspaceRoot);
+  let state = session.servedRangeLedger.get(relPath);
+  const spans = authored
+    .map(([start, end]) => [Math.max(1, start), Math.min(totalLines, end)] as const)
+    .filter(([start, end]) => start <= end);
+  if (state === undefined || state.fileSha !== postSha) {
+    // A span still pending for this path describes the pre-edit revision;
+    // discharged, not settled, for the reason `transformServedRangesAcrossServerEdit`
+    // gives (a post-edit response cannot adjudicate a pre-edit booking).
+    if (session.pendingServeSpans.length > 0) {
+      session.pendingServeSpans = session.pendingServeSpans.filter((span) => !_servePathsMatch(span.path, relPath));
+    }
+    if (spans.length === 0) {
+      session.servedRangeLedger.delete(relPath);
+      return;
+    }
+    state = { fileSha: postSha, ranges: [], spans: [], requests: [], totalLines, elided: [] };
+    session.servedRangeLedger.delete(relPath);
+    session.servedRangeLedger.set(relPath, state);
+  }
+  state.totalLines = totalLines;
+  for (const [start, end] of spans) {
+    state.spans.push({ start, end, by: `edit-authored ${start}-${end} (call #${call})`, id: (session.serveSpanSerial += 1) });
+  }
+  materializeServedRanges(state);
+  while (session.servedRangeLedger.size > SERVED_RANGE_LEDGER_PATH_CAP) {
+    const oldest = session.servedRangeLedger.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    session.servedRangeLedger.delete(oldest);
+  }
 }
 
 /**
@@ -8330,7 +9093,13 @@ export function recordClosureOpenStreak(workspaceRoot: string, openIds: readonly
     // signal — release a verifying fence so follow-up work is not refused
     // after the edit is proven done (T13-rep0: closure never cleared the
     // verify gate and every subsequent edit was refused).
-    if (s.executionFence?.phase === "verifying") s.executionFence.phase = "done";
+    if (s.executionFence?.phase === "verifying") {
+      s.executionFence.phase = "done";
+      // §20.17: the task is complete, so the next task.epoch:"new" read opens
+      // a new request rather than repeating one (see taskEpochNewReads).
+      s.taskEpochNewReads = 0;
+      s.requestTaskHandedOut = false;
+    }
     return false;
   }
   const prevIds = new Set(s.closureOpenStreakIds);
@@ -8487,6 +9256,7 @@ export function getIntentEditObserved(workspaceRoot: string): boolean {
 //   - any find that surfaces a NOT-yet-served location  -> resetServedFindLedger
 //   - a successful edit                                 -> resetServedFindLedger
 //   - a new certificate                                 -> ledger re-created
+//   - a read that served lines not held before          -> ledger re-created
 //   - taskEpoch:"new" / session reset                   -> ledger discarded
 //
 // DELIBERATELY NOT a second discovery brake. guardExecutionDiscovery refuses
@@ -8517,6 +9287,15 @@ function trimLedgerSet(set: Set<string>): void {
   }
 }
 
+/** Lines the served-range ledger holds across every path (merged ranges). */
+function _servedLineTotal(session: WorkspaceSession): number {
+  let total = 0;
+  for (const state of session.servedRangeLedger.values()) {
+    for (const [start, end] of state.ranges) total += end - start + 1;
+  }
+  return total;
+}
+
 /**
  * Records one find whose ENTIRE match set was already served this session and
  * returns the verdict the response path must obey.
@@ -8537,16 +9316,19 @@ export function recordAllServedFind(
 ): AllServedFindVerdict {
   const session = getSession(workspaceRoot);
   let ledger = session.servedFindLedger;
-  if (ledger === undefined || ledger.certificateId !== certificateId) {
+  const heldLines = _servedLineTotal(session);
+  if (ledger === undefined || ledger.certificateId !== certificateId || heldLines > ledger.heldLines) {
     ledger = {
       certificateId,
       occurrences: 0,
       fingerprints: new Set(),
       signatures: new Set(),
       firstQueryByFingerprint: new Map(),
+      heldLines,
     };
     session.servedFindLedger = ledger;
   }
+  ledger.heldLines = heldLines;
   const repeatedCall = ledger.signatures.has(signature);
   const duplicateOfQuery = ledger.fingerprints.has(fingerprint)
     ? ledger.firstQueryByFingerprint.get(fingerprint)
@@ -8880,9 +9662,21 @@ export function servedRangeCoverage(
    * `prior` claims from.
    */
   policyElided?: ReadonlyArray<readonly [number, number]>,
+  /**
+   * 2026-10-20 (decision run 6t-7, T03 rep0 #6): the request keeps comments,
+   * so `served` names only lines whose bytes a reply carried
+   * (`_byteHeldRanges`): a line a pack only disclosed as `elided` is a gap a
+   * difference projection serves, never a `prior` claim.
+   */
+  keepComments = false,
 ): { served: Array<[number, number]>; unserved: string[]; complete: boolean } | undefined {
   const state = getSession(workspaceRoot).servedRangeLedger.get(filePath);
   if (state === undefined || state.fileSha !== fileSha) return undefined;
+  if (keepComments) {
+    const held = _byteHeldRanges(state);
+    const keptUnserved = unservedServedRanges(held, totalLines);
+    return { served: held, unserved: keptUnserved, complete: keptUnserved.length === 0 };
+  }
   const served = state.ranges.map(([start, end]) => [start, end] as [number, number]);
   const unserved = unservedServedRanges(
     policyElided === undefined || policyElided.length === 0
@@ -8891,6 +9685,84 @@ export function servedRangeCoverage(
     totalLines,
   );
   return { served, unserved, complete: unserved.length === 0 };
+}
+
+/**
+ * 2026-10-20 (decision run 6t-7, T03 rep0 #6 / T10 rep0 #16): the runs of
+ * `[startLine, endLine]` whose bytes no reply this session sent for
+ * `fileSha` carried — the lines a request that keeps comments is still owed
+ * (`_byteHeldRanges`): never-served lines, and lines a reply carried only as
+ * a disclosed `elided` window. `undefined` when the ledger holds nothing for
+ * this exact sha. Read-only.
+ */
+export function servedRangeUnheldLines(
+  workspaceRoot: string,
+  filePath: string,
+  fileSha: string,
+  startLine: number,
+  endLine: number,
+  totalLines: number,
+): Array<[number, number]> | undefined {
+  const state = getSession(workspaceRoot).servedRangeLedger.get(filePath);
+  if (state === undefined || state.fileSha !== fileSha) return undefined;
+  const start = Math.max(1, Math.min(totalLines, startLine));
+  const end = Math.max(start, Math.min(totalLines, endLine));
+  return spansExcludingWindows(start, end, _byteHeldRanges(state));
+}
+
+/** The most symbol windows one ledger state remembers; the oldest is dropped first. */
+const SYMBOL_WINDOW_CAP = 64;
+
+/**
+ * 2026-10-19 (DESIGN-v0.14-plan.md §20.26): records the window a `symbol`
+ * read resolved `symbol` to at `fileSha` — see
+ * `ServedRangeLedgerState.symbols`. A no-op unless this session's ledger
+ * holds `filePath` at exactly `fileSha`.
+ */
+export function noteSymbolWindow(
+  workspaceRoot: string,
+  filePath: string,
+  fileSha: string,
+  symbol: string,
+  start: number,
+  end: number,
+): void {
+  if (symbol === "") return;
+  const state = getSession(workspaceRoot).servedRangeLedger.get(filePath);
+  if (state === undefined || state.fileSha !== fileSha) return;
+  const symbols = state.symbols ?? (state.symbols = new Map());
+  symbols.delete(symbol);
+  symbols.set(symbol, [start, end]);
+  while (symbols.size > SYMBOL_WINDOW_CAP) {
+    const oldest = symbols.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    symbols.delete(oldest);
+  }
+}
+
+/** The most tree cursor roots one session remembers; the oldest is dropped first. */
+const TREE_CURSOR_ROOT_CAP = 64;
+
+/**
+ * 2026-10-19 (DESIGN-v0.14-plan.md §20.26): remembers the normalized root a
+ * workspace tree cursor was minted for. The cursor itself carries only a
+ * digest of it (tools/exploreTree.ts), so without this a cursor sent with no
+ * scope (v016 6t-3 T05c rep2 #8/#9) could only be read as the workspace root.
+ */
+export function rememberTreeCursorRoot(workspaceRoot: string, rootDigest: string, root: string): void {
+  const roots = getSession(workspaceRoot).treeCursorRoots;
+  roots.delete(rootDigest);
+  roots.set(rootDigest, root);
+  while (roots.size > TREE_CURSOR_ROOT_CAP) {
+    const oldest = roots.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    roots.delete(oldest);
+  }
+}
+
+/** The root `rememberTreeCursorRoot` recorded for `rootDigest`, if this session issued that cursor. */
+export function treeCursorRoot(workspaceRoot: string, rootDigest: string): string | undefined {
+  return getSession(workspaceRoot).treeCursorRoots.get(rootDigest);
 }
 
 /**
@@ -9040,6 +9912,18 @@ export function clearVerificationLedgers(workspaceRoot: string): void {
   const session = getSession(workspaceRoot);
   session.verificationSurfacesServed.clear();
   session.verificationManifestPathsServed.clear();
+  session.verificationKitEntriesSent.clear();
+}
+
+/** TL_EFF_EDIT_DIET: has an `edit.applied` kit already carried this entry identity this task, in this lane? */
+export function verificationKitEntrySent(workspaceRoot: string, identity: string): boolean {
+  return getSession(workspaceRoot).verificationKitEntriesSent.has(identity);
+}
+
+/** TL_EFF_EDIT_DIET: record the entry identities an `edit.applied` kit is carrying. */
+export function markVerificationKitEntriesSent(workspaceRoot: string, identities: readonly string[]): void {
+  const sent = getSession(workspaceRoot).verificationKitEntriesSent;
+  for (const identity of identities) sent.add(identity);
 }
 
 /**

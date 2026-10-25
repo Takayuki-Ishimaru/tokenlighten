@@ -57,6 +57,8 @@ import { readFileSync, statSync } from "node:fs";
 import type { Kind } from "@tokenlighten/types";
 
 import { answerLineGutterEnabled } from "../util/flags.js";
+import { isCliCodingHost } from "./clientAdvertisement.js";
+import {isExactContiguousBody, preferExactAnswerBody} from "./answerBodyPolicy.js";
 import { elideDocCommentsWithWindows, spansExcludingWindows } from "../util/formatCompress.js";
 import { languageForPath } from "../util/languages.js";
 import { isMarkdownPath } from "../util/markdownSections.js";
@@ -119,7 +121,8 @@ function parseLineRange(range: string): { start: number; end: number } | undefin
  * is always "leave this entry un-numbered", never a thrown error on the
  * response path.
  */
-function readWorkspaceFileSync(relPath: string, workspace: string): string | undefined {
+/** Shared proof source for final gutter rendering and conservative wire-size previews. */
+export function readWorkspaceFileSync(relPath: string, workspace: string): string | undefined {
   const resolved = safeResolve(relPath, workspace);
   if (resolved === undefined) return undefined;
   try {
@@ -549,6 +552,7 @@ function numberEntryFieldInPlace(
   entry: unknown,
   field: "body" | "content",
   readCached: (relPath: string) => string | undefined,
+  preferExact = false,
 ): void {
   if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return;
   const record = entry as WireBody;
@@ -571,6 +575,8 @@ function numberEntryFieldInPlace(
 
   const bounds = isNonEmptyString(range) ? parseLineRange(range) : wholeFileBounds(fileText);
   if (bounds === undefined) return;
+  if (preferExact && isNonEmptyString(range)
+    && isExactContiguousBody(text, fileText, bounds.start, bounds.end)) return;
 
   const lang = languageForPath(path);
   const bodyLines = splitLines(text);
@@ -610,6 +616,8 @@ interface AnswerLineGutterContext {
   readonly workspace?: string;
   readonly codecTraceWorkspace?: string;
   readonly args?: Readonly<Record<string, unknown>>;
+  /** The MCP client id server.ts threads into every call context (F-A7). */
+  readonly clientId?: string;
 }
 
 /**
@@ -688,7 +696,7 @@ export function applyAnswerLineGutter(
   kind: Kind,
   context: AnswerLineGutterContext | undefined,
 ): WireBody {
-  if (!answerLineGutterEnabled()) return payload;
+  if (!answerLineGutterEnabled(isCliCodingHost(context?.clientId))) return payload;
   if (kind !== "read.task_pack" && kind !== "read.text" && kind !== "read.batch") return payload;
 
   const workspace = context?.workspace ?? context?.codecTraceWorkspace;
@@ -741,7 +749,7 @@ export function applyAnswerLineGutter(
   };
 
   for (const entry of list) {
-    numberEntryFieldInPlace(entry, field, readCached);
+    numberEntryFieldInPlace(entry, field, readCached, preferExactAnswerBody(context?.clientId));
   }
   return payload;
 }

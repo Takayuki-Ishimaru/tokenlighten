@@ -1,21 +1,20 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
-import { createRequire } from "node:module";
+import { type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { rmDirWithRetry, waitForExit } from "./helpers/rmDirWithRetry.js";
 import { killServerGroup } from "./helpers/killServerGroup.js";
+import { TSX_NODE_ARGS } from "./helpers/tsxNode.js";
+import { pooledSpawn } from "./helpers/serverPool.js";
 
-const nodeRequire = createRequire(import.meta.url);
-const TSX_CLI = nodeRequire.resolve("tsx/cli");
 const BIN_TS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "bin.ts");
 const children: ChildProcess[] = [];
 const roots: string[] = [];
 
 function start(cwd: string, mode: "on" | "off", tracePath: string): { initialize(): Promise<void>; call(id: number, name: string, args: Record<string, unknown>): Promise<Record<string, unknown>>; close(): void } {
-  const child = spawn(process.execPath, [TSX_CLI, "--liftoff-only", BIN_TS], {
+  const child = pooledSpawn(process.execPath, [...TSX_NODE_ARGS, BIN_TS], {
     cwd,
     stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32",
     env: {

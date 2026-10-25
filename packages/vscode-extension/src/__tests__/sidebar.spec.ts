@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { runInNewContext } from "node:vm";
 
 const {
   mockRegisterProvider,
@@ -6,12 +7,16 @@ const {
   mockActivationState,
   activationState,
   configurationState,
+  mockConfigurationUpdate,
+  mockExecuteCommand,
 } = vi.hoisted(() => ({
   mockRegisterProvider: vi.fn(),
   mockLoadUsageSummary: vi.fn(),
   mockActivationState: vi.fn(),
   activationState: { current: "ready" },
-  configurationState: { enabled: true, language: "en" as "auto" | "en" | "ja" },
+  configurationState: { enabled: true, autoUpdate: true, updateCheck: true, language: "en" as "auto" | "en" | "ja" },
+  mockConfigurationUpdate: vi.fn(),
+  mockExecuteCommand: vi.fn(),
 }));
 
 vi.mock("vscode", () => ({
@@ -25,8 +30,12 @@ vi.mock("vscode", () => ({
           ? configurationState.enabled
           : key === "language"
             ? configurationState.language
-            : defaultValue,
-      update: vi.fn().mockResolvedValue(undefined),
+            : key === "autoUpdate.enabled"
+              ? configurationState.autoUpdate
+              : key === "updateCheck.enabled"
+                ? configurationState.updateCheck
+                : defaultValue,
+      update: mockConfigurationUpdate,
     }),
     onDidChangeConfiguration: vi.fn(() => ({ dispose: vi.fn() })),
     onDidChangeWorkspaceFolders: vi.fn(() => ({ dispose: vi.fn() })),
@@ -37,7 +46,7 @@ vi.mock("vscode", () => ({
     showInformationMessage: vi.fn(),
   },
   commands: {
-    executeCommand: vi.fn(),
+    executeCommand: mockExecuteCommand,
     registerCommand: vi.fn(() => ({ dispose: vi.fn() })),
   },
   env: { language: "en" },
@@ -87,6 +96,12 @@ describe("TokenLighten sidebar", () => {
     activationState.current = "ready";
     configurationState.enabled = true;
     configurationState.language = "en";
+    configurationState.autoUpdate = true;
+    configurationState.updateCheck = true;
+    mockConfigurationUpdate.mockImplementation(async (key: string, value: boolean) => {
+      if (key === "autoUpdate.enabled") configurationState.autoUpdate = value;
+      if (key === "updateCheck.enabled") configurationState.updateCheck = value;
+    });
   });
 
   it("shows a loading document before the asynchronous summary resolves", () => {
@@ -354,4 +369,87 @@ describe("TokenLighten sidebar", () => {
     expect(webview.html).toContain("img-src test;");
     expect(webview.html).not.toContain(">TL<");
   });
+  function resolveSidebar() {
+    const context = { subscriptions: [] as unknown[], extensionUri: extensionUriStub };
+    registerControlCenter(context as never);
+    const [, provider] = mockRegisterProvider.mock.calls.at(-1) as [
+      string, { resolveWebviewView(view: unknown): void },
+    ];
+    const webview = {
+      options: {}, html: "", cspSource: "test",
+      asWebviewUri: (uri: unknown) => uri,
+      onDidReceiveMessage: vi.fn((_message: (value: unknown) => void) => ({ dispose: vi.fn() })),
+    };
+    provider.resolveWebviewView({ webview } as never);
+    const send = webview.onDidReceiveMessage.mock.calls[0][0];
+    return { webview, send };
+  }
+
+  it("shows automatic updates enabled by default and sends the checkbox value immediately", async () => {
+    const { webview } = resolveSidebar();
+    await vi.waitFor(() => expect(webview.html).toContain('id="autoUpdate" type="checkbox" checked'));
+    expect(webview.html).toContain("Automatically update the extension");
+    expect(webview.html).toContain("Applies to all workspaces and saves immediately.");
+    const handlers = new Map<string, (event: { target: { checked: boolean } }) => void>();
+    const postMessage = vi.fn();
+    const script = webview.html.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)?.[1];
+    expect(script).toBeDefined();
+    runInNewContext(script!, {
+      acquireVsCodeApi: () => ({ postMessage }),
+      document: {
+        querySelectorAll: () => [],
+        getElementById: (id: string) => ({
+          addEventListener: (event: string, handler: (event: { target: { checked: boolean } }) => void) =>
+            handlers.set(`${id}:${event}`, handler),
+        }),
+      },
+    });
+    handlers.get("autoUpdate:change")!({ target: { checked: false } });
+    expect(postMessage).toHaveBeenCalledWith({ action: "setAutoUpdate", autoUpdate: false });
+  });
+
+  it.each(["autoUpdate", "updateCheck"] as const)("shows auto updates off when %s is disabled", async key => {
+    configurationState[key] = false;
+    const { webview } = resolveSidebar();
+    await vi.waitFor(() => expect(webview.html).toContain('id="autoUpdate"'));
+    expect(webview.html).not.toContain('id="autoUpdate" type="checkbox" checked');
+  });
+
+  it("saves the auto update switch globally, without reloading the workspace", async () => {
+    const { webview, send } = resolveSidebar();
+    await vi.waitFor(() => expect(webview.html).toContain('id="autoUpdate"'));
+    send({ action: "setAutoUpdate", autoUpdate: false });
+    await vi.waitFor(() => expect(mockConfigurationUpdate).toHaveBeenCalledWith("autoUpdate.enabled", false, 1));
+    await vi.waitFor(() => expect(webview.html).not.toContain('id="autoUpdate" type="checkbox" checked'));
+    expect(mockExecuteCommand).not.toHaveBeenCalled();
+    expect(mockConfigurationUpdate).not.toHaveBeenCalledWith("enabled", false, expect.anything());
+  });
+
+  it("re-enables update checks when the sidebar switch is turned on", async () => {
+    configurationState.autoUpdate = false;
+    configurationState.updateCheck = false;
+    const { webview, send } = resolveSidebar();
+    await vi.waitFor(() => expect(webview.html).toContain('id="autoUpdate"'));
+    send({ action: "setAutoUpdate", autoUpdate: true });
+    await vi.waitFor(() => expect(mockConfigurationUpdate).toHaveBeenCalledWith("updateCheck.enabled", true, 1));
+    await vi.waitFor(() => expect(webview.html).toContain('id="autoUpdate" type="checkbox" checked'));
+    expect(mockConfigurationUpdate).toHaveBeenCalledWith("autoUpdate.enabled", true, 1);
+    expect(mockExecuteCommand).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "true", 1, null])("rejects a malformed auto update message: %s", async value => {
+    const { webview, send } = resolveSidebar();
+    await vi.waitFor(() => expect(webview.html).toContain('id="autoUpdate"'));
+    send({ action: "setAutoUpdate", autoUpdate: value });
+    await Promise.resolve();
+    expect(mockConfigurationUpdate).not.toHaveBeenCalled();
+  });
+
+  it("labels automatic updates in Japanese", async () => {
+    configurationState.language = "ja";
+    const { webview } = resolveSidebar();
+    await vi.waitFor(() => expect(webview.html).toContain("拡張機能を自動更新する"));
+    expect(webview.html).toContain("全ワークスペース共通で、変更は即時保存されます。");
+  });
+
 });

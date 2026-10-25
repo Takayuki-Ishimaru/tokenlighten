@@ -446,6 +446,8 @@ export interface StagedSearchRequest {
   version: number;
   /** On a `"resume"`, the fixed page this call is serving. */
   page?: SearchRequestPage;
+  /** Immutable start for this symbol response, even when the emit tail settles twice. */
+  symbolPageStart?: number;
   /** Echoed back onto the continuation call. */
   echo: { cwd?: string; lane?: string; taskHandle?: string };
 }
@@ -1409,4 +1411,158 @@ export function mintSearchCursor(staged: StagedSearchRequest): string | undefine
       fingerprint: staged.state.input_fingerprint,
     }),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Symbols cursor — the SAME store/handle family, `action:"symbols"`.
+//
+// `tools/searchSymbols.ts` re-ranks deterministically from the persisted
+// skeleton index on every call, so — exactly like `references` above — a
+// symbols chain needs no immutable `matches` snapshot: the one piece of state
+// a resume depends on is the record PREFIX already shipped (`delivered`) plus
+// the true pre-cap count (`total_matches`) it must not run past. A FRESH
+// record is minted per page (see `protocol/searchRequestContinuation.ts`'s
+// symbols settle), so a resent cursor re-reads an unchanged record and
+// re-serves the same page; the token is the store's own MAC'd handle, never a
+// caller-computable offset.
+// ---------------------------------------------------------------------------
+
+export const SYMBOLS_CURSOR_TTL_MS = REFERENCES_CURSOR_TTL_MS;
+
+export interface OpenSymbolSearchRequestInput {
+  workspaceRoot: string;
+  lane?: string;
+  taskHandle?: string;
+  /** `{query, path?, lang?, includeScores?}` — the ranking a resume must not silently change. */
+  originalInput: Record<string, unknown>;
+  budget?: { bytes?: number; items?: number; tokens?: number };
+  echo: { cwd?: string; lane?: string; taskHandle?: string };
+  /** Records a finalized response already shipped: THIS page's offset. */
+  delivered: number;
+  /** The true pre-cap record count of the ranking this chain pages. */
+  totalMatches: number;
+  /** Fingerprint of the complete live source/index/ranking input. */
+  sourceFingerprint: string;
+}
+
+/** Build (but do NOT persist) a symbols-cursor record positioned at `input.delivered`. */
+export function openSymbolSearchRequest(input: OpenSymbolSearchRequestInput): StagedSearchRequest {
+  const id = randomUUID();
+  const seed = `${input.workspaceRoot}:${id}`;
+  const payloadRef = fetchRequestPayloadRef(seed);
+  const now = Date.now();
+  const state: SearchRequestState = {
+    v: 1,
+    family: "search",
+    action: "symbols",
+    id,
+    workspace_ref: workspaceRefOf(input.workspaceRoot),
+    ...(input.lane !== undefined && input.lane !== "" ? { lane: input.lane } : {}),
+    ...(input.taskHandle !== undefined ? { task_handle: input.taskHandle } : {}),
+    input_fingerprint: searchRequestFingerprint(input.originalInput),
+    original_input: input.originalInput,
+    scope_fingerprint: "",
+    source_fingerprint: input.sourceFingerprint,
+    walk_complete: true,
+    matches: [],
+    delivered: input.delivered,
+    total_matches: input.totalMatches,
+    total_files: null,
+    snapshot_capped: false,
+    ...(input.budget !== undefined ? { budget: input.budget } : {}),
+    pages: [],
+    created_at_ms: now,
+    expires_at_ms: now + SYMBOLS_CURSOR_TTL_MS,
+  };
+  return {
+    mode: "open",
+    workspaceRoot: input.workspaceRoot,
+    storeKey: payloadRef.toString("base64url"),
+    payloadRefSeed: seed,
+    state,
+    version: 0,
+    symbolPageStart: input.delivered,
+    echo: input.echo,
+  };
+}
+
+/** Commit a symbols record's CURRENT state at its CURRENT version (CAS). */
+export function persistSymbolSearchRequest(staged: StagedSearchRequest): StagedSearchRequest | undefined {
+  const written = persistOnce(staged.workspaceRoot, staged.storeKey, staged.state, staged.version);
+  if (!written.ok) return undefined;
+  staged.version = written.version;
+  return staged;
+}
+
+/**
+ * `resolveSearchCursor` plus the check a symbols resume needs: the record must
+ * have been opened BY `symbols` and carry a usable position.
+ */
+export function resolveSymbolSearchCursor(
+  token: string,
+  workspaceRoot: string,
+  binding: { lane?: string; taskHandle?: string },
+): SearchCursorResolution {
+  const resolved = resolveSearchCursor(token, workspaceRoot, binding);
+  if (!resolved.ok) return resolved;
+  if (resolved.state.action !== "symbols") {
+    return { ok: false, reason: "wrong-action", detail: "cursor was not opened for tl_search_files symbol search" };
+  }
+  const total = resolved.state.total_matches;
+  const fingerprint = resolved.state.source_fingerprint;
+  if (!Number.isSafeInteger(resolved.state.delivered) || resolved.state.delivered < 0
+    || typeof total !== "number" || !Number.isSafeInteger(total) || total < 0 || resolved.state.delivered > total
+    || typeof fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(fingerprint)) {
+    return { ok: false, reason: "unknown", detail: "stored request has no symbol position or source binding" };
+  }
+  return resolved;
+}
+
+/**
+ * The scoping a symbols resume must not silently change. Compared against the
+ * record's own `original_input`, so a cursor can only ever continue the
+ * ranking it was minted for.
+ */
+export function symbolSearchInputMismatch(
+  state: SearchRequestState,
+  presenting: Record<string, unknown>,
+): string | undefined {
+  const original = state.original_input;
+  for (const key of ["query", "path", "lang", "includeScores"]) {
+    const then = original[key];
+    const now = presenting[key];
+    const same = typeof then === "boolean" || typeof then === "string" || typeof then === "number"
+      ? then === now
+      : (now === undefined || now === "");
+    if (!same) return key;
+  }
+  return undefined;
+}
+
+/**
+ * Advance the symbols chain's shipped prefix from the FINALIZED page
+ * (§3.2's "record once from the settled response"), monotonic and never past
+ * `total_matches`. Returns the state to mint this page's successor cursor from.
+ */
+export function settleSymbolSearchRequest(
+  staged: StagedSearchRequest,
+  start: number,
+  shippedCount: number,
+): SearchRequestState | undefined {
+  const total = staged.state.total_matches ?? start;
+  const delivered = Math.min(total, Math.max(staged.state.delivered, start + Math.max(0, shippedCount)));
+  if (delivered === staged.state.delivered) return staged.state;
+  for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt += 1) {
+    const nextState: SearchRequestState = { ...staged.state, delivered };
+    const written = persistOnce(staged.workspaceRoot, staged.storeKey, nextState, staged.version);
+    if (written.ok) {
+      staged.state = nextState;
+      staged.version = written.version;
+      return nextState;
+    }
+    if (written.reason === "unavailable" || written.live === undefined) return undefined;
+    staged.state = rebaseOnLive(staged.state, written.live.state);
+    staged.version = written.live.version;
+  }
+  return undefined;
 }

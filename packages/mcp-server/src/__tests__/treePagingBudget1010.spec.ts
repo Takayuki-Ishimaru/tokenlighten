@@ -267,12 +267,18 @@ describe("TPB: the review's tree calls — every truncated page now names the re
     const server = await serverFor(ws);
     const whole = await walkTree(server, { action: "tree", cwd: ws, budget: { bytes: 16000 } });
     expect(whole.pages.length, describeChain(whole)).toBe(1);
-    const size = whole.pages[0]!.textBytes;
+    // 2026-10-23 (codex-copilot-proxy wire compaction, TL_EFF_REPLY_COMPACT): a complete walk that excluded nothing ships
+    // its `scope_report` without the all-zero `excluded_by_reason` table, but the pager prices (and the wire ladder measures)
+    // the page with it — the budget binds the page as the funnel hands it over, the safe side of the shipped size. So the
+    // boundary a budget has is the shipped size plus the table.
+    const table = Buffer.byteLength(JSON.stringify({ excluded_by_reason: { ignored: 0, gitignored: 0, tokenlighten_ignored: 0, oversize: 0, symlinks: 0, non_text: 0, secrets: 0, source_only_excluded: 0 } })) - 2 + 1;
+    expect(whole.pages[0]!.body["scope_report"], "a trivial walk ships without the table").not.toHaveProperty("excluded_by_reason");
+    const size = whole.pages[0]!.textBytes + table;
     // 96 = the 64 B page-envelope safety margin (exploreTree.ts) plus slack.
     for (const bytes of [size + 96, size + 300]) {
       const chain = await walkTree(server, { action: "tree", cwd: ws, budget: { bytes } });
       expect(chain.pages.length, `budget ${bytes} (finished page ${size} B): ${describeChain(chain)}`).toBe(1);
-      expect(chain.pages[0]!.textBytes).toBe(size);
+      expect(chain.pages[0]!.textBytes).toBe(size - table);
       expect(chain.pages[0]!.body["tree"]).toBe(expectedListing(2));
     }
     const under = await walkTree(server, { action: "tree", cwd: ws, budget: { bytes: size - 1 } });

@@ -10,7 +10,9 @@ const {
   mockRegisterHostActivation,
   mockRemoveOwnOverrides,
   mockRegisterSidebar,
+  mockRegisterLicenses,
   mockCheckForUpdate,
+  mockRegisterSettingsReset,
   mockWatcher,
   mockBar,
 } = vi.hoisted(() => ({
@@ -23,7 +25,9 @@ const {
   mockRegisterSetup: vi.fn(),
   mockRegisterMcp: vi.fn(),
   mockRegisterSidebar: vi.fn(),
+  mockRegisterLicenses: vi.fn(),
   mockCheckForUpdate: vi.fn(),
+  mockRegisterSettingsReset: vi.fn(),
   mockWatcher: vi.fn(),
   mockBar: {
     setActivationState: vi.fn(),
@@ -67,7 +71,9 @@ vi.mock("../hostActivation.js", () => ({
   removeOwnHostActivationOverrides: mockRemoveOwnOverrides,
 }));
 vi.mock("../sidebar.js", () => ({ registerControlCenter: mockRegisterSidebar }));
-vi.mock("../updateChecker.js", () => ({ checkForExtensionUpdate: mockCheckForUpdate }));
+vi.mock("../licenses.js", () => ({ registerLicenseCommands: mockRegisterLicenses }));
+vi.mock("../updateChecker.js", () => ({ registerExtensionUpdateChecks: mockCheckForUpdate }));
+vi.mock("../settingsReset.js", () => ({ registerSettingsResetPrompt: mockRegisterSettingsReset }));
 vi.mock("../workspaceState.js", () => ({
   invalidateWorkspaceConfigured: mockInvalidate,
   workspaceActivationState: mockActivationState,
@@ -90,12 +96,20 @@ describe("extension activation", () => {
     await activate(context as never);
 
     expect(mockRegisterSidebar).toHaveBeenCalledOnce();
+    expect(mockRegisterLicenses).toHaveBeenCalledWith(context);
     expect(mockRegisterSetup).toHaveBeenCalledOnce();
     expect(mockRegisterCommands).toHaveBeenCalledOnce();
     expect(mockRegisterMcp).toHaveBeenCalledOnce();
     expect(mockRegisterHostActivation).toHaveBeenCalledOnce();
     expect(mockRegisterHostActivation).toHaveBeenCalledWith(context);
     expect(mockCheckForUpdate).toHaveBeenCalledOnce();
+    // Without a version record, settingsReset.ts tells an update from a first
+    // install by the globalState earlier activations left, so it must run
+    // before registerMcpProvider writes this activation's schema stamp.
+    expect(mockRegisterSettingsReset).toHaveBeenCalledOnce();
+    expect(mockRegisterSettingsReset).toHaveBeenCalledWith(context);
+    expect(mockRegisterSettingsReset.mock.invocationCallOrder[0])
+      .toBeLessThan(mockRegisterMcp.mock.invocationCallOrder[0]);
     expect(mockBar.setActivationState).toHaveBeenCalledWith("not-configured");
     expect(mockWatcher).not.toHaveBeenCalled();
   });

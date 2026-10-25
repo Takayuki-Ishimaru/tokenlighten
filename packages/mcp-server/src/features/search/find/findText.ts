@@ -30,7 +30,7 @@ import { languageForPath } from "../../../util/languages.js";
 import { classifyCommentLines } from "../../../util/lineClassify.js";
 import { handleTable } from "../../../util/handles.js";
 import { isWithin } from "../../../util/safePath.js";
-import { findWidePageEnabled } from "../../../util/flags.js";
+import { effFindSnippetCapEnabled, findWidePageEnabled } from "../../../util/flags.js";
 // SPC (2026-09-29): host-ceiling lookup for findResponseCapBytes() below.
 // clientProfile.ts has ZERO internal imports of its own (a pure lookup
 // module over a static registry), so this direction cannot form a cycle —
@@ -1156,6 +1156,12 @@ export interface FindFileGroup {
 
 export interface FindResponse {
   query: string;
+  /**
+   * TL_EFF_FIND_SNIPPET_CAP (2026-10-19): present only when this find matched
+   * more than FIND_SNIPPET_MAX_FILES files, some of them beyond the cap with
+   * snippets to drop — see `FindSnippetCap` and `capFindSnippets`.
+   */
+  snippet_cap?: FindSnippetCap;
   files: FindFileGroup[];
   /**
    * Total distinct matched files. "snippets may truncate; the inventory
@@ -1687,6 +1693,142 @@ function capFileGroup(group: FindFileGroup): FindFileGroup {
 
 function capWideFiles(groups: FindFileGroup[]): FindFileGroup[] {
   return groups.map(capFileGroup);
+}
+
+// ---------------------------------------------------------------------------
+// TL_EFF_FIND_SNIPPET_CAP (2026-10-19) — snippets only for the files with the
+// most hits once a find matches many files.
+//
+// MOTIVATION (v0.16.0 decision run 2026-10-18-v016-decision-6t-3, arm A): 12 of
+// its 49 finds matched 13-31 files, and their replies ran 4.7-11.1 KB, most of
+// it `snippets` — up to eight trimmed lines for EVERY matched file. T09 rep1
+// #4 (`queries:["IssuePriority","priority"]`) matched 31 files in 10,674 B;
+// CONTRACT.md alone carried 10 lines and 8 snippets. On a match set that wide
+// the line numbers are what a caller picks its windows from; the snippet text
+// of a file with one or two hits rarely changes which windows it reads.
+//
+// THE RULE. Above FIND_SNIPPET_MAX_FILES matched files, `snippets` ride only on
+// the FIND_SNIPPET_MAX_FILES files with the most matched lines (ties: the
+// response's own path order). Every file keeps all of its `lines` and every
+// other field (`more_lines`, `match_count`, `role`, `context`/`range`/`handle`)
+// exactly as before. The cap runs BEFORE the byte fit, so the bytes it frees
+// go to line numbers instead of being cut later. `snippet_cap` says so (see
+// `FindSnippetCap`).
+//
+// WHAT DOES NOT CHANGE. The match set and its completeness: `total_files`,
+// `total_matches`, `truncated` (still decided by `lines` alone, as
+// `fitFilesToCap` always decided it — a file showing fewer snippets than lines
+// was never "truncated"), hence `limit` and `inventory`/`inventory_complete`,
+// and `term_results`/`absence` (a zero-match reply has no file to cap). With
+// TL_EFF_FIND_SNIPPET_CAP=0 every builder below returns the uncapped reply
+// byte-for-byte.
+// ---------------------------------------------------------------------------
+
+/** Above this many matched files, only this many (those with the most hits) keep their `snippets`. */
+export const FIND_SNIPPET_MAX_FILES = 10;
+
+/** The `snippet_cap` member of a find reply whose snippets were capped (`capFindSnippets`). */
+export interface FindSnippetCap {
+  /** `snippets` ride only on this many files: those with the most matched lines. */
+  top: number;
+  /** Matched files listed with all their `lines` and no `snippets`. */
+  more: number;
+  /**
+   * The `scope` argument that narrows this same find to the directory holding
+   * the most matched lines of those files while matching at most `top` files,
+   * so every file there keeps its snippets. Absent when no directory below the
+   * searched scope qualifies.
+   */
+  scope?: { path: string };
+}
+
+/**
+ * Applies TL_EFF_FIND_SNIPPET_CAP to a grouped, not yet byte-fitted match set.
+ * Returns the groups to fit and the reply fields to bake into every fit trial
+ * (`{}` when nothing was capped, so an uncapped reply is byte-identical).
+ * `groups` itself is never mutated: callers still hand it to
+ * `attachInventory` as the full match set.
+ */
+function capFindSnippets(
+  groups: FindFileGroup[],
+  scopePath: string | undefined,
+): { groups: FindFileGroup[]; extra: { snippet_cap?: FindSnippetCap } } {
+  if (groups.length <= FIND_SNIPPET_MAX_FILES || !effFindSnippetCapEnabled()) return { groups, extra: {} };
+  const kept = new Set(
+    groups
+      .map((group, index) => ({ index, hits: group.lines.length }))
+      .sort((a, b) => b.hits - a.hits || a.index - b.index)
+      .slice(0, FIND_SNIPPET_MAX_FILES)
+      .map((ranked) => ranked.index),
+  );
+  const linesOnly = new Set<string>();
+  const capped = groups.map((group, index) => {
+    if (kept.has(index) || group.snippets === undefined) return group;
+    linesOnly.add(group.path);
+    const linesOnlyGroup: FindFileGroup = { ...group };
+    delete linesOnlyGroup.snippets;
+    return linesOnlyGroup;
+  });
+  if (linesOnly.size === 0) return { groups, extra: {} };
+  const scope = narrowingFindScope(groups, linesOnly, scopePath);
+  return {
+    groups: capped,
+    extra: {
+      snippet_cap: {
+        top: FIND_SNIPPET_MAX_FILES,
+        more: linesOnly.size,
+        ...(scope !== undefined ? { scope: { path: scope } } : {}),
+      },
+    },
+  };
+}
+
+/**
+ * The directory strictly below the searched scope (`scopePath`, or the
+ * workspace root) that holds the most matched lines of the `linesOnly` files
+ * while matching at most FIND_SNIPPET_MAX_FILES files in all — scoping the
+ * same find there returns every one of its files with snippets. It must hold
+ * at least two lines-only files: for one, the caller already has its line
+ * numbers to read. Ties: more lines-only files, then fewer matched files, then
+ * path order. `undefined` when no directory qualifies (say, one flat
+ * directory holds every match).
+ */
+function narrowingFindScope(
+  groups: readonly FindFileGroup[],
+  linesOnly: ReadonlySet<string>,
+  scopePath: string | undefined,
+): string | undefined {
+  const root = normalizeFindUniverseScope(scopePath ?? "");
+  const below = (dir: string): boolean => root === "" || dir.startsWith(`${root}/`);
+  const tally = new Map<string, { files: number; linesOnly: number; lines: number }>();
+  for (const group of groups) {
+    const parts = group.path.split("/");
+    for (let depth = parts.length - 1; depth >= 1; depth--) {
+      const dir = parts.slice(0, depth).join("/");
+      if (!below(dir)) break;
+      const entry = tally.get(dir) ?? { files: 0, linesOnly: 0, lines: 0 };
+      entry.files += 1;
+      if (linesOnly.has(group.path)) {
+        entry.linesOnly += 1;
+        entry.lines += group.lines.length;
+      }
+      tally.set(dir, entry);
+    }
+  }
+  let best: { dir: string; files: number; linesOnly: number; lines: number } | undefined;
+  for (const [dir, entry] of tally) {
+    if (entry.linesOnly < 2 || entry.files > FIND_SNIPPET_MAX_FILES) continue;
+    if (
+      best === undefined
+      || entry.lines > best.lines
+      || (entry.lines === best.lines && entry.linesOnly > best.linesOnly)
+      || (entry.lines === best.lines && entry.linesOnly === best.linesOnly && entry.files < best.files)
+      || (entry.lines === best.lines && entry.linesOnly === best.linesOnly && entry.files === best.files && dir < best.dir)
+    ) {
+      best = { dir, ...entry };
+    }
+  }
+  return best?.dir;
 }
 
 /**
@@ -2673,6 +2815,8 @@ export interface DidYouMeanCandidates {
   candidates: string[];
   /** How many LEADING entries were chosen because they contain the probes. */
   content_matched: number;
+  /** Served entries after those that share only query WORDS, not a probe. */
+  word_matched?: number;
   /** How many trailing entries are filename guesses. */
   name_matched: number;
 }
@@ -2741,13 +2885,19 @@ function didYouMeanCandidates(
 
   const contentPaths = scored.slice(0, limit).map((entry) => entry.path);
   const seen = new Set(contentPaths);
+  // Only a probe hit CONTAINS the search text. A token-only hit shares query
+  // words (`function`, `config`) and was reported as containing the text,
+  // steering callers back to files that never had it (2026-10-16 bench).
+  const exact = new Set(scored.filter((entry) => entry.probeHits > 0).map((entry) => entry.path));
   const trailing = nameCandidates.filter((candidate) => !seen.has(candidate));
   const candidates = [...contentPaths, ...trailing].slice(0, limit);
-  const contentMatched = candidates.filter((candidate) => seen.has(candidate)).length;
+  const contentMatched = candidates.filter((candidate) => exact.has(candidate)).length;
+  const wordMatched = candidates.filter((candidate) => seen.has(candidate) && !exact.has(candidate)).length;
   return {
     candidates,
     content_matched: contentMatched,
-    name_matched: candidates.length - contentMatched,
+    ...(wordMatched > 0 ? { word_matched: wordMatched } : {}),
+    name_matched: candidates.length - contentMatched - wordMatched,
   };
 }
 
@@ -2766,12 +2916,21 @@ function didYouMeanExtra(
 ): Record<string, unknown> {
   const ranked = didYouMeanCandidates(workspace, probes, tokens, limit, scanned);
   if (ranked.candidates.length === 0) return {};
+  const wordMatched = ranked.word_matched ?? 0;
+  const leads: string[] = [];
+  if (ranked.content_matched > 0) {
+    leads.push(`first ${ranked.content_matched} CONTAIN your search text and were already served this session — check your context`);
+  }
+  if (wordMatched > 0) {
+    leads.push(`${ranked.content_matched > 0 ? "next" : "first"} ${wordMatched} were already served and share query words only, not your search text`);
+  }
   const basis: Record<string, unknown> = {
     content_matched: ranked.content_matched,
+    ...(wordMatched > 0 ? { word_matched: wordMatched } : {}),
     name_matched: ranked.name_matched,
     note:
-      ranked.content_matched > 0
-        ? `first ${ranked.content_matched} CONTAIN your search text and were already served this session — check your context${ranked.name_matched > 0 ? "; the rest match by FILENAME only" : ""}`
+      leads.length > 0
+        ? `${leads.join("; ")}${ranked.name_matched > 0 ? "; the rest match by FILENAME only" : ""}`
         : "FILENAME matches only — no already-served file contains your search text, so a hit is not established",
   };
   return { did_you_mean: ranked.candidates, did_you_mean_basis: basis };
@@ -2817,6 +2976,19 @@ function deriveQueryStem(query: string): string | null {
 }
 
 /**
+ * A family prefix is specific: two or more segments (`chip--priority-`,
+ * `get_user_`), a CONST_CASE word (`STATUS_`), or a BEM block (`btn--`).
+ * One lowercase word plus a separator (`name_`, `content_`) is generic prose
+ * vocabulary and would widen onto unrelated identifiers.
+ */
+function isFamilyStem(stem: string): boolean {
+  if (stem.endsWith("--")) return true;
+  const core = stem.replace(/[-_]+$/, "");
+  if (core.split(/[-_]+/).filter(Boolean).length >= 2) return true;
+  return /[A-Z]/.test(core) && core === core.toUpperCase();
+}
+
+/**
  * When the query is a hyphen/underscore-family token, append sibling
  * matches sharing its stem — but ONLY within files that already matched the
  * literal query, so e.g. querying `badge--priority-critical` (a value that
@@ -2842,7 +3014,7 @@ function withSiblingStemMatches(
 ): TextMatch[] {
   if (!isStemFamilyToken(query)) return literalMatches;
   const stem = deriveQueryStem(query);
-  if (!stem) return literalMatches;
+  if (!stem || !isFamilyStem(stem)) return literalMatches;
 
   const matchedFiles = new Set(literalMatches.map((m) => m.path));
   if (matchedFiles.size === 0) return literalMatches;
@@ -2854,9 +3026,16 @@ function withSiblingStemMatches(
   });
 
   const existing = new Set(literalMatches.map((m) => `${m.path}:${m.line}`));
-  const siblings = stemHits.filter(
-    (m) => matchedFiles.has(m.path) && !existing.has(`${m.path}:${m.line}`),
-  );
+  // A sibling spells the stem exactly and starts a token. The bare
+  // case-insensitive substring also returned `ROLE_FN_NAME_STOPWORDS` for
+  // `name_matched` and `SCAN_CONTENT_CACHE_MAX_BYTES` for `content_matched`,
+  // unlabeled beside the literal hits (2026-10-16 bench).
+  const boundary = new RegExp(`(?<![A-Za-z0-9_$-])${escapeRegExp(stem)}(?=[A-Za-z0-9_$])`);
+  const siblings = stemHits.filter((m) => {
+    if (!matchedFiles.has(m.path) || existing.has(`${m.path}:${m.line}`)) return false;
+    const lines = readLinesCached(path.join(workspace, m.path), opts.contentCache);
+    return Array.isArray(lines) && boundary.test(lines[m.line - 1] ?? "");
+  });
   if (siblings.length === 0) return literalMatches;
 
   return [...literalMatches, ...siblings];
@@ -3346,12 +3525,14 @@ function buildFindResponseImpl(
     if (genericMatches.length === 0) return null;
     const source = input.regex || matchedVariant ? genericMatches : withSiblingStemMatches(query, genericMatches, workspace, { contentCache });
     const grouped = groupByFile(source);
+    const snippetCap = capFindSnippets(grouped, input.path);
     const responseExtra: Record<string, unknown> = {
       ...omittedExtra,
       ...(matchedVariant ? { literal: false, matched_variant: matchedVariant } : {}),
+      ...snippetCap.extra,
     };
     const buildWithExtra = (fs: FindFileGroup[]): FindResponse => build(fs, responseExtra);
-    const fitted = fitFilesToCap(grouped, buildWithExtra, findResponseCapBytes());
+    const fitted = fitFilesToCap(snippetCap.groups, buildWithExtra, findResponseCapBytes());
     const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, findResponseCapBytes());
     return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions) || coverage.undecodable.size > 0);
   };
@@ -3371,9 +3552,10 @@ function buildFindResponseImpl(
     const editCandidate = grouped.find((file) => file.context !== undefined && file.handle !== undefined);
     const editHint = editCandidate ? repeatedHitHint(workspace, editCandidate) : undefined;
     const hint = composeHint(editHint, extraHint);
-    const responseExtra: Record<string, unknown> = { ...omittedExtra, ...(hint ? { hint } : {}) };
+    const snippetCap = capFindSnippets(grouped, input.path);
+    const responseExtra: Record<string, unknown> = { ...omittedExtra, ...(hint ? { hint } : {}), ...snippetCap.extra };
     const buildWithExtra = (fs: FindFileGroup[]): FindResponse => build(fs, responseExtra);
-    const fitted = fitFilesToCap(grouped, buildWithExtra, findResponseCapBytes());
+    const fitted = fitFilesToCap(snippetCap.groups, buildWithExtra, findResponseCapBytes());
     const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, findResponseCapBytes());
     return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions) || coverage.undecodable.size > 0);
   }
@@ -3396,15 +3578,17 @@ function buildFindResponseImpl(
       // response that just fits at the files-only stage can burst
       // MAX_RESPONSE_BYTES once these fields are added back. Mirrors
       // buildFindResponseForQueries' responseExtra/buildWithExtra pattern.
+      const grouped = groupByFile(variantHit.matches);
+      const snippetCap = capFindSnippets(grouped, input.path);
       const responseExtra: Record<string, unknown> = {
         ...omittedExtra,
         literal: false,
         matched_variant: variantHit.variant,
         ...(extraHint ? { hint: extraHint } : {}),
+        ...snippetCap.extra,
       };
       const buildWithExtra = (fs: FindFileGroup[]): FindResponse => build(fs, responseExtra);
-      const grouped = groupByFile(variantHit.matches);
-      const fitted = fitFilesToCap(grouped, buildWithExtra, findResponseCapBytes());
+      const fitted = fitFilesToCap(snippetCap.groups, buildWithExtra, findResponseCapBytes());
       const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, findResponseCapBytes());
       return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions) || coverage.undecodable.size > 0);
     }
@@ -3566,15 +3750,17 @@ function buildFindResponseImpl(
   // MAX_RESPONSE_BYTES once these fields are added back (matched_terms can
   // run to several tokens' worth of bytes after AND/OR expansion). Mirrors
   // buildFindResponseForQueries' responseExtra/buildWithExtra pattern.
+  const grouped = groupByFile(source);
+  const snippetCap = capFindSnippets(grouped, input.path);
   const responseExtra: Record<string, unknown> = {
     ...omittedExtra,
     literal: false,
     matched_terms: actuallyMatchedTerms,
     ...(extraHint ? { hint: extraHint } : {}),
+    ...snippetCap.extra,
   };
   const buildWithExtra = (fs: FindFileGroup[]): FindResponse => build(fs, responseExtra);
-  const grouped = groupByFile(source);
-  const fitted = fitFilesToCap(grouped, buildWithExtra, findResponseCapBytes());
+  const fitted = fitFilesToCap(snippetCap.groups, buildWithExtra, findResponseCapBytes());
   const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, findResponseCapBytes());
 
   return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions) || coverage.undecodable.size > 0);
@@ -3587,14 +3773,15 @@ function buildFindResponseImpl(
 // family issued 7 sequential single-token explore action=find calls (one
 // full billed turn each) because find only accepted ONE literal token; a
 // sibling run instead escaped to native `grep -n "NONE\|LOW\|..."` OR-syntax.
-// queries[] lets the caller supply up to 5 literal alternatives in ONE call.
+// queries[] lets the caller supply up to 10 literal alternatives in ONE call
+// (5 with TL_EFF_WIDE_FIND=0; the cap is enforced by server.ts's dispatcher).
 //
 // Each entry runs through the SAME core as buildFindResponse's own Pass 1
 // (scanLiteral, plus C6.2 sibling-stem widening when non-regex) — NOT the
 // Pass 1.5/Pass 2 fallback ladder (identifier-variant probing, tokenized
 // AND/OR decomposition). The caller already supplied the alternatives it
 // wants tried; re-guessing per entry would multiply cost unpredictably
-// across up to 5 tokens. A miss still surfaces via did_you_mean.
+// across up to 10 tokens. A miss still surfaces via did_you_mean.
 //
 // Merge happens BEFORE capping: raw matches from every hit query are
 // concatenated and handed to groupByFile() once (it already unions/dedupes
@@ -3610,7 +3797,7 @@ function buildFindResponseImpl(
 // ---------------------------------------------------------------------------
 
 export interface FindTextMultiInput {
-  /** 1-5 literal tokens, OR-matched. Dispatch (server.ts) enforces the count. */
+  /** Literal tokens, OR-matched. Dispatch (server.ts) enforces the count (10, or 5 with TL_EFF_WIDE_FIND=0). */
   queries: string[];
   regex?: boolean;
   lang?: LangKey;
@@ -3648,7 +3835,7 @@ function buildFindResponseForQueriesImpl(input: FindTextMultiInput, workspace: s
   };
 
   if (queries.length === 0) {
-    return { ...build([]), hint: "queries is empty; provide 1-5 literal tokens" };
+    return { ...build([]), hint: "queries is empty; provide literal tokens, one identifier each" };
   }
 
   // C2 (see buildFindResponse's own copy of this check): a scope that does
@@ -3664,7 +3851,7 @@ function buildFindResponseForQueriesImpl(input: FindTextMultiInput, workspace: s
   }
 
   // One walk per response — same contract as buildFindResponse: shared file
-  // list + content cache across the 1-5 query terms, `omitted` disclosure on
+  // list + content cache across the 1-10 query terms, `omitted` disclosure on
   // every return path.
   const walkOmissions = createWalkOmissions();
   const walked = walkCodeFiles(workspace, {
@@ -3795,7 +3982,7 @@ function buildFindResponseForQueriesImpl(input: FindTextMultiInput, workspace: s
   // baked into every trial's byte count, not spliced on after — otherwise a
   // response that JUST fits at the files-only stage can still burst
   // MAX_RESPONSE_BYTES once these fields are added back (matched_terms alone
-  // can run to several tokens' worth of bytes with up to 5 queries).
+  // can run to several tokens' worth of bytes with up to 10 queries).
   //
   // PI-04 (F-A1-2/F-A1-3 register): per-term absence rides the SAME baked-in
   // budgeting discipline — only a multi-term call where >=1 term missed pays
@@ -3832,6 +4019,8 @@ function buildFindResponseForQueriesImpl(input: FindTextMultiInput, workspace: s
             : { original: q, status: "unknown", scope: { completeness: "partial" } };
         })
       : undefined;
+  const grouped = groupByFile(mergedMatches);
+  const snippetCap = capFindSnippets(grouped, input.path);
   const responseExtra: Record<string, unknown> = {
     ...omittedExtra,
     matched_terms: hitTerms,
@@ -3839,11 +4028,11 @@ function buildFindResponseForQueriesImpl(input: FindTextMultiInput, workspace: s
       ? {}
       : didYouMeanExtra(workspace, missedQueries, missedTokens, 5, coverage.scanned)),
     ...(termResults ? { term_results: termResults } : {}),
+    ...snippetCap.extra,
   };
   const buildWithExtra = (fs: FindFileGroup[]): FindResponse => build(fs, responseExtra);
 
-  const grouped = groupByFile(mergedMatches);
-  const fitted = fitFilesToCap(grouped, buildWithExtra, findResponseCapBytes());
+  const fitted = fitFilesToCap(snippetCap.groups, buildWithExtra, findResponseCapBytes());
   const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, findResponseCapBytes());
 
   return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions) || coverage.undecodable.size > 0);

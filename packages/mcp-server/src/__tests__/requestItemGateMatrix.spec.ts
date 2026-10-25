@@ -526,8 +526,11 @@ const KNOWN_FAILURES: Readonly<Record<string, readonly string[]>> = {
   "vscode|ja-particle|absent|one-large": ["c-dead-end(follow)", "c-no-decision(follow)"],
   "vscode|ja-particle|absent|one-small": ["c-dead-end(follow)", "c-no-decision(follow)"],
   // UNREAD
+  // 2026-10-22 (v0.16.0 release verification, T16): `default|ja-particle|unreadable|five`
+  // no longer fails on this tree (an improvement from the v0.16.0 follow-up
+  // changes; one cause was not isolated). The cell passed on three consecutive
+  // runs, so its entry is deleted, as the check below asks.
   "default|ja-mata|unreadable|real": ["c-dead-end(follow)", "c-dead-end(repack)", "c-no-decision(follow)", "c-no-decision(repack)"],
-  "default|ja-particle|unreadable|five": ["c-dead-end(follow)", "c-no-decision(follow)"],
   "default|ja-particle|unreadable|real": ["a-silent(repack)", "c-dead-end(follow)", "c-no-decision(follow)"],
   "vscode|ja-mata|unreadable|real": ["c-dead-end(repack)", "c-no-decision(repack)"],
   "vscode|ja-particle|unreadable|real": ["a-silent(repack)", "c-dead-end(follow)", "c-no-decision(follow)"],

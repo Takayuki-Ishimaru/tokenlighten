@@ -7,7 +7,7 @@
 export { parseSentinelBlock, detectEol, sha256hex, SENTINEL_START, SENTINEL_END } from "./sentinel.js";
 export type { ParsedSentinel } from "./sentinel.js";
 
-export { renderBlock, renderCanonicalBlock, renderMediumBlock, renderCompactBlock, blockSha256, INSTRUCTIONS_VERSION, defaultGuideProfileForSurface } from "./render.js";
+export { renderBlock, renderCanonicalBlock, renderMediumBlock, renderCompactBlock, renderReadOnlyCodeBlock, renderPortableCodeBlock, blockSha256, INSTRUCTIONS_VERSION, defaultGuideProfileForSurface } from "./render.js";
 export type { GuideProfile, Locale } from "./render.js";
 
 export {

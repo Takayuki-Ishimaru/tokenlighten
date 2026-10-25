@@ -118,6 +118,23 @@ describe("buildTaskPack — IMPROVEMENT A: cumulative coverage (forensic sequenc
     resetPackServeLogForTest();
   });
 
+  it("does not close a missing role from an earlier partial body", async () => {
+    const ws = mkWs("partial");
+    seedFixture(ws);
+    recordServedSurfaces(ws, ws, [
+      {path: "packages/web/src/StatusBadge.tsx", role: "ui", fullyServed: false},
+      {path: "packages/web/src/status.css", role: "style", fullyServed: true},
+    ], ["status", "label", "rendering"]);
+    const result = await buildTaskPack({query: QUERY, surfaceRoles: ROLES, paths: [
+      {path: "packages/model/src/types/status.ts"},
+      {path: "packages/model/src/services/statusService.ts"},
+    ]}, ws);
+    expect(result.coverage_basis).toBeUndefined();
+    expect(result.coverage).toBe("partial");
+    expect(result.missing_required_surfaces).toContain("ui");
+    expect(result.execution_contract?.typestate.phase).not.toBe("prepared");
+  }, 60000);
+
   it("call 2 completes cumulatively from call 1's surfaces, then degrades after an edit", async () => {
     const ws = mkWs("forensic");
     seedFixture(ws);

@@ -29,11 +29,18 @@ tl workspace setup          # one-step AI rules + MCP setup for this repo
 tl help                     # full command reference
 ```
 
-Workspace setup enables writes in generated MCP settings by default.
-Use `tl workspace setup --read-only` to disable them or `--allow-write`
-to select them explicitly. These flags cannot be combined. Pass
-`--read-only` again when refreshing a read-only configuration. A manually
+First workspace setup enables writes by default. Refresh preserves each
+existing client's write permission. Use `--read-only` or `--allow-write`
+to change it explicitly; these flags cannot be combined. A manually
 started `tl mcp start` server requires `--allow-write` for edits.
+
+## Local analysis engines
+
+Use `tl engines status`, `tl engines --help`, `tl models list` and
+`tl models licenses` to inspect configurable engines and model status.
+`tl models install` downloads the model and enables local semantic search.
+See [Local analysis engines](../../release-docs/local-analysis.md) for
+defaults, language-server configuration and limitations.
 
 ## Tests
 

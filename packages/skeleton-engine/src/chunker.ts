@@ -68,29 +68,30 @@ function extractIdentifiers(text: string): string[] {
   return result.sort();
 }
 
-function buildByteOffsets(lines: string[]): number[] {
+function buildByteOffsets(raw: Buffer): number[] {
   // byteOffsets[i] = byte offset of the START of line i+1 (0-indexed → 1-indexed lines).
-  // byteOffsets has length lines.length + 1.
-  const offsets = new Array<number>(lines.length + 1);
-  offsets[0] = 0;
-  for (let i = 0; i < lines.length; i++) {
-    // "\n" is always one UTF-8 byte — adding 1 avoids concatenating a fresh
-    // string per line just to measure it.
-    offsets[i + 1] = offsets[i]! + Buffer.byteLength(lines[i]!) + 1;
+  // Retain the actual CR/LF separator widths and the exact EOF sentinel.
+  const offsets = [0];
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] === 13) {
+      if (raw[i + 1] === 10) i++;
+      offsets.push(i + 1);
+    } else if (raw[i] === 10) {
+      offsets.push(i + 1);
+    }
   }
+  offsets.push(raw.length);
   return offsets;
 }
 
 function makeTextChunks(
   path: string,
-  raw: string,
-  totalBytes: number,
+  raw: Buffer,
+  byteOffsets: number[],
 ): IndexedChunkV1[] {
   const chunks: IndexedChunkV1[] = [];
-  const lines = raw.split(/\r\n|\r|\n/);
-  const byteOffsets = buildByteOffsets(lines);
+  const totalBytes = raw.length;
 
-  let sliceIndex = 0;
   let bytePos = 0;
   // bytePos only moves forward, so the line containing it is found by
   // advancing a cursor instead of rescanning the offsets from the top for
@@ -106,13 +107,13 @@ function makeTextChunks(
       startCursor++;
     }
     const lineStart = startCursor + 1;
-    let lineEnd = lineStart;
-    for (let i = lineStart - 1; i < byteOffsets.length - 1; i++) {
-      if (byteOffsets[i + 1]! <= byteEnd) lineEnd = i + 1;
-      else break;
+    let endCursor = startCursor;
+    while (endCursor + 1 < byteOffsets.length - 1 && byteOffsets[endCursor + 1]! < byteEnd) {
+      endCursor++;
     }
+    const lineEnd = endCursor + 1;
 
-    const body = raw.slice(byteStart, byteEnd);
+    const body = raw.subarray(byteStart, byteEnd).toString("utf8");
     const kind: ChunkKind = "text";
     const tokenEstimate = Math.max(1, Math.ceil((byteEnd - byteStart) / 4));
 
@@ -131,7 +132,6 @@ function makeTextChunks(
     });
 
     bytePos = byteEnd;
-    sliceIndex++;
     if (bytePos >= totalBytes) break;
   }
 
@@ -151,11 +151,13 @@ export function extractChunks(input: {
   raw: string;
   language: string;
   symbols: ExtractedSymbol[];
+  /** Preserve declaration identity while chunks are emitted, including slices. */
+  onSymbolChunks?: (symbol: ExtractedSymbol, chunks: readonly IndexedChunkV1[]) => void;
 }): IndexedChunkV1[] {
   const { path, raw, language, symbols } = input;
-  const lines = raw.split(/\r\n|\r|\n/);
-  const byteOffsets = buildByteOffsets(lines);
-  const totalBytes = byteOffsets[lines.length]!;
+  const bytes = Buffer.from(raw, "utf8");
+  const byteOffsets = buildByteOffsets(bytes);
+  const lineCount = byteOffsets.length - 1;
 
   // No symbols in source file → emit text chunks if file has content.
   if (symbols.length === 0) {
@@ -163,7 +165,7 @@ export function extractChunks(input: {
       language === "" ||
       /\.(md|markdown|txt|yaml|yml|json|toml|ini|cfg|conf|xml|csv)$/.test(path);
     if (raw.length > 0 && (isTextFile || symbols.length === 0)) {
-      return makeTextChunks(path, raw, totalBytes);
+      return makeTextChunks(path, bytes, byteOffsets);
     }
     return [];
   }
@@ -171,12 +173,13 @@ export function extractChunks(input: {
   const chunks: IndexedChunkV1[] = [];
 
   for (const sym of symbols) {
+    const chunkStart = chunks.length;
     const lineStart = sym.line;
     const lineEnd = sym.endLine;
 
     // Clamp to valid range (1-indexed lines).
-    const clampedLineStart = Math.max(1, Math.min(lineStart, lines.length));
-    const clampedLineEnd = Math.max(clampedLineStart, Math.min(lineEnd, lines.length));
+    const clampedLineStart = Math.max(1, Math.min(lineStart, lineCount));
+    const clampedLineEnd = Math.max(clampedLineStart, Math.min(lineEnd, lineCount));
 
     const byteStart = byteOffsets[clampedLineStart - 1]!;
     const byteEnd = byteOffsets[clampedLineEnd]!;
@@ -186,7 +189,7 @@ export function extractChunks(input: {
 
     if (tokenEstimate <= 400) {
       // Single chunk.
-      const body = raw.slice(byteStart, byteEnd);
+      const body = bytes.subarray(byteStart, byteEnd).toString("utf8");
       chunks.push({
         id: chunkId(path, byteStart, byteEnd, kind),
         path,
@@ -212,20 +215,17 @@ export function extractChunks(input: {
         const sliceByteStart = pos;
         const sliceByteEnd = Math.min(pos + TOKEN_SLICE_BYTES, byteEnd);
 
-        while (sliceStartCursor + 1 <= clampedLineEnd && byteOffsets[sliceStartCursor + 1]! <= sliceByteStart) {
+        while (sliceStartCursor + 1 < clampedLineEnd && byteOffsets[sliceStartCursor + 1]! <= sliceByteStart) {
           sliceStartCursor++;
         }
         const sliceLineStart = sliceStartCursor + 1;
-        let sliceLineEnd = sliceLineStart;
-        for (let i = sliceLineStart - 1; i <= clampedLineEnd; i++) {
-          if (byteOffsets[i + 1] !== undefined && byteOffsets[i + 1]! <= sliceByteEnd) {
-            sliceLineEnd = i + 1;
-          } else {
-            break;
-          }
+        let sliceEndCursor = sliceStartCursor;
+        while (sliceEndCursor + 1 < clampedLineEnd && byteOffsets[sliceEndCursor + 1]! < sliceByteEnd) {
+          sliceEndCursor++;
         }
+        const sliceLineEnd = sliceEndCursor + 1;
 
-        const body = raw.slice(sliceByteStart, sliceByteEnd);
+        const body = bytes.subarray(sliceByteStart, sliceByteEnd).toString("utf8");
         const sliceTokenEstimate = Math.max(1, Math.ceil((sliceByteEnd - sliceByteStart) / 4));
 
         chunks.push({
@@ -247,6 +247,7 @@ export function extractChunks(input: {
         if (pos >= byteEnd) break;
       }
     }
+    input.onSymbolChunks?.(sym, chunks.slice(chunkStart));
   }
 
   return chunks;

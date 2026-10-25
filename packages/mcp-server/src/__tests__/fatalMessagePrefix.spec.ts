@@ -9,17 +9,15 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
 import { killServerGroup } from "./helpers/killServerGroup.js";
+import { TSX_NODE_ARGS } from "./helpers/tsxNode.js";
 
 const HOME = process.env["HOME"] ?? process.env["USERPROFILE"] ?? os.homedir();
-const nodeRequire = createRequire(import.meta.url);
-const TSX_CLI = nodeRequire.resolve("tsx/cli");
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BIN_TS = path.resolve(HERE, "..", "bin.ts");
 
@@ -44,7 +42,7 @@ describe("startup fatal message — no doubled [tl-mcp] prefix", () => {
 
     const child: ChildProcess = spawn(
       process.execPath,
-      [TSX_CLI, "--liftoff-only", BIN_TS, bogusRelativeArg],
+      [...TSX_NODE_ARGS, BIN_TS, bogusRelativeArg],
       { cwd: launchDir, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32" },
     );
     let stderr = "";

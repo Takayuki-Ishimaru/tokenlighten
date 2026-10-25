@@ -190,9 +190,10 @@ async function ask(
   profile: "answer" | undefined = "answer",
   allowWrite = false,
   toolSurface: "code" | "full" = "code",
+  extraEnv: Readonly<Record<string, string>> = {},
 ): Promise<{ chain: ChainResult; disclosures: string[]; served: Set<string> }> {
   const ws = workspace(files);
-  const server = startDevServer(ws, "default", { allowWrite, toolSurface });
+  const server = startDevServer(ws, "default", { allowWrite, toolSurface, extraEnv });
   servers.push(server);
   await server.initialize();
   const chain = await followNextToEnd(
@@ -260,10 +261,26 @@ describe("end-to-end: a coordinated noun-phrase point is located or disclosed, n
   }, 60_000);
 
   it("mixed-kind control: a coordinated point with a live code candidate keeps blocking with an executable next, then is served", async () => {
-    const { chain, served } = await ask(HTTP_MONITOR, "Explain how shouldRetry decides and the liveness probe.");
+    const query = "Explain how shouldRetry decides and the liveness probe.";
+    // Under the rollback (TL_EFF_AUTOFOLLOW=0) the block is on the wire: a
+    // discover whose `next` names src/monitor.ts.
+    const rollback = await ask(HTTP_MONITOR, query, "answer", false, "code", { TL_EFF_AUTOFOLLOW: "0" });
+    const blocked = rollback.chain.hops[0]?.response as Record<string, any> | undefined;
+    expect(blocked?.["decision"]?.["kind"], JSON.stringify(blocked?.["decision"])).toBe("discover");
+    expect(JSON.stringify(blocked?.["decision"]?.["next"] ?? {}), JSON.stringify(blocked?.["decision"])).toContain("src/monitor.ts");
+    expect(rollback.served.has("src/monitor.ts"), JSON.stringify([...rollback.served])).toBe(true);
+    expect(finalDecisionKind(rollback.chain)).toBe("act.answer");
+    // Default (TL_EFF_AUTOFOLLOW, ON since 2026-10-19): that `next` re-issues
+    // the request, so the server runs it in the same call. The first reply
+    // certifies only as that merge, with src/monitor.ts served in it; a pack
+    // that did not block would certify without it and without auto_followed.
+    const { chain, served } = await ask(HTTP_MONITOR, query);
     const first = chain.hops[0]?.response as Record<string, any> | undefined;
-    expect(first?.["decision"]?.["kind"], JSON.stringify(first?.["decision"])).toBe("discover");
-    expect(JSON.stringify(first?.["decision"]?.["next"] ?? {}), JSON.stringify(first?.["decision"])).toContain("src/monitor.ts");
+    expect(first?.["auto_followed"], JSON.stringify(first?.["decision"])).toBeDefined();
+    expect(first?.["decision"]?.["kind"]).toBe("act.answer");
+    const firstServed = ((first?.["evidence"] ?? []) as Array<Record<string, unknown>>)
+      .filter((entry) => typeof entry["body"] === "string").map((entry) => entry["path"]);
+    expect(firstServed, JSON.stringify(firstServed)).toContain("src/monitor.ts");
     expect(served.has("src/monitor.ts"), JSON.stringify([...served])).toBe(true);
     expect(finalDecisionKind(chain)).toBe("act.answer");
   }, 60_000);

@@ -52,6 +52,22 @@
  * `lines_held`/`matched_lines_outside_served`) and never touches the ledger —
  * it is real information, not a zero-info repeat, and must never itself
  * count toward escalation.
+ *
+ * 2026-10-20 (bench 6t-7: T05c rep2 #5, T09 rep1 #10, T09 rep2 #9): THE
+ * SECOND DISTINCT ALL-SERVED FIND STAYS A REFUSAL. Answering it as a compact
+ * `search.matches` (paths and lines, no snippets) and escalating only at the
+ * third was evaluated and not taken: the second rung is this module's state
+ * machine (state/session.ts: noted at the first, escalated at the second), and
+ * replay case sfh3 pins it from the measured flail above, where the cell that
+ * got a passive answer at its second all-served find ran 13 more discovery
+ * calls. The three refusals already carried every path and matched line;
+ * after each, the solver read or searched content the session had NOT served
+ * (CONTRACT.md 960-1017, apps/web/styles/globals.css), which no answer over
+ * served scope can supply. What the receipt did withhold was the find's own
+ * per-term verdicts: T09 rep1 #10 asked for `.badge--priority` and `badge {`,
+ * both absent from all 160 scanned files, and its next two calls (a tree of
+ * apps/web/styles, then globals.css) went looking for them. An absence is not
+ * content the caller holds, so `term_results` now rides the receipt.
  */
 
 import { handleTable } from "../../../util/handles.js";
@@ -503,6 +519,10 @@ function buildEscalation(
     files: receipt,
     total_files: typeof record["total_files"] === "number" ? record["total_files"] : receipt.length,
     total_matches: totalMatches,
+    // The find's own per-term verdicts (findText.ts emits them only for a
+    // multi-term find with a miss): a certified absence is not a byte this
+    // session served, so the receipt never withholds it (see the module doc).
+    ...(Array.isArray(record["term_results"]) ? { term_results: record["term_results"] } : {}),
     receipt_note:
       "locations are complete (path + matched lines + exact counts); only snippets are omitted — they are verbatim bytes of files this session already served you",
     unlock: {

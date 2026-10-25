@@ -14,7 +14,6 @@
       "path": "fw/src/estimator/qkf.cpp",
       "range": "21-26",
       "prior": "tl_read_file mode=task_pack qref=$QREF",
-      "role": "unknown",
       "sha": "$SHA1"
     }
   ],
@@ -23,7 +22,6 @@
     "next": {
       "tool": "tl_search_files",
       "arguments": {
-        "cwd": "$WS",
         "action": "tree",
         "scope": {
           "path": "fw/src/estimator"
@@ -46,8 +44,7 @@
     "requested": "auto",
     "selected": "generic",
     "source": "inferred",
-    "confidence": 0.4,
-    "reason": "no high-confidence task-shape marker"
+    "confidence": 0.4
   },
   "qref": "$QREF"
 }

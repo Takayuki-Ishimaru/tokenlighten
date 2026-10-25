@@ -30,6 +30,8 @@ import {
 import { isProseAcronym } from "./concernRecovery.js";
 import { JA_GLOSSARY } from "../retrieval/jaGlossary.js";
 import { KATAKANA_RUN_RE } from "../../util/cjkSpans.js";
+import { maskCitationFormatFields } from "../../util/citationFormat.js";
+import { maskEvaluationInputRecords } from "../../util/evaluationInputs.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -419,6 +421,38 @@ function quotedSpans(text: string): Array<{ start: number; end: number }> {
   }
   return spans;
 }
+
+/** Remove explicitly assigned worker names from retrieval, preserving task
+ * content and offsets. Names in quoted source text remain literal subjects. */
+export function stripDelegationActorSpans(query: string): string {
+  if (!/サブエージェント|sub-?agents?\b/iu.test(query)) return query;
+  const protectedSpans: Array<{ start: number; end: number }> = [];
+  // Pair delimiters and honor escapes: an apostrophe inside a double-quoted
+  // literal must not expose its contents as a separate worker instruction.
+  for (const match of query.matchAll(/\x60{3}[\s\S]*?(?:\x60{3}|$)|~~~[\s\S]*?(?:~~~|$)|"(?:\\[\s\S]|[^"\\])*(?:"|$)|(?<![\p{L}\p{N}_])'(?:\\[\s\S]|[^'\\])*(?:'|$)|\x60(?:\\[\s\S]|[^\x60\\])*(?:\x60|$)|“[^”]*(?:”|$)|‘[^’]*(?:’|$)|「[^」]*(?:」|$)|『[^』]*(?:』|$)/gu)) {
+    const start = match.index ?? 0;
+    protectedSpans.push({ start, end: start + match[0].length });
+  }
+  const chars = query.split("");
+  const boundary = /[。！？!?;\n]|\.(?=\s)/u;
+  const actors = /(?<![A-Za-z0-9_-])[A-Za-z][A-Za-z0-9_-]*(?:[ \t]*サブエージェント|[ \t]+sub-?agents?\b)/giu;
+  for (const match of query.matchAll(actors)) {
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+    if (protectedSpans.some((span) => start < span.end && end > span.start)) continue;
+    const before = query.slice(0, start).split(boundary).at(-1) ?? "";
+    const after = query.slice(end).split(boundary)[0] ?? "";
+    const japanese = /サブエージェント$/u.test(match[0])
+      && /^[にへ]/u.test(after)
+      && /(?:任せて(?:みて)?ください|任せ(?:て|ながら)[\s\S]*進めてください|委任してください|担当させてください)\s*$/u.test(after);
+    const english = /sub-?agents?$/iu.test(match[0])
+      && (/^\s*(?:(?:also|then)[,:]?\s+)?(?:please\s+)?(?:ask|use|have|let)\s+(?:the\s+)?$/iu.test(before)
+        || /^\s*(?:please\s+)?(?:delegate|assign)\b[\s\S]*\bto\s+(?:the\s+)?$/iu.test(before));
+    if (japanese || english) chars.fill(" ", start, end);
+  }
+  return chars.join("");
+}
+
 
 /**
  * P1-8 (eval-0927 review r2 finding 8, classFlowLifecycle/classFlowHandle):
@@ -2515,21 +2549,56 @@ function itemReadsAsEditLead(text: string): boolean {
  * article, an optionally quoted file term, terminal punctuation, end — the same
  * whitelist-a-known-safe-shape discipline `CONTINUATION_OBJECT_FREE_EN_RE` uses
  * rather than a blacklist of unsafe words. A clause with anything else in it
- * (another noun, a trailing read verb, a second object) never matches.
+ * (another noun, a trailing read verb, a second non-file object) never matches.
+ * Several files joined only by `and`/`,` (`Update src/a.ts and src/b.ts.`) are
+ * one coordinated object (2026-10-17): a directed relation needs a preposition
+ * (`to`, `into`, `with`, `from`) between its files, which the anchor rejects.
  *
  * Runs on the PREFIX-STRIPPED text so `then disable src/retry.ts.` and
  * `Please disable src/retry.ts.` are the same clause to it, exactly as
  * `MUTATION_VERB_LEAD_RE` already sees them.
  */
+const FILE_OBJECT_TERM = `["'\x60「]?${FULL_PATH_TERM_SOURCE}["'\x60」]?`;
+/** One file term and any further ones coordinated after it: `a.go, b.go and c.go`. */
+const COORDINATED_FILE_OBJECT_TERMS = `${FILE_OBJECT_TERM}(?:\\s*(?:,\\s*(?:and\\s+)?|and\\s+)${FILE_OBJECT_TERM})*`;
 const CLAUSE_FILE_OBJECT_ONLY_EN_RE = new RegExp(
   `^[\\s\\-*•]*(?:${MUTATION_VERBS_EN})\\b(?!-)\\s+(?:the|a|an)?\\s*`
-  + `["'\x60「]?${FULL_PATH_TERM_SOURCE}["'\x60」]?`
+  + COORDINATED_FILE_OBJECT_TERMS
   + "\\s*[.!?。！？]?\\s*$",
   "iu",
 );
+/**
+ * The rest of a coordinated file list after `extractRequestItems` split it at
+ * a comma: `Fix the sign of Net in a.go, b.go and c.go.` arrives as the items
+ * `Fix the sign of Net in a.go` and `b.go and c.go.` (see `requestItemLeads`).
+ */
+const FILE_LIST_CONTINUATION_EN_RE = new RegExp(
+  `^\\s*(?:and\\s+)?${COORDINATED_FILE_OBJECT_TERMS}\\s*[.!?。！？]?\\s*$`,
+  "iu",
+);
 function clauseNamesOnlyAFileObject(strippedText: string): boolean {
-  return CLAUSE_FILE_OBJECT_ONLY_EN_RE.test(strippedText);
+  return CLAUSE_FILE_OBJECT_ONLY_EN_RE.test(strippedText) || CLAUSE_DETERMINED_OBJECT_IN_FILE_EN_RE.test(strippedText);
 }
+
+/**
+ * 2026-10-17 (DESIGN-v0.14-plan §20.8): `Fix the bug in meter/sum.go.`, `Fix
+ * the sign of Net in src/a.ts and src/b.ts.` — the verb's object is a noun
+ * phrase OPENED BY A DETERMINER and the clause ends on the file(s) it sits in.
+ * The determiner is what the noun registers `MUTATION_VERB_LEAD_RE` excludes
+ * never have (`Switch statements in src/parser.ts — explain …`, `Insert
+ * performance in src/db.ts — explain.`): a mutation word followed directly by
+ * `the`/`this`/… is the verb of an imperative, not the head of a noun phrase.
+ * Whole-clause anchored like the file-object shape above: up to eight object
+ * words, `in`/`of`/`inside`/`within`, then one or more coordinated files, then
+ * terminal punctuation and the end of the clause — a trailing read verb or a
+ * second clause never matches.
+ */
+const CLAUSE_DETERMINED_OBJECT_IN_FILE_EN_RE = new RegExp(
+  `^[\\s\\-*•]*(?:${MUTATION_VERBS_EN})\\b(?!-)\\s+(?:the|this|that|these|those)\\s+(?:[\\w.'-]+\\s+){0,7}?(?:in|of|inside|within)\\s+`
+  + COORDINATED_FILE_OBJECT_TERMS
+  + "\\s*[.!?。！？]?\\s*$",
+  "iu",
+);
 
 /**
  * SHOULD-FIX 64 (AC1, 2026-09-14, review round 12): does this clause name a
@@ -2706,6 +2775,55 @@ function queryReadsAsEditRequest(query: string, items: readonly RequestItem[]): 
  */
 function fullPathTermsIn(text: string): string[] {
   return [...new Set([...text.matchAll(FULL_PATH_TERM_RE)].map((match) => match[0]))];
+}
+
+/** Up to `n` characters inside one sentence: a `.`/`;`/`!`/`?`/`。` that ends a sentence stops it, a path's own dot does not. */
+function sameSentenceGap(n: number): string {
+  return `(?:(?![.;!?。](?:\\s|$))[^\\n]){0,${n}}?`;
+}
+
+const PROTECT_EDIT_VERBS = "(?:change|modify|edit|touch|alter|update|rewrite)";
+const PROTECT_STATES = "(?:unchanged|untouched|intact|as[- ]is)";
+
+/**
+ * Paths the request explicitly protects from editing: `Keep max at 24 and
+ * src/window.mjs unchanged.`, `Do not modify src/b.ts`, `… without changing
+ * src/b.ts`, `src/b.ts must remain unchanged`, `src/b.ts は変更しないで`.
+ *
+ * Such a path is named so the reader keeps it in view, never as a change
+ * target. Without this, the protective clause had no lead of its own and
+ * inherited the previous clause's edit lead: the 2026-10-16 bench's
+ * `Change batch … in src/limits.mjs. Keep max at 24 and src/window.mjs
+ * unchanged.` listed src/window.mjs as a REQUIRED edit obligation. The verb
+ * must take the path itself as its object (an article or `file` may sit
+ * between), so `Don't change behavior of src/a.ts` protects nothing.
+ */
+export function protectedNamedPaths(text: string): Set<string> {
+  return protectedPathMentions(text).paths;
+}
+
+/** `protectedNamedPaths` plus the protecting spans themselves (character offsets into `text`). */
+function protectedPathMentions(text: string): { paths: Set<string>; spans: Array<[number, number]> } {
+  const out = new Set<string>();
+  const spans: Array<[number, number]> = [];
+  for (const candidate of fullPathTermsIn(text)) {
+    const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const target = `(?:(?:the|this|that|any)\\s+)?(?:files?\\s+)?${escaped}(?!'s|の)`;
+    const patterns = [
+      new RegExp(`\\b(?:keep|leave)\\b${sameSentenceGap(60)}${escaped}(?!'s)${sameSentenceGap(24)}\\b${PROTECT_STATES}\\b`, "iu"),
+      new RegExp(`\\b(?:do\\s+not|don't|never|must\\s+not|should\\s+not)\\s+${PROTECT_EDIT_VERBS}\\s+${target}`, "iu"),
+      new RegExp(`\\bwithout\\s+(?:changing|modifying|editing|touching|altering)\\s+${target}`, "iu"),
+      new RegExp(`${escaped}${sameSentenceGap(24)}\\b(?:stays?|remains?|(?:must|should)\\s+(?:stay|remain))\\s+${PROTECT_STATES}\\b`, "iu"),
+      new RegExp(`${escaped}\\s*(?:は|を|も|には)\\s*(?:一切\\s*)?(?:変更しない|変更せず|変えない|変えず|触らない|触らず|編集しない|編集せず|そのまま|変更禁止|変更不要)`, "u"),
+    ];
+    for (const pattern of patterns) {
+      const match = pattern.exec(text);
+      if (match === null) continue;
+      out.add(candidate);
+      spans.push([match.index, match.index + match[0].length]);
+    }
+  }
+  return { paths: out, spans };
 }
 
 /**
@@ -3158,6 +3276,21 @@ export function stripLeadVerbTokens(query: string): string {
 }
 
 export function requestItemLeads(query: string, index?: RequestItemIndexView): RequestItemLead[] {
+  // A protecting clause ("Keep max at 24 and src/window.mjs unchanged.") is
+  // no request of its own, but it shared an item with the real one and the
+  // item's two paths left the edited file with no lead row at all (the
+  // 2026-10-16 bench's E1). Read the request without those clauses, then
+  // add every protected path as `read`.
+  const protection = protectedPathMentions(query);
+  if (protection.spans.length > 0) {
+    let masked = query;
+    for (const [start, end] of protection.spans) masked = masked.slice(0, start) + " ".repeat(end - start) + masked.slice(end);
+    const rows = new Map(requestItemLeads(masked)
+      .filter((row) => !protection.paths.has(row.path))
+      .map((row) => [row.path, row.lead] as const));
+    for (const path of protection.paths) rows.set(path, "read");
+    return [...rows.entries()].map(([path, lead]) => ({ path, lead }));
+  }
   const items = extractRequestItems(query, index);
   const ownLead: Array<"edit" | "read" | undefined> = items.map((item) => (
     itemReadsAsEditLead(item.text) ? "edit" : itemReadsAsReadLead(item.text) ? "read" : undefined
@@ -3184,12 +3317,13 @@ export function requestItemLeads(query: string, index?: RequestItemIndexView): R
   // property of the mention, not of whichever item/clause pass happens to reach
   // it first. See `alternativeCoordinatedPaths`.
   const alternatives = alternativeCoordinatedPaths(query);
+  const protectedPaths = protectedNamedPaths(query);
   const record = (
     candidatePath: string,
     own: "edit" | "read" | undefined,
     effective: "edit" | "read" | undefined,
   ): void => {
-    const kind: RequestItemLeadKind = alternatives.has(candidatePath)
+    const kind: RequestItemLeadKind = alternatives.has(candidatePath) || protectedPaths.has(candidatePath)
       ? "read"
       : own === "edit"
         ? "edit"
@@ -3416,9 +3550,17 @@ export function requestItemLeads(query: string, index?: RequestItemIndexView): R
   let carryFiles: string[] | undefined;
   /** The text `carryFiles` was carried FROM — the receiving side a donation is judged against (`mayDonateEditTo`). */
   let carryText = "";
+  /** The previous item claimed a coordinated file list its comma left open (`FILE_LIST_CONTINUATION_EN_RE`). */
+  let coordinatedListOpen = false;
   items.forEach((item, i) => {
     const { fullPaths, hasIdentifier } = collectEditPathSignal(item);
     const effectiveLead = ownLead[i] ?? precedingExplicit[i] ?? followingExplicit[i];
+    // `Fix the sign of Net in a.go, b.go and c.go.`: the items after the
+    // comma are the same object's remaining files, so they take its edit lead
+    // (a period ends the list: `extractRequestItems` keeps it on the item).
+    const continuesCoordinatedFiles = coordinatedListOpen && ownLead[i] === undefined
+      && fullPaths.length > 0 && FILE_LIST_CONTINUATION_EN_RE.test(item.text);
+    const listStays = (claimed: boolean): boolean => claimed && !/[.!?。！？;；]\s*$/u.test(item.text);
     /**
      * FIXALL-A group A(a) (2026-09-14) — `hasIdentifier` GATES DONATION, NOT
      * SELF-CLAIM.
@@ -3450,7 +3592,24 @@ export function requestItemLeads(query: string, index?: RequestItemIndexView): R
      * has always taken. Every item this fix is about (`change src/retry.ts.`,
      * `"src/retry.ts" に追加してください。`) names exactly one.
      */
-    const claimsItsOwnPath = hasIdentifier || (fullPaths.length === 1 && ownLead[i] !== undefined);
+    // 2026-10-17 (DESIGN-v0.14-plan §20.8): an item of several sentences
+    // ("Drain gauges report Net with the wrong sign. Fix the bug in
+    // meter/sum.go.") has no lead at its START, yet the sentence naming its one
+    // path does; that sentence's own lead claims the path the same way.
+    const clauseClaimsPath = fullPaths.length === 1 && ownLead[i] === undefined
+      && splitIntoLeadClauses(item.text).some((clause) => clause.includes(fullPaths[0]!)
+        && (itemReadsAsEditLead(clause) || itemReadsAsReadLead(clause)));
+    // Files COORDINATED after a determiner-led object ("Fix the sign of Net
+    // in meter/sum.go and meter/totals.go.") are each where that object
+    // lives, never the source and destination of a directed relation, which
+    // `CLAUSE_DETERMINED_OBJECT_IN_FILE_EN_RE`'s whole-clause anchor already
+    // rules out (only `and`/`,` may join them): every one is claimed.
+    const opensFileList = ownLead[i] === "edit" && clauseNamesOnlyAFileObject(stripLeadPrefixes(item.text));
+    const coordinatedFilesClaim = (fullPaths.length > 1 && opensFileList) || continuesCoordinatedFiles;
+    coordinatedListOpen = listStays(opensFileList || continuesCoordinatedFiles);
+    const claimsItsOwnPath = hasIdentifier
+      || (fullPaths.length === 1 && (ownLead[i] !== undefined || clauseClaimsPath))
+      || coordinatedFilesClaim;
     if (fullPaths.length > 0 && claimsItsOwnPath) {
       // SHOULD-FIX 31 (2026-09-14, review round 5): split whenever the
       // item's own text yields >=2 clauses — NOT only when it names >1
@@ -3512,7 +3671,7 @@ export function requestItemLeads(query: string, index?: RequestItemIndexView): R
             record(path, clauseOwnLead ?? inheritedOwn, clauseOwnLead ?? inheritedEffective);
           }
         } else {
-          record(path, ownLead[i], effectiveLead);
+          record(path, ownLead[i] ?? (continuesCoordinatedFiles ? "edit" : undefined), effectiveLead);
         }
         // AA1 (2026-09-14, round 10): an object-free lead clause of this SAME
         // item donates too, exactly like an adjacent lead-only ITEM does
@@ -3607,8 +3766,9 @@ export function requestItemLeads(query: string, index?: RequestItemIndexView): R
    * full path; and `Explain src/retry.ts; then set MAX_RETRIES to 5 in
    * src/cache.ts.` gave `src/retry.ts` no row at all.
    *
-   * So the WHOLE QUERY is also read clause by clause — and this pass records
-   * ONLY `read`, for the paths the READ clause itself names.
+   * So the WHOLE QUERY is also read clause by clause. Read clauses retain
+   * their read-only rows. An independent single-path edit clause fills a
+   * missing row only; it never promotes an existing read attribution.
    *
    * The one-direction restriction is the whole safety argument, and it was found
    * by this wave's own adversarial pass: an EDIT row from here re-opened BLOCKER
@@ -3617,13 +3777,18 @@ export function requestItemLeads(query: string, index?: RequestItemIndexView): R
    * MAX_RETRIES を 5 に変更してください。」 is ONE clause whose tail-anchored
    * imperative would have credited BOTH paths with `edit`. `read` cannot do that:
    * it is the LOWEST rank, so `record`'s merge lets it hold a path down to
-   * read-only and never promote one, and every legitimate edit attribution keeps
-   * coming from the item pass above (which is clause-local AND gated).
+   * read-only and never promote one. The edit fallback below is limited to a
+   * single path with NO existing attribution; multi-path clauses and earlier
+   * read rows therefore keep the item pass's clause-local, gated result.
    */
   for (const row of clauseLeadRows(query)) {
-    if (row.lead !== "read") continue;
-    for (const path of fullPathTermsIn(row.clause)) {
-      record(path, "read", "read");
+    const paths = fullPathTermsIn(row.clause);
+    if (row.lead === "read") {
+      for (const path of paths) record(path, "read", "read");
+    } else if (row.lead === "edit" && paths.length === 1 && !byPath.has(paths[0]!)) {
+      // Independent single-path edit sentences can share one extracted item.
+      // Do not borrow a verb across clauses or infer a rename destination.
+      record(paths[0]!, "edit", "edit");
     }
   }
   /**
@@ -3645,6 +3810,8 @@ export function requestItemLeads(query: string, index?: RequestItemIndexView): R
    * obligations until the caller actually chooses one.
    */
   for (const path of alternatives) record(path, "read", "read");
+  // Same guarantee for an explicitly protected path (`protectedNamedPaths`).
+  for (const path of protectedPaths) record(path, "read", "read");
   return [...byPath.entries()].map(([path, lead]) => ({ path, lead }));
 }
 
@@ -3701,6 +3868,35 @@ export function explicitMixedEditReadRequestPaths(query: string, index?: Request
   const hasReadLead = leads.some((entry) => entry.lead === "read");
   if (!hasEditLead || !hasReadLead) return undefined;
   return [...new Set(leads.map((entry) => entry.path))];
+}
+
+/**
+ * 2026-10-17 (DESIGN-v0.14-plan §20.8): a change request naming exactly ONE
+ * file, through an edit lead of its own ("Fix the bug in meter/sum.go."), with
+ * nothing else to choose between. `explicitMultiEditRequestPaths` needs two
+ * such paths and `explicitMixedEditReadRequestPaths` a read-lead path beside
+ * one, so this shape fell to the pathless locator, which ranked the named file
+ * by its file name alone and ended in `await_input` with that file as the only
+ * candidate. A read-only request never qualifies. The caller checks that the
+ * path is an existing workspace file and seeds it like a caller's `paths[]`.
+ */
+export function explicitSingleEditRequestPath(query: string, index?: RequestItemIndexView): string | undefined {
+  const items = extractRequestItems(query, index);
+  if (!queryReadsAsEditRequest(query, items)) return undefined;
+  const leads = requestItemLeads(query, index);
+  const paths = [...new Set(leads.map((entry) => entry.path))];
+  if (paths.length !== 1) return undefined;
+  return leads.every((entry) => entry.lead === "edit" || entry.lead === "inherited-edit") ? paths[0] : undefined;
+}
+
+/**
+ * The request asks for a change, read the way the explicit-path seeds above
+ * read it (`queryReadsAsEditRequest`: an EN edit lead, a JA edit imperative
+ * such as the casual 「修正して、…」, or one item or clause leading with
+ * either), whether or not it names a file.
+ */
+export function queryAsksForChange(query: string, index?: RequestItemIndexView): boolean {
+  return queryReadsAsEditRequest(query, extractRequestItems(query, index));
 }
 
 // ---------------------------------------------------------------------------
@@ -4621,7 +4817,7 @@ function stripFencedBlocks(text: string): string {
 }
 
 export function extractRequestItems(rawQuery: string, index?: RequestItemIndexView): RequestItem[] {
-  const query = stripFencedBlocks(rawQuery);
+  const query = stripFencedBlocks(maskCitationFormatFields(maskEvaluationInputRecords(rawQuery)));
   const { lead, body } = splitLeadAndBody(query);
   /**
    * BLOCKER 54 (AB1, 2026-09-14, review round 11): KEEP the question clause.

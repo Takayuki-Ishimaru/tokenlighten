@@ -19,7 +19,7 @@ import { locateTaskContext } from "../features/locator/locateTaskContext.js";
 import { languageForPath, languageForPathWithContent } from "../util/languages.js";
 import { countLines, sliceLinesToText } from "../util/countLines.js";
 import { collectSymbols, type CollectedSymbol } from "../symbols/collectSymbols.js";
-import { getConcernTokens, hasConcernNoteFired, markConcernNoteFired, recordReadPath, isClosureSatisfied, servedRangeReceipt } from "../state/session.js";
+import { getConcernTokens, hasConcernNoteFired, markConcernNoteFired, recordReadPath, isClosureSatisfied, servedRangeCoverage, servedRangeReceipt } from "../state/session.js";
 import { isMarkdownPath, parseMarkdownHeadings, selectMarkdownSections } from "../util/markdownSections.js";
 import { estimateBytesFromTokens } from "../protocol/budget/wireBudget.js";
 import { measureResponseBytes } from "../protocol/budget/measure.js";
@@ -42,6 +42,7 @@ import type {
 } from "@tokenlighten/types";
 import { MCP_LANGS } from "@tokenlighten/types";
 import { canonicalToolCall, protocolCallContext } from "../protocol/envelope.js";
+import { wholeOrOpenEndedRange } from "../util/rangeWords.js";
 
 // ---------------------------------------------------------------------------
 // Byte caps
@@ -224,7 +225,7 @@ export function extractSymbolsFromLines(
     //     (single-line signature only — a multi-line signature's opening
     //     line has no trailing `{` and is correctly NOT matched here; that
     //     limitation is pre-existing and out of D2's scope).
-    /^\s*(?:public\s+|private\s+|protected\s+|static\s+|readonly\s+|abstract\s+|override\s+|async\s+|get\s+|set\s+)*(?!(?:if|for|while|switch|catch|do|else|try|finally|return|throw|new|typeof|instanceof|in|of|yield|await|delete|void|super|this)\s*[(<])([a-zA-Z_$][a-zA-Z0-9_$]*)\s*(?:<[^>]*>)?\s*\(.*\)\s*(?::\s*[^{;]+)?\s*\{\s*$/,
+    /^\s*(?:public\s+|private\s+|protected\s+|static\s+|readonly\s+|abstract\s+|override\s+|async\s+|get\s+|set\s+)*(?!(?:if|for|while|switch|catch|do|else|try|finally|return|throw|new|typeof|instanceof|in|of|yield|await|delete|void|super|this|func)\s*[(<])([a-zA-Z_$][a-zA-Z0-9_$]*)\s*(?:<[^>]*>)?\s*\(.*\)\s*(?::\s*[^{;]+)?\s*\{\s*$/,
     // Python
     /^(?:async\s+)?def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/,
     /^class\s+([a-zA-Z_][a-zA-Z0-9_]*)/,
@@ -288,6 +289,11 @@ export function extractSymbolsFromLines(
     // collapsed to the signature line, so anchor-focus embedded an empty
     // body). 2026-07-11b live-bench C++ ctor shape.
     if (/^\s*[:,]/.test(line)) continue;
+    // Statements are never declarations. A tab-indented Go body line
+    // (`\tif len(tail) != 20 {`) passes the indentation filter above, and the
+    // generic C#/Java method patterns minted `len` as a symbol, which also cut
+    // the enclosing function's range short at that line (2026-10-16 bench).
+    if (/^\s*(?:if|else|for|foreach|while|do|switch|case|return|throw|try|catch|finally|go|defer|select|await|yield|new|elif|with)\s/.test(line)) continue;
     for (const pat of DECL_PATTERNS) {
       const m = line.match(pat);
       if (m && m[1]) {
@@ -865,24 +871,49 @@ function mergeLineRanges(hitLines: readonly number[], maxRanges: number): string
 }
 
 /**
- * Guard 2 entry point: when a PARTIAL range serve's own window has zero
- * concern-token hits but the UNSERVED remainder of the file has at least
- * one, returns a bounded note pointing at the missed region and marks the
- * (workspace, filePath) pair as fired. Returns undefined — and does NOT
- * mark anything fired — when the guard doesn't apply: a full-file range, no
- * session tokens, the served region already hits, the unserved region has
- * no hits, this (session, path) already fired once, or (2026-07-16a
- * re-read-loop forensics) the session's closure ledger is already certified
- * satisfied.
+ * The remedy every concern note ends with: the canonical read forms. It used
+ * to say "widen the slice or read mode=symbol" — `mode` is a legacy input the
+ * default server refuses, and the guide tells agents never to send it
+ * (v016 decision 6t-2 T13 rep1 #6, 6t-3 T13 rep1 #3 and rep2 #16).
+ */
+const CONCERN_NOTE_REMEDY = " — read them with targets:[{path, range}] or targets:[{path, symbol}]";
+
+/**
+ * Guard 2 entry point: when a PARTIAL serve's own windows have zero
+ * concern-token hits but lines of the file this session has not been served
+ * have at least one, returns a bounded note pointing at those lines and marks
+ * the (workspace, filePath) pair as fired. Returns undefined — and does NOT
+ * mark anything fired — when the guard doesn't apply: the windows cover the
+ * file, no session tokens, the served windows already hit, no unserved line
+ * hits, this (session, path) already fired once, or (2026-07-16a re-read-loop
+ * forensics) the session's closure ledger is already certified satisfied.
+ *
+ * `windows` is EVERY window this reply serves (2026-10-19): a ranges[] read
+ * used to compute the note per window, so a reply serving 21-77 and 115-322
+ * flagged L26-28 "outside served range" from the second window's point of
+ * view. A hit line the served-range ledger holds at `fileSha` is not
+ * unserved either — the 6t-3 notes also named L81, which the first pack had
+ * served (78-114).
  */
 function buildConcernNote(
   workspace: string,
   filePath: string,
   lines: readonly string[],
-  startLine: number,
-  endLine: number,
+  windows: ReadonlyArray<readonly [number, number]>,
+  fileSha: string,
 ): string | undefined {
-  const isPartialRange = startLine > 1 || endLine < lines.length;
+  const totalLines = lines.length > 0 && lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
+  const served = [...windows]
+    .map(([start, end]) => [Math.max(1, start), Math.min(totalLines, end)] as [number, number])
+    .filter(([start, end]) => start <= end)
+    .sort((left, right) => left[0] - right[0]);
+  const inServed = (line: number): boolean => served.some(([start, end]) => start <= line && line <= end);
+  let coveredThrough = 0;
+  for (const [start, end] of served) {
+    if (start > coveredThrough + 1) break;
+    coveredThrough = Math.max(coveredThrough, end);
+  }
+  const isPartialRange = coveredThrough < totalLines;
   if (!isPartialRange) return undefined;
 
   // 2026-07-16a re-read-loop forensics: once attachClosure/mode=closure has certified every
@@ -897,21 +928,42 @@ function buildConcernNote(
   if (concernTokens.length === 0) return undefined;
   if (hasConcernNoteFired(workspace, filePath)) return undefined;
 
-  const served = tokensHitInRange(lines, startLine, endLine, concernTokens);
-  if (served.hitLines.length > 0) return undefined;
-
-  const before = tokensHitInRange(lines, 1, startLine - 1, concernTokens);
-  const after = tokensHitInRange(lines, endLine + 1, lines.length, concernTokens);
-  const unservedHitLines = [...before.hitLines, ...after.hitLines];
+  // One pass: a hit inside a served window means the reply already shows the
+  // concern, so there is no note at all; a hit on a line the ledger holds was
+  // shown by an earlier reply, so it is not named.
+  const held = servedRangeCoverage(workspace, filePath, fileSha, totalLines)?.served ?? [];
+  const isHeld = (line: number): boolean => held.some(([start, end]) => start <= line && line <= end);
+  const unservedHitLines: number[] = [];
+  const unservedTokenSet = new Set<string>();
+  for (let line = 1; line <= totalLines; line++) {
+    const { hitTokens } = tokensHitInRange(lines, line, line, concernTokens);
+    if (hitTokens.length === 0) continue;
+    if (inServed(line)) return undefined;
+    if (isHeld(line)) continue;
+    unservedHitLines.push(line);
+    for (const token of hitTokens) unservedTokenSet.add(token);
+  }
   if (unservedHitLines.length === 0) return undefined;
 
-  const unservedTokens = [...new Set([...before.hitTokens, ...after.hitTokens])].slice(0, 3);
-  const ranges = mergeLineRanges(unservedHitLines, 2);
-  let note = `session-query tokens (${unservedTokens.join(", ")}) hit outside served range: ${ranges.join(", ")} — widen the slice or read mode=symbol`;
-  if (note.length > MAX_CONCERN_NOTE_CHARS) note = note.slice(0, MAX_CONCERN_NOTE_CHARS - 1) + "…";
-
+  const note = composeConcernNote([...unservedTokenSet], "hit lines not served yet", mergeLineRanges(unservedHitLines, 2));
   markConcernNoteFired(workspace, filePath);
   return note;
+}
+
+/**
+ * The note both concern guards send, within `MAX_CONCERN_NOTE_CHARS`. The
+ * remedy always survives the cap: tokens are dropped first (at most three are
+ * named), and only then is the lead cut.
+ */
+function composeConcernNote(tokens: readonly string[], verb: string, ranges: readonly string[]): string {
+  const lead = (shown: readonly string[]): string =>
+    `session-query tokens (${shown.join(", ")}) ${verb}: ${ranges.join(", ")}`;
+  let shown = tokens.slice(0, 3);
+  const room = MAX_CONCERN_NOTE_CHARS - CONCERN_NOTE_REMEDY.length;
+  while (shown.length > 1 && lead(shown).length > room) shown = shown.slice(0, -1);
+  let head = lead(shown);
+  if (head.length > room) head = `${head.slice(0, room - 1)}…`;
+  return `${head}${CONCERN_NOTE_REMEDY}`;
 }
 
 /**
@@ -955,11 +1007,9 @@ export function buildSmallFileConcernNote(
   const servedInOutline = hits.hitTokens.some((t) => outlineLower.includes(t));
   if (servedInOutline) return undefined;
 
-  const tokensPart = hits.hitTokens.slice(0, 3);
-  const ranges = mergeLineRanges(hits.hitLines, 2);
-  let note = `session-query tokens (${tokensPart.join(", ")}) hit lines not shown in this outline: ${ranges.join(", ")} — read mode=slice or mode=full to inspect`;
-  if (note.length > MAX_CONCERN_NOTE_CHARS) note = note.slice(0, MAX_CONCERN_NOTE_CHARS - 1) + "…";
-
+  // 2026-10-19: the remedy is the canonical read form; it used to say "read
+  // mode=slice or mode=full", legacy inputs the default server refuses.
+  const note = composeConcernNote(hits.hitTokens, "hit lines not shown in this outline", mergeLineRanges(hits.hitLines, 2));
   markConcernNoteFired(workspace, filePath);
   return note;
 }
@@ -1402,6 +1452,13 @@ export async function resolveSlice(
    * (`budgetedSliceCapBytes`).
    */
   callerBudgetBytes?: number,
+  /**
+   * 2026-10-19: `resolveSliceRanges` resolves each of its windows here and
+   * then judges the concern note once, over every window it serves; its
+   * per-window calls pass `false` so no window fires the one-shot note
+   * against its own window alone.
+   */
+  concernNoteForThisWindow = true,
 ): Promise<ResolveSliceResult> {
   // R1 doc-navigation (2026-07-25 live forensics): markdown has NO code
   // symbols. A symbol tag on a .md handle is either an anchor-focus regex
@@ -1581,6 +1638,9 @@ export async function resolveSlice(
     // whole file — see sliceInvalidRemedyNext above — but total_lines still
     // rides every refusal payload.
     const totalLines = countLines(content);
+    // The caller's own spelling, for a refusal of a rewritten range word.
+    const askedRange = rangeStr;
+    rangeStr = wholeOrOpenEndedRange(rangeStr, totalLines) ?? rangeStr;
 
     // 2026-07-11c: agents repeatedly write comma-separated ranges
     // ("160,195") instead of the dash form; rewrite to "A-B" before the
@@ -1609,7 +1669,7 @@ export async function resolveSlice(
     if (isNaN(startLine) || isNaN(endLine) || startLine < 1 || endLine < startLine) {
       return {
         ok: false,
-        error: "Invalid range: " + rangeStr,
+        error: "Invalid range: " + (askedRange === rangeStr ? rangeStr : `${askedRange} (read as ${rangeStr})`),
         code: "range-invalid",
         total_lines: totalLines,
         next: sliceInvalidRemedyNext(filePath, totalLines, [rangeStr]),
@@ -1828,9 +1888,9 @@ export async function resolveSlice(
     // one-shot per (session, path): composing it here and then dropping it
     // would spend the caller's only warning on a note nobody receives. Left
     // unfired, it can ride a later page.
-    const concernNote = budgetNarrowed
+    const concernNote = budgetNarrowed || !concernNoteForThisWindow
       ? undefined
-      : buildConcernNote(workspace, filePath, lines, startLine, endLine);
+      : buildConcernNote(workspace, filePath, lines, [[startLine, endLine]], shaOfText(content));
 
     // Feature 1 (2026-07-12b2): a successful range slice IS a content-bearing
     // read of this file — record it (even a partial/truncated range: the
@@ -2108,6 +2168,20 @@ export async function resolveSliceRanges(
    *  each window resolves at the fixed caps and `fitSegmentsToBudget` decides,
    *  once, what of the assembled set the budget lets ship. */
   callerBudgetBytes?: number,
+  /**
+   * 2026-10-24 (read-page ceiling): how many windows this call may batch --
+   * `MAX_SLICE_RANGES` unless the caller of THIS function says the windows are
+   * not a caller's batch but one page the read-request store fixed under a byte
+   * budget (`state/readRequestStore.ts`'s `choosePage`, which knows nothing of
+   * the count cap). The cap exists for a caller that names thirty windows by
+   * hand ("that is mode=full, not a 30-way batch"); applied to a fixed page of a
+   * comment-dense file -- whose remainder is dozens of small code windows
+   * between the comment blocks the default policy elides -- it cut every page of
+   * an 18 KB budget to twelve windows and about 4 KB, and an agent paid a round
+   * trip for each. The windows beyond the cap were never lost (the staged
+   * request owes them), only slow to arrive.
+   */
+  maxRanges: number = MAX_SLICE_RANGES,
 ): Promise<ResolveSliceRangesResult> {
   const totalLines = countLines(content);
   const wholeFileRangeHint = canonicalToolCall("tl_read_file", {
@@ -2122,7 +2196,7 @@ export async function resolveSliceRanges(
     const trimmed = String(raw).trim();
     if (trimmed.length === 0 || seen.has(trimmed)) continue;
     seen.add(trimmed);
-    if (wanted.length >= MAX_SLICE_RANGES) {
+    if (wanted.length >= maxRanges) {
       overflowRequests.push(trimmed);
       continue;
     }
@@ -2155,7 +2229,7 @@ export async function resolveSliceRanges(
       remaining.push(range);
       continue;
     }
-    const one = await resolveSlice(workspace, filePath, content, undefined, range);
+    const one = await resolveSlice(workspace, filePath, content, undefined, range, undefined, false);
     if (!one.ok) {
       invalidRanges.push({ range, error: one.error });
       continue;
@@ -2175,9 +2249,18 @@ export async function resolveSliceRanges(
     }
     usedBytes += segmentBytes;
     segments.push(segment);
-    if (concernNote === undefined && one.data.concern_note !== undefined) {
-      concernNote = one.data.concern_note;
-    }
+  }
+  // 2026-10-19: the concern note is judged once, over every window this
+  // reply serves (see `buildConcernNote`). A window the response cap pushed
+  // into `remaining_ranges` is not served here, and its own `next` reads it.
+  if (segments.length > 0) {
+    concernNote = buildConcernNote(
+      workspace,
+      filePath,
+      content.split(/\r?\n/),
+      segments.map((segment) => spanOf(segment.range)).filter((span): span is [number, number] => span !== undefined),
+      shaOfText(content),
+    );
   }
 
   if (segments.length === 0) {
@@ -2223,7 +2306,7 @@ export async function resolveSliceRanges(
         `served ${served} of ${served + windowsLeft} requested ranges`
         + ` (response cap ${SLICE_RANGES_TOTAL_CAP_BYTES}B`
         + (overflowRequests.length > 0 ? `, max ${MAX_SLICE_RANGES} ranges/call` : "")
-        + `); remaining_ranges names the rest`,
+        + `); the unserved ranges and a same-handle next follow`,
       );
     }
     if (invalidRanges.length > 0) {

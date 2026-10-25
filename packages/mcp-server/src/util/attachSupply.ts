@@ -364,6 +364,25 @@ export function supplyRefusalGuidance(result: Record<string, unknown>): Record<s
     // detail names the only safe transition (use the minting cwd, omit cwd, or
     // re-read by path), so keep the executable continuation absent here.
     if (isClosedWorkspaceHandleRefusal || isBlastRadiusRefusal) return refused;
+    // A failed edit can already carry its complete current source window.
+    // A default whole-file read would make the caller fetch those bytes again.
+    // Leave retry:"call" to refine the failed edit; incomplete/relocated
+    // diagnostics retain the ordinary read recovery below.
+    const failedItem = refused["failed_item"];
+    const nearest = refused["nearest_match"];
+    if ((codeRaw === "search-not-unique" || codeRaw === "not-found")
+      && failedItem !== null && typeof failedItem === "object"
+      && Number.isInteger((failedItem as Record<string, unknown>)["index"])
+      && nearest !== null && typeof nearest === "object") {
+      const current = nearest as Record<string, unknown>;
+      const range = typeof current["range"] === "string" ? /^(\d+)-(\d+)$/.exec(current["range"]) : null;
+      if (range !== null && current["out_of_range"] !== true
+        && typeof current["code"] === "string" && current["code"].length > 0
+        && Number(range[1]) > 0 && Number(range[2]) >= Number(range[1])
+        && current["code"].split("\n").length === Number(range[2]) - Number(range[1]) + 1) {
+        return refused;
+      }
+    }
     const candidates = Array.isArray(candidatesRaw) ? (candidatesRaw as unknown[]) : undefined;
     const firstCandidate = candidates && typeof candidates[0] === "string" ? (candidates[0] as string) : undefined;
     const hasPath = typeof pathRaw === "string" && pathRaw.length > 0;

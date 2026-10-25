@@ -14,7 +14,7 @@ The TokenLighten Workspace view is for developers using GitHub Copilot, the VS C
 - Local estimates of this workspace's token and billing reduction rates.
 - Export of privacy-safe usage logs for this workspace.
 - Japanese and English display languages.
-- An optional startup check for newer VSIX releases published on GitHub.
+- Configurable checks and automatic installation of newer VSIX releases published on GitHub.
 
 For normal installation or recovery, use **Set up this workspace**. It installs or repairs the TokenLighten MCP configuration and managed AI instructions in one operation, then enables TL for the workspace. Existing project instructions outside TokenLighten-managed sections are preserved. Shared guides now default to `compact`; set `tokenlighten.guideProfile` to `full` or `medium` explicitly for longer instructions. The existing dedicated Copilot guide is retained.
 
@@ -45,9 +45,17 @@ The coding agent and its model do not change. TokenLighten reduces the amount of
 
 No separate `tl` installation is required. The packaged VSIX includes a zero-install CLI and MCP server, including the parsers and WASM assets they need.
 
-TokenLighten performs repository indexing and context selection locally. The extension does not add another model or upload repository contents on its own. Your selected coding agent remains responsible for any model requests it makes.
+TokenLighten performs repository indexing and context selection locally. Optional semantic search uses a local embedding model downloaded at your request and is off by default. This engine does not send repository content to a model service. Your selected coding agent remains responsible for any model requests it makes.
 
 Workspace-changing actions require a trusted VS Code workspace.
+
+## Local analysis engines
+
+Open **TokenLighten: Manage Local Analysis Engines** to configure typed symbol resolution,
+compound requests and local multilingual semantic search. Typed resolution
+and semantic search are off by default; model weights require an explicit
+download. The panel also offers language-server configuration and licenses.
+See the [local analysis guide](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.0/release-docs/local-analysis.md).
 
 ## Settings
 
@@ -55,7 +63,9 @@ Workspace-changing actions require a trusted VS Code workspace.
 |---|---:|---|
 | `tokenlighten.enabled` | `true` | Enables or disables TokenLighten for the current workspace. |
 | `tokenlighten.language` | `auto` | Uses the VS Code display language automatically, or selects Japanese or English explicitly. |
-| `tokenlighten.updateCheck.enabled` | `true` | Checks GitHub Releases for a newer VSIX when VS Code starts. |
+| `tokenlighten.autoUpdate.enabled` | `true` | Downloads and installs newer VSIX releases automatically; disable it for notifications only. |
+| `tokenlighten.updateCheck.enabled` | `true` | Checks GitHub Releases at startup and every six hours. Disabling it also stops automatic updates. |
+| `tokenlighten.confirmResetOnUpdate` | `true` | After an update, asks whether to reset TokenLighten user settings that differ from the new defaults, again at the next startup if the notification is closed unanswered. Workspace and folder settings are never changed. |
 | `tokenlighten.guideProfile` | `compact` | Shared guide written during workspace setup; explicit `full` or `medium` choices take precedence. |
 | `tokenlighten.toolSurface` | `full` | MCP capabilities: `full` or the smaller code/plain-text/config `code` surface. Reconnect after changing it. |
 | `tokenlighten.copilotGuide` | `standalone` | Copilot instructions: dedicated guide, shared AGENTS.md, or keep existing configuration. |
@@ -75,7 +85,9 @@ The status bar shows whether the local TokenLighten workspace data is fresh, ref
 
 ## Updates from GitHub
 
-When `tokenlighten.updateCheck.enabled` is enabled, the extension checks published GitHub Releases, including public-beta prereleases, after VS Code finishes starting. If the release version is newer than the installed extension, a notification offers to download the published VSIX from GitHub. The check is best-effort: network or API failures are ignored and never block activation. TokenLighten never installs an update without an explicit user action.
+When `tokenlighten.updateCheck.enabled` is enabled, the extension checks published GitHub Releases, including public-beta prereleases, after VS Code starts and every six hours. With `tokenlighten.autoUpdate.enabled` enabled (the default), a newer VSIX is downloaded and installed automatically; the notification offers to reload the window when convenient. Disable automatic updates for notifications only, or disable update checks to stop both. Checks are best-effort and never block activation.
+
+After TokenLighten is updated to a newer version, it asks whether to reset your TokenLighten user settings to their default values if any of them differs from the new default. Closing the notification without answering asks again at the next startup; once you answer, that version does not ask again. Only user settings are reset; workspace and folder settings are never changed. Choose **Don't Ask Again**, or set `tokenlighten.confirmResetOnUpdate` to `false`, to stop the question.
 
 ## Install from VSIX
 
@@ -86,4 +98,4 @@ npm run package -w tokenlighten-vscode-extension
 code --install-extension packages/vscode-extension/tokenlighten-vscode-extension-<version>.vsix
 ```
 
-See the [project README](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.15.3/README.md) and [public release documentation](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.15.3/release-docs/README.md) for setup, MCP tools, language support, privacy, and licensing.
+See the [project README](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.0/README.md) and [public release documentation](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.0/release-docs/README.md) for setup, MCP tools, language support, privacy, and licensing.

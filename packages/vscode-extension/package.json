@@ -1,7 +1,7 @@
 {
   "name": "tokenlighten-vscode-extension",
   "displayName": "TokenLighten",
-  "version": "0.15.3",
+  "version": "0.16.0",
   "private": true,
   "description": "%extension.description%",
   "publisher": "tokenlighten",
@@ -25,6 +25,14 @@
   },
   "contributes": {
     "commands": [
+      {
+        "command": "tokenlighten.licenses.show",
+        "title": "%command.licenses.show%"
+      },
+      {
+        "command": "tokenlighten.engines.show",
+        "title": "%command.engines.show%"
+      },
       {
         "command": "tokenlighten.status",
         "title": "%command.status%"
@@ -91,11 +99,23 @@
           "scope": "resource",
           "description": "%config.enabled%"
         },
+        "tokenlighten.autoUpdate.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "%config.autoUpdate.enabled%"
+        },
         "tokenlighten.updateCheck.enabled": {
           "type": "boolean",
           "default": true,
           "scope": "application",
           "description": "%config.updateCheck.enabled%"
+        },
+        "tokenlighten.confirmResetOnUpdate": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "%config.confirmResetOnUpdate%"
         },
         "tokenlighten.language": {
           "type": "string",
@@ -118,7 +138,8 @@
           "enum": [
             "full",
             "medium",
-            "compact"
+            "compact",
+            "portable"
           ],
           "default": "compact",
           "scope": "resource",
@@ -161,7 +182,7 @@
     "vscode:prepublish": "npm --prefix ../.. run build && npm run bundle-cli",
     "package": "vsce package --no-dependencies",
     "typecheck:test": "tsc --project tsconfig.test.json",
-    "test:bundle-cli": "node scripts/test-bundle-cli-setup.mjs",
+    "test:bundle-cli": "node scripts/test-bundle-cli-setup.mjs && node scripts/test-bundle-engines.mjs",
     "test": "vitest run && npm run test:bundle-cli"
   },
   "dependencies": {
@@ -176,7 +197,7 @@
     "@types/node": "^20",
     "@types/vscode": "^1.105.0",
     "@vscode/vsce": "^4.0.0",
-    "esbuild": "^0.25.0",
+    "esbuild": "^0.28.0",
     "typescript": "^5.6.3",
     "vitest": "^4.1.11"
   },

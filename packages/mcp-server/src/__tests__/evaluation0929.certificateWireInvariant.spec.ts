@@ -37,6 +37,7 @@ import * as path from "node:path";
 import type { TaskExecutionContract } from "@tokenlighten/types";
 
 import { shortTmpDir } from "./helpers/shortTmpDir.js";
+import { expandedReadNextArguments } from "./helpers/readNext.js";
 import { rmDirWithRetry } from "./helpers/rmDirWithRetry.js";
 import { followNextToEnd, startDevServer, type ChainResult, type ServerHandle } from "./helpers/qualityFirstScenarios.js";
 import { callTool } from "../server.js";
@@ -305,7 +306,55 @@ describe("THE BACKSTOP: a certificate whose cited evidence a late pass withdrew 
   });
 
   it("withdrawing the certified constant window after certification downgrades to discover with a ranged next for exactly that window, then converges", async () => {
-    const ws = makeWorkspace("seam", TS_FILES);
+    // TL_EFF_AUTOFOLLOW=0 (default ON since 2026-10-19): the downgrade's
+    // ranged `next` re-issues the request, which the server now follows in
+    // the same call (next test). This one keeps the downgraded pack itself
+    // on the wire.
+    await withAutofollowOff(async () => {
+      const ws = makeWorkspace("seam", TS_FILES);
+      let withdrawn = 0;
+      setPostCertificationPassForTest((surfaces) => {
+        for (let index = surfaces.length - 1; index >= 0; index--) {
+          if (surfaces[index]!.path === TS_CODES) {
+            surfaces.splice(index, 1);
+            withdrawn += 1;
+          }
+        }
+        setPostCertificationPassForTest(undefined);
+      });
+      const hop0 = await inProcess(ws, { query: Q_NO_PATH, task: { epoch: "new", profile: "answer" } });
+      expect(withdrawn, "the seam must have removed the constant's surface").toBeGreaterThan(0);
+      const decision = hop0["decision"] ?? {};
+      expect(decision.kind, `a certificate may not outlive its evidence; got ${JSON.stringify(decision)}`).not.toBe("act.answer");
+      expect(decision.certificate).toBeUndefined();
+      expect(bodiesOf([hop0])).not.toContain("421");
+      const next = nextOf(hop0);
+      expect(next?.tool).toBe("tl_read_file");
+      // v0.16.0 (release note: "Clients follow a short reference instead of
+      // repeating the full arguments"): a long read `next` is a `{cwd, cursor}`
+      // reference. Expand it -- without consuming its once-only plan -- to see
+      // which window it asks for.
+      const targets = (expandedReadNextArguments(next?.arguments, ws)?.["targets"] ?? []) as Array<{ path?: string; range?: string }>;
+      expect(
+        targets.some((target) => target.path === TS_CODES && target.range === "1-1"),
+        `next must re-read exactly the withdrawn window; got ${JSON.stringify(next)}`,
+      ).toBe(true);
+      // Every non-act outcome keeps an executable way forward, and following it converges.
+      const responses = [hop0];
+      let call = next;
+      for (let hop = 1; hop < 6 && call !== undefined; hop++) {
+        const response = await inProcess(ws, call.arguments);
+        responses.push(response);
+        call = nextOf(response);
+      }
+      const last = responses[responses.length - 1]!;
+      expect(last["decision"]?.kind).toBe("act.answer");
+      for (const value of VALUES) expect(bodiesOf(responses)).toContain(value);
+    });
+  });
+
+  it("default (TL_EFF_AUTOFOLLOW): the downgrade's ranged next runs in the same call, and the one act.answer delivers the window its certificate cites", async () => {
+    const ws = makeWorkspace("seam-followed", TS_FILES);
     let withdrawn = 0;
     setPostCertificationPassForTest((surfaces) => {
       for (let index = surfaces.length - 1; index >= 0; index--) {
@@ -318,30 +367,27 @@ describe("THE BACKSTOP: a certificate whose cited evidence a late pass withdrew 
     });
     const hop0 = await inProcess(ws, { query: Q_NO_PATH, task: { epoch: "new", profile: "answer" } });
     expect(withdrawn, "the seam must have removed the constant's surface").toBeGreaterThan(0);
-    const decision = hop0["decision"] ?? {};
-    expect(decision.kind, `a certificate may not outlive its evidence; got ${JSON.stringify(decision)}`).not.toBe("act.answer");
-    expect(decision.certificate).toBeUndefined();
-    expect(bodiesOf([hop0])).not.toContain("421");
-    const next = nextOf(hop0);
-    expect(next?.tool).toBe("tl_read_file");
-    const targets = (next?.arguments["targets"] ?? []) as Array<{ path?: string; range?: string }>;
-    expect(
-      targets.some((target) => target.path === TS_CODES && target.range === "1-1"),
-      `next must re-read exactly the withdrawn window; got ${JSON.stringify(next)}`,
-    ).toBe(true);
-    // Every non-act outcome keeps an executable way forward, and following it converges.
-    const responses = [hop0];
-    let call = next;
-    for (let hop = 1; hop < 6 && call !== undefined; hop++) {
-      const response = await inProcess(ws, call.arguments);
-      responses.push(response);
-      call = nextOf(response);
-    }
-    const last = responses[responses.length - 1]!;
-    expect(last["decision"]?.kind).toBe("act.answer");
-    for (const value of VALUES) expect(bodiesOf(responses)).toContain(value);
+    // Had the backstop shipped the withdrawn certificate, this reply would be
+    // an act.answer that was never followed and lacks the constant: the
+    // certificate here is the follow-up's, over the window it re-read.
+    expect(hop0["auto_followed"], JSON.stringify(hop0["decision"])).toBeDefined();
+    expect(hop0["decision"]?.kind).toBe("act.answer");
+    expect(hop0["decision"]?.certificate).toBeDefined();
+    for (const value of VALUES) expect(bodiesOf([hop0])).toContain(value);
   });
 });
+
+/** Runs `fn` under TL_EFF_AUTOFOLLOW=0 (the rollback), then restores the caller's value. */
+async function withAutofollowOff<T>(fn: () => Promise<T>): Promise<T> {
+  const saved = process.env["TL_EFF_AUTOFOLLOW"];
+  process.env["TL_EFF_AUTOFOLLOW"] = "0";
+  try {
+    return await fn();
+  } finally {
+    if (saved === undefined) delete process.env["TL_EFF_AUTOFOLLOW"];
+    else process.env["TL_EFF_AUTOFOLLOW"] = saved;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // 4. Metamorphic acceptance (eval §8), spawned dev servers, fresh fixtures.

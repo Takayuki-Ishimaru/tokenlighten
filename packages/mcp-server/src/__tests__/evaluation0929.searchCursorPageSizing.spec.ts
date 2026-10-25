@@ -219,7 +219,11 @@ function buildManyFilesFixture(ws: string): void {
 describe("many-file cursor pagination stays exact under the dynamic per-file cap", () => {
   it("every file's every line is delivered exactly once across the chain (no file individually near the cap)", async () => {
     const ws = freshWorkspace("many-files");
-    const server = startDevServer(ws, "default");
+    // 2026-10-19: with TL_EFF_FIND_SNIPPET_CAP (default ON) the first page
+    // carries snippets for ten of the 40 files and fits the 8192-byte budget
+    // whole, so no cursor chain is staged and the 30 lines-only files' ids are
+    // never quoted. Pinned off so the paged chain this case audits still runs.
+    const server = startDevServer(ws, "default", { extraEnv: { TL_EFF_FIND_SNIPPET_CAP: "0" } });
     servers.push(server);
     await server.initialize();
     buildManyFilesFixture(ws);

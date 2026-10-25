@@ -749,6 +749,14 @@ describe("extractSymbolsRegex — blank line before declaration (line/signature 
     expect(widget!.signature).toBe("export function widget() { return 1; }");
   });
 
+  it("mixed CR, CRLF and LF separators agree on declaration lines and signatures", () => {
+    const src = "// first\r\n\rconst marker = 1;\nexport function widget() { return 1; }\r";
+    const symbols = extractSymbolsRegex(src, "typescript");
+    expect(symbols.find(symbol => symbol.name === "marker")).toMatchObject({ line: 3, signature: "const marker = 1;" });
+    expect(symbols.find(symbol => symbol.name === "widget")).toMatchObject({ line: 4, endLine: 4,
+      signature: "export function widget() { return 1; }" });
+  });
+
   it("multiple consecutive blank lines: reports the declaration's own line, not the first blank line", () => {
     const src = "const a = 1;\n\n\n\nexport function multi() { return 1; }\n";
     const symbols = extractSymbolsRegex(src, "typescript");

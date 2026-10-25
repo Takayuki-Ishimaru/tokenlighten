@@ -317,6 +317,8 @@ export const JA_GLOSSARY: ReadonlyArray<readonly [string, readonly string[]]> = 
   ["カート", ["cart"]],
   ["アイテム", ["item"]],
   ["タイプ", ["type"]],
+  // A language keyword is still a known loanword when indexing excludes it.
+  ["クラス", ["class"]],
   ["テスト", ["test"]],
   ["ビルド", ["build"]],
   ["ルール", ["rule"]],

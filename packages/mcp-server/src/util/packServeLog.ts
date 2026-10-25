@@ -1368,7 +1368,7 @@ function semanticNextArguments(tool: string, args: Record<string, unknown>): Rec
   if (content === "full" || content === "outline" || content === "auto") out["content"] = content;
   else if (Array.isArray(args["handles"]) || mode === "full") out["content"] = "full";
   else if (mode === "skeleton" || mode === "map" || mode === "overview" || mode === "digest") out["content"] = "outline";
-  else if (mode !== "task_pack" && mode !== "closure" && targets.length > 0) out["content"] = "auto";
+  else if (targets.length > 0) out["content"] = "auto";
 
   const select = { ...recordValue(args["select"]) };
   for (const key of ["kind", "comments", "sheet", "rows", "columns", "sections", "slides", "pages"]) {

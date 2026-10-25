@@ -6,8 +6,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, parse, resolve } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { Client } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
 const archive = resolve(process.argv[2] ?? "");
 const match = /^tokenlighten-(\d+\.\d+\.\d+)-(win-x64|darwin-arm64|darwin-x64|linux-x64)\.tgz$/.exec(basename(archive));
@@ -69,7 +69,7 @@ try {
   const sentence = "TokenLighten release archive read is working.";
   writeFileSync(join(workspace, "hello.txt"), sentence + "\n");
   run(tar, ["czf", join(workspace, "sample.tar.gz"), "-C", workspace, "hello.txt"]);
-  client = new Client({ name: "tokenlighten-archive-smoke", version: "1.0.0" });
+  client = new Client({ name: "tokenlighten-archive-smoke", version: "1.0.0" }, { versionNegotiation: { mode: "legacy" } });
   await client.connect(new StdioClientTransport({ command: installedNode, args: [installedCli, "mcp", "start", "--stdio", "--no-prereq-check", "--workspace", workspace], cwd: workspace, env, stderr: "inherit" }));
   assert.equal(client.getServerVersion()?.version, version);
   const listed = await client.listTools();

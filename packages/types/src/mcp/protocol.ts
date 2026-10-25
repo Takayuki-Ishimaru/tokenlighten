@@ -39,6 +39,7 @@
 // ---------------------------------------------------------------------------
 
 import type { ImpactSurface } from "./locate-impact.js";
+import type { LikelyEditHint } from "./task-pack.js";
 import type {
   ReadTaskPackResult,
   ReadTextResult,
@@ -369,9 +370,11 @@ export type Evidence = {
   handle: string;
 
   /**
-   * Required on FRESH evidence (§3.3's addressing triple). Absent only on
+   * Required on FRESH evidence (§3.3's addressing triple). Absent on
    * `PriorEvidence`, where absence means the caller already holds the
-   * addressing (receipt compaction, §2.3).
+   * addressing (receipt compaction, §2.3), and — only in a reply whose
+   * `evidence_note` says so — on a row of a run of rows of one file: see
+   * `GroupedEvidence`.
    */
   path?: string;
 
@@ -419,9 +422,56 @@ export type Evidence = {
    * passed `surfaceRoles` and gets evidence with no `role` learns that the
    * selector did not bind, which is the readback [R4-2] exists to give it.
    * Additive under §1.4(a).
+   *
+   * 2026-10-23 (TL_EFF_REPLY_COMPACT, default ON): a call that passed NO
+   * `surfaceRoles` has nothing to read back, so a `read.task_pack` row the
+   * server classified `"unknown"` leaves `role` off — for that call absence
+   * covers both "not classified" and `"unknown"`. A call that passed
+   * `surfaceRoles` keeps `"unknown"` as an emitted value, so the readback
+   * above is unchanged for it — and so is a continuation page (a cursor, a
+   * `qref` re-pack) of a task whose first request passed them, though the
+   * page's own call names no roles.
    */
   role?: SurfaceRole;
+
+  /**
+   * Where to look or act next on THIS surface; carried on the first row of a
+   * surface the server marks as worth inspecting or editing, and kept beyond
+   * A.2.7's seven members as a disclosed deviation (decisionWire.ts
+   * `EVIDENCE_KEPT_BEYOND_APPENDIX`). Advisory, never a call: the decision's
+   * `next` is the only executable continuation. An entry is
+   * `{kind, handle, confidence}` on the row's own handle.
+   *
+   * 2026-10-23 (TL_EFF_REPLY_COMPACT, default ON): the GENERIC pair — an
+   * `inspect-slice` and a `handle-scoped-edit` hint on the row's own handle at
+   * confidence 0.5/0.4 or 0.85/0.75, which carries nothing its row does not —
+   * ships as its kinds, `["inspect-slice","handle-scoped-edit"]`. Any other
+   * value ships as the entries it is.
+   */
+  likely_edits?: Array<LikelyEditHint | string>;
 };
+
+/**
+ * An `Evidence` row of a reply that states it was grouped — a top-level
+ * `evidence_note` equal to the note below (TL_EFF_EVIDENCE_PATH_GROUPS,
+ * 2026-10-23, default OFF). Within such a reply, a run of two or more
+ * consecutive rows on the same `path` is written with its address once:
+ *   - the first row of the run carries `handle` and `path`;
+ *   - every later row of the run omits `path`;
+ *   - a later row omits `handle` too when it is the handle of the row above
+ *     (the windows of one surface share the surface's handle; the owed windows
+ *     of a continuation page are a surface each and keep theirs).
+ * A row without `path` is on the file of the row above it, and a row without
+ * `handle` is on the handle of the row above it; a row that carries either
+ * carries its own. A single-row file is written as before, and a reply with
+ * no such run — or whose runs would save fewer than 64 bytes net of the note —
+ * has no `evidence_note` and is not grouped. The writer never
+ * groups an array that holds a row without a `path` and a `handle` of its own
+ * (a `PriorEvidence` row, for one), so inheriting is unambiguous wherever the
+ * note is present. The note reads: "a row without path or handle repeats the
+ * one above".
+ */
+export type GroupedEvidence = Omit<Evidence, "handle"> & { handle?: string };
 
 /** Evidence that serves NEW content. §3.3: all three of handle/path/range. */
 export type FreshEvidence = Evidence & { path: string; range: string };

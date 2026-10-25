@@ -22,8 +22,7 @@
 // state — unreachable through a spawned child server.
 
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
-import { spawn, type ChildProcess } from "child_process";
-import { createRequire } from "node:module";
+import { type ChildProcess } from "child_process";
 import { fileURLToPath } from "node:url";
 import * as fs from "fs";
 import * as os from "os";
@@ -37,9 +36,9 @@ import {
   resetClockForTest,
   resetAll,
 } from "../util/session.js";
+import { TSX_NODE_ARGS } from "./helpers/tsxNode.js";
+import { pooledSpawn } from "./helpers/serverPool.js";
 
-const nodeRequire = createRequire(import.meta.url);
-const TSX_CLI = nodeRequire.resolve("tsx/cli");
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BIN_TS = path.resolve(HERE, "..", "bin.ts");
 
@@ -67,9 +66,9 @@ function writeFile(dir: string, rel: string, content: string): void {
 }
 
 function startServer(opts: { cwd: string; args: string[]; env?: Record<string, string> }): ServerHandle {
-  const child: ChildProcess = spawn(
+  const child: ChildProcess = pooledSpawn(
     process.execPath,
-    [TSX_CLI, "--liftoff-only", BIN_TS, ...opts.args],
+    [...TSX_NODE_ARGS, BIN_TS, ...opts.args],
     { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", env: { ...process.env, ...(opts.env ?? {}) } },
   );
 
@@ -551,21 +550,31 @@ describe("Feature 3 — concern_note on a small_file outline serve that hides a 
     servers.push(srv);
     await srv.initialize();
 
-    await srv.rpc(2, "tools/call", {
+    // 2026-10-19: this test used to prime with a task_pack, whose evidence
+    // covered the WHOLE 183-line file, so the slice's note named L145-148 —
+    // lines the caller already held. The note no longer names held lines
+    // (readPathAdviceAgreement.spec.ts b), so the receipt is reached the way
+    // it still carries a note: the window is held by an earlier slice taken
+    // before any concern token existed, and the token hits stay unserved.
+    const first = parseToolResult(await srv.rpc(2, "tools/call", {
       name: "tl_read_file",
-      arguments: { mode: "task_pack", query: "integral clamp", path: "src/gain_controller.ts" },
+      arguments: { mode: "slice", path: "src/gain_controller.ts", range: "1-70" },
+    }));
+    expect(first["concern_note"]).toBeUndefined();
+    await srv.rpc(3, "tools/call", {
+      name: "tl_search_files",
+      arguments: { action: "find", query: "integral clamp" },
     });
 
-    const sliceRes = await srv.rpc(3, "tools/call", {
+    const sliceRes = await srv.rpc(4, "tools/call", {
       name: "tl_read_file",
       arguments: { mode: "slice", path: "src/gain_controller.ts", range: "1-70" },
     });
     const sliceData = parseToolResult(sliceRes);
     // RESOLVED (2026-08-14, product fix): this slice legitimately collapses to
-    // kind:"read.receipt" (code-unchanged) — the prior task_pack call's
-    // evidence already covered the WHOLE 183-line file, so range 1-70 is fully
-    // subsumed and the caller holds those bytes. The receipt is the right
-    // member. What was wrong is that `KEPT_ON_RECEIPT` dropped `concern_note`,
+    // kind:"read.receipt" (code-unchanged) — the earlier slice already served
+    // 1-70, so the caller holds those bytes. The receipt is the right member.
+    // What was wrong is that `KEPT_ON_RECEIPT` dropped `concern_note`,
     // which — unlike the deliberate `summary`/prose-`note` drops (those restate
     // the same residency fact) — discloses an UNRELATED one: a session-query
     // hit OUTSIDE the vouched window, produced by a guard that fires once per
@@ -574,10 +583,11 @@ describe("Feature 3 — concern_note on a small_file outline serve that hides a 
     // BYTES, never the guidance").
     expect(sliceData["kind"]).toBe("read.receipt");
     expect(typeof sliceData["concern_note"]).toBe("string");
+    expect(String(sliceData["concern_note"])).toMatch(/145-148/);
 
     // The outline path shares the once-per-(session,file) dedupe with the
     // slice path — no second note for the same file.
-    const outlineRes = await srv.rpc(4, "tools/call", {
+    const outlineRes = await srv.rpc(5, "tools/call", {
       name: "tl_read_file",
       arguments: { mode: "small_file", path: "src/gain_controller.ts", content: "outline" },
     });

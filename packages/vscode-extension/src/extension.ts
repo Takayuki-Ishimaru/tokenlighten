@@ -10,7 +10,9 @@ import { spawnTl } from "./cli.js";
 import { registerMcpProvider } from "./mcpProvider.js";
 import { registerHostActivation, removeOwnHostActivationOverrides } from "./hostActivation.js";
 import { registerControlCenter } from "./sidebar.js";
-import { checkForExtensionUpdate } from "./updateChecker.js";
+import { registerExtensionUpdateChecks } from "./updateChecker.js";
+import { registerSettingsResetPrompt } from "./settingsReset.js";
+import { registerLicenseCommands } from "./licenses.js";
 import {
   invalidateWorkspaceConfigured,
   workspaceActivationState,
@@ -20,11 +22,16 @@ import {
 let statusBar: StatusBarManager | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  // First, before any other module writes globalState: without a version
+  // record, an update is told apart from a first install by the state an
+  // earlier activation left there (settingsReset.ts).
+  registerSettingsResetPrompt(context);
   statusBar = new StatusBarManager();
   const bar = statusBar;
   context.subscriptions.push({ dispose: () => statusBar?.dispose() });
 
   registerControlCenter(context);
+  registerLicenseCommands(context);
   registerSetupCommand(context, bar);
   registerCommands(context, bar);
   registerMcpProvider(context);
@@ -32,7 +39,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // `.vscode/mcp.json`: syncs `tokenlighten.enabled` and the native-session
   // bypass into each folder's override file now, and on every change.
   registerHostActivation(context);
-  void checkForExtensionUpdate(context);
+  registerExtensionUpdateChecks(context);
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((event) => {
