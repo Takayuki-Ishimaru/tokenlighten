@@ -1711,7 +1711,7 @@ export function qualifiedMemberPairsIn(clause: string): QualifiedMemberPair[] {
 /** A short, purely-grammatical EN stoplist — determiners/aux-verbs/WH-words/imperative-question verbs common to every question shape above, never project or fixture vocabulary (mirrors jaGlossary.ts's own standing rule, applied to English). */
 const EN_CONCEPT_STOPWORDS = new Set([
   "the", "and", "for", "are", "was", "were", "what", "which", "who", "how", "under", "when", "does", "did", "that",
-  "this", "from", "with", "its", "explain", "describe", "show", "tell", "walk", "trace", "identify", "confirm",
+  "this", "from", "with", "its", "explain", "describe", "show", "tell", "give", "walk", "trace", "identify", "confirm",
   "check", "through", "there", "have", "you", "we", "does", "not", "any", "all", "each", "into", "onto", "about",
   "conditions", "condition", "callers", "caller", "please", "can", "could", "should", "would", "will",
 ]);
@@ -1867,7 +1867,7 @@ const JA_SCRIPT_CHARS = "\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}
 /** What hands a point to its predicate: a case particle or a topic marker (〜について, 〜とは, 〜のことを). */
 const JA_PREDICATE_LEAD = "(?:について(?:は|も)?|に関して(?:は|も)?|とは|って|のこと(?:を|は|が)?|[をはがも])";
 /** Manner adverbs a request verb commonly takes (「…を詳しく教えて」「…をそれぞれ説明して」). */
-const JA_REQUEST_ADVERB = "(?:詳しく|詳細に|簡単に|簡潔に|具体的に|丁寧に|手短に|ざっくり(?:と)?|ざっと|まとめて|すべて|全て|全部|それぞれ|ひとつずつ|一つずつ|順番に|順に|一覧で|改めて|もう一度)";
+const JA_REQUEST_ADVERB = "(?:(?:実装|ソース(?:コード)?|コード)に(?:基づいて|基づき|即して)|詳しく|詳細に|簡単に|簡潔に|具体的に|丁寧に|手短に|ざっくり(?:と)?|ざっと|まとめて|すべて|全て|全部|それぞれ|ひとつずつ|一つずつ|順番に|順に|一覧で|改めて|もう一度)";
 /**
  * Read-request verbs in a request form: the te-form or imperative of
  * 教える/述べる/調べる/見せる/知らせる/聞かせる/挙げる/示す/読む, and the
@@ -1889,7 +1889,7 @@ const JA_ASK_PREDICATE = "(?:(?:の(?:説明|解説|詳細|一覧))?(?:を|が)?
 const JA_REQUEST_PREDICATE_RE = new RegExp(
   "(?:"
     // A request verb, a desire or a continuative — after a lead, or at a non-Japanese boundary.
-    + `(?:${JA_PREDICATE_LEAD}\\s*(?:${JA_REQUEST_ADVERB}\\s*)?|(?<![${JA_SCRIPT_CHARS}])(?:${JA_REQUEST_ADVERB}\\s*)?)`
+    + `(?:${JA_PREDICATE_LEAD}\\s*(?:${JA_REQUEST_ADVERB}\\s*){0,3}|(?<![${JA_SCRIPT_CHARS}])(?:${JA_REQUEST_ADVERB}\\s*){0,3})`
     + `(?:${JA_REQUEST_VERB}${JA_REQUEST_ENDING}|${JA_DESIRE_PREDICATE}|${JA_REQUEST_CONTINUATIVE})`
     // A question's interrogative — after a topic/case particle, or at a non-Japanese boundary.
     + `|(?:(?:とは|って|は|が)\\s*|(?<![${JA_SCRIPT_CHARS}]))${JA_QUESTION_PREDICATE}`

@@ -30,6 +30,7 @@ import { clearServedSurfaces } from "../util/packServeLog.js";
 // TL-REVIEW-2: pure window arithmetic (formatCompress.ts has no imports — no cycle).
 import { spansExcludingWindows } from "../util/formatCompress.js";
 import { wholeOrOpenEndedRange } from "../util/rangeWords.js";
+import { explicitEditConstraintPaths, violatesExplicitEditConstraint, type ExplicitEditConstraint } from "./explicitEditConstraints.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -751,6 +752,9 @@ export interface WorkspaceSession {
      */
     surfaceRoles?: true;
   } | undefined;
+
+  /** User prohibitions survive same-task repacks independently of frontier membership. */
+  explicitEditConstraints?: ExplicitEditConstraint[];
 
   /** Per-path full-read tracking. Key is workspace-relative or absolute path. */
   fullExpansionsPerPath: Map<string, PathExpansionEntry>;
@@ -2178,6 +2182,10 @@ export function rememberTaskQuery(
   const ref = taskQueryRef(workspaceRoot, normalized);
   const session = getSession(workspaceRoot);
   const previous = session.activeTaskQuery;
+  const prohibitedPaths = explicitEditConstraintPaths(normalized);
+  if (prohibitedPaths.length > 0 && !session.explicitEditConstraints?.some((constraint) => constraint.query === normalized)) {
+    (session.explicitEditConstraints ??= []).push({ query: normalized, paths: prohibitedPaths });
+  }
   const carriedOver = previous?.ref === ref;
   const effectiveBinding = typeof taskBinding === "string" && taskBinding !== ""
     ? taskBinding
@@ -2357,7 +2365,9 @@ export function resolveTaskQueryRefSurfaceRoles(workspaceRoot: string, ref: stri
  * an explicit `taskEpoch:"new"` purely by surviving a restart in between.
  */
 export function clearTaskQueryRef(workspaceRoot: string): void {
-  getSession(workspaceRoot).activeTaskQuery = undefined;
+  const session = getSession(workspaceRoot);
+  session.activeTaskQuery = undefined;
+  session.explicitEditConstraints = undefined;
   clearPersistedQueryRef(workspaceRoot);
 }
 
@@ -6970,6 +6980,36 @@ export function guardExecutionEdit(
   // flag.
   // -----------------------------------------------------------------------
   const session = getSession(workspaceRoot);
+  // A served context file is normally editable; an explicit user prohibition
+  // is a different condition and cannot be relaxed by frontier recovery.
+  const activeQuery = session.activeTaskQuery?.query ?? session.executionFence?.epochQuery ?? "";
+  const constraints = session.explicitEditConstraints ?? [{ query: activeQuery, paths: explicitEditConstraintPaths(activeQuery) }];
+  const prohibited = requestedEditTargets(args, resolveHandlePath).find((target) =>
+    constraints.some((constraint) => violatesExplicitEditConstraint(workspaceRoot, target.path, constraint)));
+  if (prohibited !== undefined) {
+    const query = [...new Set(constraints.map((constraint) => constraint.query))].join("\n");
+    const lane = currentSessionLane();
+    return {
+      allowed: false,
+      refusal: {
+        ok: false,
+        reason: "frontier-read-only",
+        field: prohibited.field,
+        retry: "new-task",
+        retry_same_call: false,
+        detail: `The task explicitly prohibits modifying ${prohibited.path}. Nothing was written. Resume the original request; recovery must preserve its constraints.`,
+        next_call: {
+          tool: "tl_read_file",
+          arguments: {
+            query,
+            task: { epoch: "new", profile: "generic" },
+            ...(workspaceRoot ? { cwd: workspaceRoot } : {}),
+            ...(lane !== "" ? { lane } : {}),
+          },
+        },
+      },
+    };
+  }
   const certified = session.certifiedDecision;
   const marker = certifiedFrontierMarkerFor(workspaceRoot, args, resolveHandlePath);
   if (frontierStrictWritesEnabled() && certified !== undefined && marker !== undefined) {

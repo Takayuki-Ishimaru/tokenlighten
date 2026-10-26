@@ -23939,7 +23939,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             // Refuse loudly instead — the single-edit (non-batch) path already
             // refuses this exact shape (falls through to searchReplaceEdit's
             // "empty-search" error); this closes the SAME gap for edits[].
-            if (effectiveRange && entryContent === undefined && (entry["search"] === undefined || entry["search"] === "")) {
+            if (effectiveRange !== undefined && entryContent === undefined && (entry["search"] === undefined || entry["search"] === "")) {
               // P4.3 (2026-08-02): this is also the response to the server's
               // OWN pre-C4 prescribed next_call (bare {handle} entries), which
               // is where T05c rep0 abandoned TL. The message stays BYTE-
@@ -23972,7 +23972,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
                 },
               });
             }
-            if (effectiveRange && entryContent !== undefined && entry["search"] === undefined && entry["replace"] === undefined) {
+            if (effectiveRange !== undefined && entryContent !== undefined && entry["search"] === undefined && entry["replace"] === undefined) {
               // {handle, range, content} (anchor) / {handle, content} (range
               // handle): range-content replacement.
               typedEdits.push({
@@ -23984,7 +23984,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
                 ...anchorCas,
                 ...(blastAcknowledged ? { blastAcknowledged: true } : {}),
               });
-            } else if (effectiveRange) {
+            } else if (effectiveRange !== undefined) {
               // {handle[, range], search, replace}: range-scoped replace-all.
               // No CAS here — a search string IS its own content proof, so this
               // shape never depended on line coordinates alone.
@@ -24091,6 +24091,8 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
                   search: "",
                   replace: "",
                   content: String(entry["content"]),
+                  // Preserve explicit ranges, including invalid/empty ones for refusal.
+                  ...(entry["range"] !== undefined ? { range: String(entry["range"]) } : {}),
                   ...(blastAcknowledged ? { blastAcknowledged: true } : {}),
                 });
                 continue;
@@ -24123,6 +24125,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             path: bareEntryPath,
             search: String(entry["search"] ?? ""),
             replace: String(entry["replace"] ?? ""),
+            ...(entry["range"] !== undefined ? { range: String(entry["range"]) } : {}),
             ...(uniqueMatchBatch ? { uniqueMatch: true } : {}),
             ...(entry["target"] === "all" ? { target: "all" as const } : {}),
           });
@@ -24537,12 +24540,15 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             if (!preCheckAutoResolve.ok) {
               return toolStructuredError(preCheckAutoResolve.failure as unknown as Record<string, unknown>);
             }
-            const wholeFileRangeAutoResolve = `1-${countLines(existingCheckForContentMsg)}`;
-            if (args["precondition"] !== "expected-hash") {
+            const wholeFileRangeAutoResolve = args["range"] !== undefined
+              ? String(args["range"])
+              : `1-${countLines(existingCheckForContentMsg)}`;
+            const autoResolveSpan = parseBlastRange(wholeFileRangeAutoResolve);
+            if (args["precondition"] !== "expected-hash" && autoResolveSpan !== null) {
               const blast = measureBlastRadius({
                 fileText: existingCheckForContentMsg,
-                spanStart: 1,
-                spanEnd: countLines(existingCheckForContentMsg),
+                spanStart: autoResolveSpan.start,
+                spanEnd: autoResolveSpan.end,
                 replacementText: String(args["content"] ?? ""),
               });
               if (blast !== null) {

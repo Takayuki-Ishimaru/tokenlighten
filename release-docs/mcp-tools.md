@@ -141,6 +141,18 @@ tl mcp start --stdio --workspace /path/to/project
 
 For command details, run `tl help`. See [Getting started](getting-started.md) for setup and operational notes.
 
+## v0.16.1 updates
+
+An explicit `edits[].range` bounds both replacement content and
+search-and-replace for path- or handle-addressed items. Invalid ranges and
+off-range searches refuse the entire batch without writes. Top-level
+`range` is not an advertised field.
+
+Explicit file-edit prohibitions remain enforced through same-task context
+reads and recovery. English follow-up conditions and callers keep both
+named subjects; Japanese requests to explain from the implementation do
+not add spurious search subjects.
+
 ## v0.16.0 updates
 
 Follow-up reads return requested unserved ranges under the same task handle.

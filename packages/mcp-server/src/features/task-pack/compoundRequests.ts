@@ -102,9 +102,11 @@ function inheritsSubject(text: string, facets: readonly FacetRequirement[], cont
   if (clauseNamesOwnFacetSubject(text)) return false;
   if (context.header) return true;
   if (/\b(?:it|its|itself|them|their|this|that)\b|(?:それ|その|これ|この)/iu.test(text)) return true;
+  // A read imperative can introduce the same facet-only continuation.
+  const continuation = text.replace(/^(?:please\s+)?(?:give|show|list|describe|explain|provide|tell(?:\s+me)?)\s+/iu, "");
   // A noun-only facet continuation can inherit; an unrelated prose question cannot.
-  return facets.length > 0 && !REQUEST_HEAD_RE.test(text)
-    && /^(?:(?:the|all|its|their)\s+)?(?:callers?|return(?:ed)?\s+values?|defaults?|conditions?|criteria|rules?|limits?|constants?|retry\s+(?:conditions?|rules?|statuses)|flow)\b|^(?:戻り値|返り値|既定値|条件|呼び出し元|呼び出し箇所|処理の流れ)/iu.test(text);
+  return facets.length > 0 && !REQUEST_HEAD_RE.test(continuation)
+    && /^(?:(?:the|all|its|their)\s+)?(?:callers?|return(?:ed)?\s+values?|defaults?|conditions?|criteria|rules?|limits?|constants?|retry\s+(?:conditions?|rules?|statuses)|flow)\b|^(?:戻り値|返り値|既定値|条件|呼び出し元|呼び出し箇所|処理の流れ)/iu.test(continuation);
 }
 
 /** Names in a payload or a noun refinement do not establish a new request. */
@@ -257,9 +259,16 @@ export function planCompoundRequest(
   const namedScopes: SubjectContext[] = [];
   const editScopes: SubjectContext[] = [];
   let context: SubjectContext | undefined;
+  let sentenceContext: SubjectContext | undefined;
+  let subjectSentenceEnded = true;
   for (const text of groupEvaluationData(source, splitRequest(source))) {
     const own = subjectContext(text);
     const parsedFacets = extractFacetRequirements(text);
+    const parsedItems = extractRequestItems(text, index);
+    if (parsedItems.length === 0 && parsedFacets.length === 0 && !hasSubjects(own)) {
+      constraints.push(text);
+      continue;
+    }
     if (EDIT_HEAD_RE.test(text)) editScopes.push(own);
     const citationNamesSubject = /\b(?:of|about|for|from)\s+(?!the\s+(?:answer|response)\b)[\p{L}\p{N}]/iu.test(text);
     // A parenthetical/tail edit constraint cannot erase its positive question.
@@ -280,8 +289,10 @@ export function planCompoundRequest(
       if (!outstanding.some((entry) => entry.reason === "clause-budget")) outstanding.push({ reason: "clause-budget", status: "could-not-determine" });
       continue;
     }
-    const inherited = !hasSubjects(own) && context !== undefined && inheritsSubject(text, parsedFacets, context);
-    const subject = inherited ? context! : own;
+    const continuationContext = /^(?:please\s+)?(?:give|show|list|describe|explain|provide|tell(?:\s+me)?)\s+/iu.test(text)
+      ? sentenceContext ?? context : context;
+    const inherited = !hasSubjects(own) && continuationContext !== undefined && inheritsSubject(text, parsedFacets, continuationContext);
+    const subject = inherited ? continuationContext! : own;
     const localFacets = parsedFacets.map((requirement): FacetRequirement => {
       if (!inherited) return hasSubjects(own) ? { ...requirement, inheritedFromLead: false } : requirement;
       return {
@@ -298,9 +309,14 @@ export function planCompoundRequest(
       id: `cr-${clauses.length + 1}`, text, query: locatorQuery,
       subjects: [...new Set([...subject.identifiers, ...subject.callables])], paths: subject.paths,
       inheritedSubjects: inherited,
-      items: extractRequestItems(text, index), facets: localFacets,
+      items: parsedItems, facets: localFacets,
     });
-    if (hasSubjects(own)) context = own;
+    if (hasSubjects(own)) {
+      sentenceContext = sentenceContext !== undefined && !subjectSentenceEnded
+        ? subjectContext(`${sentenceContext.text} ${own.text}`) : own;
+      subjectSentenceEnded = /[.!?。！？]\s*$/u.test(text);
+      context = own;
+    }
   }
   const leads = requestItemLeads(source);
   const editLeads = leads.filter((lead) => lead.lead !== "read");

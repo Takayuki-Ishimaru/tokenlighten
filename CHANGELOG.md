@@ -2,6 +2,22 @@
 
 User-facing release highlights for TokenLighten.
 
+## 0.16.1
+
+- Explicit `edits[].range` bounds path- and handle-based replacement content
+  and search-and-replace. Invalid ranges and off-range searches refuse the
+  whole batch without writes; surrounding source and line endings are kept.
+- Explicitly prohibited file edits remain blocked across same-task context
+  reads and recovery. A mixed batch is refused before any file changes.
+- English follow-up conditions and callers stay attached to both named
+  functions. Japanese requests to explain from the implementation no longer
+  create extra search subjects.
+
+Upgrade the archive or VSIX, refresh workspace setup and reconnect your
+client. The three tools and canonical top-level request fields are unchanged
+from v0.16.0. See the
+[v0.16.1 release notes](release-docs/github-release-v0.16.1.md).
+
 ## 0.16.0
 
 - Added optional typed symbol resolution and local multilingual semantic

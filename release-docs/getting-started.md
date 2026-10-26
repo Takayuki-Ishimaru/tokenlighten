@@ -78,7 +78,7 @@ Removes the machine install (staged runtime and app files) and TokenLighten-mana
 
 ## Install the VS Code extension without building
 
-Users can download **[tokenlighten-vscode-extension-0.16.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.16.0/tokenlighten-vscode-extension-0.16.0.vsix)** from the v0.16.0 GitHub Release and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
+Users can download **[tokenlighten-vscode-extension-0.16.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.16.1/tokenlighten-vscode-extension-0.16.1.vsix)** from the v0.16.1 GitHub Release and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
 
 Open a trusted project folder, open the TokenLighten view, and choose **Set up this workspace**. This runs the same machine install described above (`tl install --from-extension --clients none`), using VS Code's own Node.js runtime instead of a bundled one: it stages the extension's bundled CLI as the machine install and sets up the current workspace, all in one operation — it does not register other hosts on the machine (Claude Code, Codex); do that separately with `tl clients activate`, or with an archive's `tl-setup`. Remove it with **TokenLighten: Uninstall TokenLighten from This Machine** from the command palette, or the absolute `tl install --uninstall` invocation described in [Uninstall](#uninstall) below.
 
@@ -247,4 +247,4 @@ Run `tl help` for the complete CLI reference. If you do not want TokenLighten ac
 - Deploying to a fleet or a policy-managed machine? See [Managed environments](managed-environments.md).
 - Review the [Privacy, security, and support](privacy-security-support.md) notes before enabling write access.
 - Configure optional [Local analysis engines](local-analysis.md), including model download and language servers.
-- Read the [v0.16.0 release notes](github-release-v0.16.0.md) for the current changes, compatibility, and known limitations.
+- Read the [v0.16.1 release notes](github-release-v0.16.1.md) for the current changes, compatibility, and known limitations.

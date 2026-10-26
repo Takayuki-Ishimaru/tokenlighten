@@ -219,7 +219,7 @@ const STOPWORDS = new Set([
   "their", "there", "where", "which", "about", "explain", "describe",
   "please", "what", "does", "how", "when", "and", "the", "for", "are", "was",
   "were", "have", "has", "had", "not", "you", "our", "its",
-  "also", "plus", "then",
+  "also", "plus", "then", "give",
 ]);
 
 /**
@@ -3965,7 +3965,8 @@ function isGenericClosing(text: string): boolean {
     || PUNCTUATION_ONLY_RE.test(trimmed)
     || GENERIC_CLOSING_EN_RE.test(trimmed)
     || GENERIC_CLOSING_JA_RE.test(trimmed)
-    || isGenericRequestClosingFragment(trimmed);
+    || isGenericRequestClosingFragment(trimmed)
+    || PUNCTUATION_ONLY_RE.test(maskJapaneseRequestPredicates(trimmed).replace(/(?:変更|修正|編集)(?:は)?不要(?:です)?[。.]?/gu, ""));
 }
 
 const AUX_ONLY_RE = /^(?:is|are|was|were|does?|did|it|this|that)$/iu;
