@@ -1,0 +1,4 @@
+# Pinned upstream legal text is hash-verified byte-for-byte, so it must keep
+# its committed bytes on every checkout, including Windows checkouts where
+# core.autocrlf=true would otherwise rewrite LF as CRLF.
+assets/licenses/onnxruntime/* -text
