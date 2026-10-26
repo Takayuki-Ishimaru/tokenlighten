@@ -118,6 +118,18 @@ describe('workspace resolution and advisory probe budgets are independent', () =
     expect(await call('fifth', cacheToken)).toEqual({ kind: 'unresolved', reason: 'typed-pack-budget' });
     expect(backend.resolve).toHaveBeenCalledTimes(16);
   });
+  it('keeps the shared time bound for external calls that consume no local-body attempts', async () => {
+    let now = 1000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    backend.resolve.mockImplementation(async () => {
+      now += 4500;
+      return result('unresolved', 'external-definition');
+    });
+    const cacheToken = {};
+    expect(await call('firstExternal', cacheToken)).toEqual({ kind: 'external', reason: 'external-definition' });
+    expect(await call('laterExternal', cacheToken)).toEqual({ kind: 'unresolved', reason: 'typed-pack-budget' });
+    expect(backend.resolve).toHaveBeenCalledTimes(1);
+  });
   it('retains a finite advisory probe limit without converting it to absence or lexical fallback', async () => {
     backend.resolve.mockResolvedValue(result('unresolved', 'symbol-unresolved'));
     const cacheToken = {};

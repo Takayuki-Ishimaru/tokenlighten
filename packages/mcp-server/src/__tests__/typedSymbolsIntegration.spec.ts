@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
@@ -524,21 +524,28 @@ describe('external namespaces preserve bounded typed discovery', () => {
       + '\n  return REPORT_LIMIT;\n}\n';
     const root = workspace({ 'src/main.ts': source });
     const config = typedConfiguration(); config.compoundRequests.enabled = false;
-    let arguments_: Record<string, unknown> | undefined = { cwd: root,
-      query: 'What is the value of REPORT_LIMIT used by reportSummary?',
-      targets: [{ path: 'src/main.ts', range: '3-10' }], task: { epoch: 'new', profile: 'answer' }, budget: { tokens: 5000 } };
-    const hops: Array<Record<string, any>> = []; let delivered = '';
-    for (let hop = 0; hop < 5 && arguments_; hop++) {
-      const response = await withEngineConfiguration(config, () => callTool('tl_read_file', arguments_!));
-      const part = response.content[0]; if (part?.type !== 'text') throw new Error('Expected textual MCP result.');
-      const result = JSON.parse(part.text); hops.push(result);
-      delivered += '\n' + (result.evidence ?? []).map((entry: { body?: string }) => entry.body ?? '').join('\n');
-      if (result.decision?.kind === 'act.answer') expect(result.decision.certificate.gaps, JSON.stringify(hops)).toBeUndefined();
-      const next = result.decision?.next ?? result.next ?? result.limit?.next;
-      arguments_ = next?.tool === 'tl_read_file' ? next.arguments : undefined;
-    }
-    expect(hops.at(-1)?.decision?.kind, JSON.stringify(hops)).toBe('act.answer');
-    expect(delivered).toContain('const REPORT_LIMIT = 7');
+    // This checks the workspace-body count, using real compiler probes.
+    // Keep that count assertion independent of cold compiler speed on CI;
+    // typedCalleeBudget.spec.ts separately verifies the shared time bound.
+    // AbortSignal deadlines and the per-test timeout still use real timers.
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now());
+    try {
+      let arguments_: Record<string, unknown> | undefined = { cwd: root,
+        query: 'What is the value of REPORT_LIMIT used by reportSummary?',
+        targets: [{ path: 'src/main.ts', range: '3-10' }], task: { epoch: 'new', profile: 'answer' }, budget: { tokens: 5000 } };
+      const hops: Array<Record<string, any>> = []; let delivered = '';
+      for (let hop = 0; hop < 5 && arguments_; hop++) {
+        const response = await withEngineConfiguration(config, () => callTool('tl_read_file', arguments_!));
+        const part = response.content[0]; if (part?.type !== 'text') throw new Error('Expected textual MCP result.');
+        const result = JSON.parse(part.text); hops.push(result);
+        delivered += '\n' + (result.evidence ?? []).map((entry: { body?: string }) => entry.body ?? '').join('\n');
+        if (result.decision?.kind === 'act.answer') expect(result.decision.certificate.gaps, JSON.stringify(hops)).toBeUndefined();
+        const next = result.decision?.next ?? result.next ?? result.limit?.next;
+        arguments_ = next?.tool === 'tl_read_file' ? next.arguments : undefined;
+      }
+      expect(hops.at(-1)?.decision?.kind, JSON.stringify(hops)).toBe('act.answer');
+      expect(delivered).toContain('const REPORT_LIMIT = 7');
+    } finally { clock.mockRestore(); }
   }, 30000);
   it('does not treat a parameter shadowing an imported namespace as external', async () => {
     const source = 'import * as platform from "platform-sdk";\nimport { GoodClient } from "./good.js";\n'
