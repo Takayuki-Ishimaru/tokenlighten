@@ -36,6 +36,7 @@
 // UNQUALIFIED reference to a same-package/imported name, which this module
 // resolves; a namespaced reference is future work.
 
+import ts from "typescript";
 import { declarationHeadShape, maskNonCode } from "./callerExpansion.js";
 import { isProseAcronym } from "./concernRecovery.js";
 
@@ -1452,6 +1453,100 @@ function isTypeAnnotationPosition(masked: string, at: number): boolean {
  * VALUE evidence: the facet never needed the name's own "value", only
  * whatever it returns or does.
  */
+/** Reader/default/path functions connected by actual local calls, including parameter defaults. */
+export function configurationEvidenceSpan(
+  lines: readonly string[], path: string, requestedNames: readonly string[],
+): { start: number; end: number } | undefined {
+  if (!/\.[cm]?[jt]sx?$/iu.test(path) || lines.join("\n").length > 64 * 1024) return undefined;
+  const source = ts.createSourceFile(path, lines.join("\n"), ts.ScriptTarget.Latest, true);
+  const functions = source.statements.filter(ts.isFunctionDeclaration)
+    .filter((node) => node.name !== undefined && node.body !== undefined);
+  const byName = new Map(functions.map((node) => [node.name!.text, node]));
+  const calls = new Map<string, Set<string>>();
+  const readers = new Set<string>();
+  const catches = new Set<string>();
+  for (const node of functions) {
+    const name = node.name!.text;
+    const local = new Set<string>();
+    let parsesJson = false;
+    let readsFile = false;
+    const visit = (child: ts.Node): void => {
+      if (ts.isCatchClause(child)) catches.add(name);
+      if (ts.isCallExpression(child)) {
+        const target = child.expression;
+        if (ts.isIdentifier(target)) local.add(target.text);
+        const called = ts.isIdentifier(target) ? target.text : ts.isPropertyAccessExpression(target) ? target.name.text : "";
+        if (/^read(?:File(?:Sync)?|TextFile)$/u.test(called)) readsFile = true;
+        if (ts.isPropertyAccessExpression(target) && ts.isIdentifier(target.expression)
+          && target.expression.text === "JSON" && target.name.text === "parse") parsesJson = true;
+      }
+      ts.forEachChild(child, visit);
+    };
+    visit(node);
+    calls.set(name, local);
+    if (parsesJson && readsFile) readers.add(name);
+  }
+  if (readers.size === 0) return undefined;
+  const selected = new Set<string>();
+  let capped = false;
+  const follow = (name: string): void => {
+    if (selected.has(name) || !byName.has(name)) return;
+    if (selected.size >= 32) { capped = true; return; }
+    selected.add(name);
+    for (const called of calls.get(name) ?? []) follow(called);
+  };
+  for (const name of readers) follow(name);
+  // A normal reader's catch may supply a fallback around a strict reader.
+  for (const name of catches) if ([...(calls.get(name) ?? [])].some((called) => readers.has(called))) follow(name);
+  if (capped) return undefined;
+  const requested = new Set(requestedNames.map((name) => name.toLowerCase()));
+  let matchingKey = false;
+  const nodes = [...selected].map((name) => byName.get(name)!);
+  const checkKeys = (node: ts.Node): void => {
+    if (ts.isPropertyAssignment(node) && (ts.isIdentifier(node.name) || ts.isStringLiteral(node.name))
+      && requested.has(node.name.text.toLowerCase())) matchingKey = true;
+    ts.forEachChild(node, checkKeys);
+  };
+  for (const node of nodes) checkKeys(node);
+  if (!matchingKey) return undefined;
+  return {
+    start: Math.min(...nodes.map((node) => source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1)),
+    end: Math.max(...nodes.map((node) => source.getLineAndCharacterOfPosition(node.end).line + 1)),
+  };
+}
+
+/** Erase TypeScript type nodes without changing line coordinates or runtime expressions. */
+export function runtimeValueLines(lines: readonly string[], path?: string): readonly string[] {
+  if (path === undefined || !/\.[cm]?tsx?$/iu.test(path)) return lines;
+  const source = lines.join("\n");
+  const parse = (text: string) => ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true,
+    /\.tsx$/iu.test(path) ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  const errors = (file: ts.SourceFile): boolean =>
+    (file as ts.SourceFile & { parseDiagnostics: readonly ts.Diagnostic[] }).parseDiagnostics.length > 0;
+  let file = parse(source);
+  let offset = 0;
+  if (errors(file)) {
+    // A method window is valid inside a class, but not as a source file.
+    const prefix = "class __TypeEvidence__ {\n";
+    file = parse(prefix + source + "\n}");
+    offset = prefix.length;
+    if (errors(file)) return lines;
+  }
+  const chars = source.split("");
+  const visit = (node: ts.Node): void => {
+    // An extends expression evaluates its base; only its type arguments erase.
+    if (ts.isTypeNode(node) && !ts.isExpressionWithTypeArguments(node)) {
+      const start = Math.max(0, node.getStart(file) - offset);
+      const end = Math.min(chars.length, node.end - offset);
+      for (let at = start; at < end; at++) if (chars[at] !== "\n" && chars[at] !== "\r") chars[at] = " ";
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return chars.join("").split("\n");
+}
+
 export function hasValuePositionOccurrence(
   bodyLines: readonly string[],
   hashComment: boolean,
@@ -1472,13 +1567,14 @@ export function hasValuePositionOccurrence(
    * `vscode.workspace.workspaceFolders` use an external API through the
    * alias; no value of the alias is computed with.
    */
-  memberOwnerIsNotRead = false,
+  memberOwnerIsNotRead: boolean | "calls" = false,
 ): boolean {
   if (name.length === 0) return false;
   const skipObjectKeys = objectKeyLangPath !== undefined && OBJECT_KEY_LANG_RE.test(objectKeyLangPath);
   const occurrenceRe = new RegExp(`(?<![\\w$.])${escapeForRegex(name)}(?![\\w$])`, "g");
+  const typesParsed = objectKeyLangPath !== undefined && /\.[cm]?tsx?$/iu.test(objectKeyLangPath);
   let prevTail = "";
-  for (const rawLine of bodyLines) {
+  for (const rawLine of runtimeValueLines(bodyLines, objectKeyLangPath)) {
     const masked = maskNonCode(rawLine, hashComment);
     const lineTail = prevTail;
     prevTail = lastCodeChar(masked) ?? prevTail;
@@ -1486,11 +1582,13 @@ export function hasValuePositionOccurrence(
       const at = match.index ?? -1;
       if (at < 0) continue;
       if (skipObjectKeys && isObjectLiteralKeyPosition(masked, at, name, lineTail)) continue;
-      if (isTypeAnnotationPosition(masked, at)) continue;
+      if (!typesParsed && isTypeAnnotationPosition(masked, at)) continue;
       const after = masked.slice(at + name.length);
       if (/^\s*\(/.test(after)) continue; // name( / new name( -- invoked, not read
       if (RECEIVER_CALL_RE.test(after) && isBareReceiverStatement(masked, at)) continue; // name.method(...) discarded
-      if (memberOwnerIsNotRead) {
+      if (memberOwnerIsNotRead === "calls"
+        && /^\s*\??\.\s*[A-Za-z_$][\w$]*\s*(?:<\s*>\s*)?(?:\?\.)?\s*\(/u.test(after)) continue;
+      if (memberOwnerIsNotRead === true) {
         const member = /^\s*\??\.\s*([A-Za-z_$][\w$]*)/.exec(after)?.[1];
         if (member !== undefined && !/^[A-Z][A-Z0-9_]*$/.test(member)) continue; // name.member -- an API, not a value of name
       }
@@ -1630,6 +1728,74 @@ export function calleeNamesIn(
     }
   }
   return out;
+}
+
+/**
+ * `calleeNamesIn`'s identities with the receiver kept: a member call yields
+ * `{owner: "tax", name: "calculate"}` so two same-named members of DIFFERENT
+ * modules stay two callees instead of deduplicating into one bare name.
+ * Deduplicated by identity, scan order and the caller's own bounds preserved.
+ */
+export function calleeTargetsIn(
+  bodyLines: readonly string[],
+  hashComment: boolean,
+  ownName: string,
+  excludeNames: ReadonlySet<string> = new Set(),
+): Array<{ name: string; owner?: string; qualified?: true }> {
+  const seen = new Set<string>();
+  const out: Array<{ name: string; owner?: string; qualified?: true }> = [];
+  for (const rawLine of bodyLines) {
+    const masked = maskNonCode(rawLine, hashComment);
+    for (const match of masked.matchAll(IDENTIFIER_RE)) {
+      const token = match[0];
+      const at = match.index ?? -1;
+      if (!/^\s*\(/.test(masked.slice(at + token.length))) continue;
+      const before = masked.slice(0, at);
+      const ownerMatch = /([A-Za-z_$][\w$]*)\s*(?:\?\.|\.)\s*$/.exec(before);
+      const owner = ownerMatch !== null && !/(?:\?\.|\.)\s*$/.test(before.slice(0, ownerMatch.index)) ? ownerMatch[1] : undefined;
+      const qualified = /(?:\?\.|\.|::)\s*$/.test(before);
+      const identity = owner === undefined ? `${qualified ? "." : ""}${token}` : `${owner}.${token}`;
+      if (token === ownName || excludeNames.has(token) || seen.has(identity)) continue;
+      if (declarationHeadShape(before) && opensBlockOnSameLine(masked, at + token.length)) continue;
+      seen.add(identity);
+      if (CALL_SHAPE_EXCLUDED_KEYWORDS.has(token) || COMMON_BUILTIN_CALLEES.has(token)) continue;
+      out.push(owner === undefined ? { name: token, ...(qualified ? { qualified: true as const } : {}) } : { name: token, owner });
+    }
+  }
+  return out;
+}
+
+/** A missing JS/TS bare call must not be confused with an enclosing callback parameter or a named function expression. */
+export function hasUnboundBareCallee(bodyLines: readonly string[], name: string, relPath: string): boolean {
+  // Other languages retain their existing import-based closure rules.
+  if (!/\.[cm]?[jt]sx?$/i.test(relPath)) return false;
+  const text = bodyLines.join("\n");
+  if (text.length > 64 * 1024) return true;
+  const kind = /\.[jt]sx$/i.test(relPath) ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const parse = (source: string) => ts.createSourceFile(relPath, source, ts.ScriptTarget.Latest, true, kind);
+  let source = parse(text);
+  const invalid = (file: ts.SourceFile) => (file as ts.SourceFile & { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics?.length;
+  if (invalid(source)) source = parse(`class __TL_Focal__ {\n${text}\n}`);
+  if (invalid(source)) return true;
+  const binds = (binding: ts.BindingName): boolean => ts.isIdentifier(binding)
+    ? binding.text === name
+    : binding.elements.some(element => ts.isBindingElement(element) && binds(element.name));
+  const scoped = (call: ts.CallExpression): boolean => {
+    for (let parent: ts.Node | undefined = call.parent; parent !== undefined; parent = parent.parent) {
+      if (ts.isFunctionLike(parent) && parent.parameters.some(parameter => binds(parameter.name))) return true;
+      if ((ts.isFunctionExpression(parent) || ts.isFunctionDeclaration(parent)) && parent.name?.text === name) return true;
+      if (ts.isCatchClause(parent) && parent.variableDeclaration !== undefined && binds(parent.variableDeclaration.name)) return true;
+    }
+    return false;
+  };
+  let unbound = false;
+  const visit = (node: ts.Node): void => {
+    if (unbound) return;
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === name && !scoped(node)) unbound = true;
+    else ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return unbound;
 }
 
 /** Original UTF-16 call-token coordinates for semantic receiver resolution.

@@ -141,6 +141,19 @@ tl mcp start --stdio --workspace /path/to/project
 
 For command details, run `tl help`. See [Getting started](getting-started.md) for setup and operational notes.
 
+## v0.16.2 updates
+
+Explanation requests retain conditions, callers, configuration-file details
+and error-handling paths more reliably. Calls to same-named members of
+different imported modules keep their receiver identity. TypeScript type-only
+references do not create runtime-value requirements; missing implementations
+remain disclosed.
+
+Lists of explicitly protected files retain each edit prohibition, including
+comma-separated and Japanese coordinated lists. Later independent edit
+commands keep their own targets. The three tools and canonical top-level
+request fields are unchanged from v0.16.1.
+
 ## v0.16.1 updates
 
 An explicit `edits[].range` bounds both replacement content and

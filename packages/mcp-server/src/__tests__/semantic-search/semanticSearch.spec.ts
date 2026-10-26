@@ -46,6 +46,23 @@ describe("local multilingual dense retrieval", () => {
     await engine.dispose();
   });
 
+  it.each(["first\nsecond\nRetry", "first\r\nsecond\r\nRetry", "first\rsecond\rRetry", "first\r\nsecond\rRetry"])("preserves explicit anchors across line endings %j", async text => {
+    const { backend } = backendForTests();
+    const engine = new LocalSemanticSearch({ backend });
+    const input = {
+      query: "retry",
+      sources: [{ path: "notes.txt", text, startLine: 40 }],
+    };
+    try {
+      const result = await engine.search({ ...input, anchors: [{ path: "notes.txt", line: 42 }] });
+      expect(result.candidates[0]).toMatchObject({ path: "notes.txt", startLine: 42, endLine: 42, anchor: true });
+      const beyond = await engine.search({ ...input, anchors: [{ path: "notes.txt", line: 43 }] });
+      expect(beyond.candidates.some(candidate => candidate.anchor)).toBe(false);
+    } finally {
+      await engine.dispose();
+    }
+  });
+
   it("reuses embeddings, invalidates identity/content changes, and never leaks generations", async () => {
     const { backend, calls } = backendForTests();
     const engine = new LocalSemanticSearch({ backend });

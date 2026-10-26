@@ -1,5 +1,6 @@
 /** Bounded, fs-free composition over the existing request-item and facet parsers. */
 import type { ImpactCandidate } from "@tokenlighten/types";
+import { languageForPath } from "../../util/languages.js";
 import {
   clauseNamesOwnFacetSubject,
   extractRequestItems,
@@ -70,7 +71,14 @@ function bounded(value: number | undefined, fallback: number, maximum: number): 
 }
 
 function pathsIn(text: string): string[] {
-  return [...new Set([...text.matchAll(PATH_RE)].map((m) => m[0]))];
+  return [...new Set([...text.matchAll(PATH_RE)].map((m) => m[0]))].filter((candidate) => {
+    // A bare namespace.member is ambiguous with a filename. Unknown suffixes
+    // do not establish independent file scopes unless explicitly quoted;
+    // the original query still reaches the locator unchanged.
+    return /[/\\]/u.test(candidate) || languageForPath(candidate) !== undefined
+      || /\.(?:md|txt|jsonc?|ya?ml|toml|ini|xml|csv|tsv|pdf|docx?|xlsx?|pptx?|html?|css|svg|png|jpe?g)$/iu.test(candidate)
+      || ["`", '"', "'"].some((quote) => text.includes(quote + candidate + quote));
+  });
 }
 
 interface SubjectContext {
@@ -289,7 +297,7 @@ export function planCompoundRequest(
       if (!outstanding.some((entry) => entry.reason === "clause-budget")) outstanding.push({ reason: "clause-budget", status: "could-not-determine" });
       continue;
     }
-    const continuationContext = /^(?:please\s+)?(?:give|show|list|describe|explain|provide|tell(?:\s+me)?)\s+/iu.test(text)
+    const continuationContext = /^(?:please\s+)?(?:give|show|list|describe|explain|include|provide|tell(?:\s+me)?)\s+/iu.test(text)
       ? sentenceContext ?? context : context;
     const inherited = !hasSubjects(own) && continuationContext !== undefined && inheritsSubject(text, parsedFacets, continuationContext);
     const subject = inherited ? continuationContext! : own;

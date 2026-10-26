@@ -36,7 +36,44 @@ interface JsonRpcMessage {
     serverInfo?: McpServerInfo;
     instructions?: string;
     tools?: Array<{ name?: unknown }>;
+    protocolVersion?: string;
   };
+  error?: { code?: unknown; message?: unknown };
+}
+
+/** Parse one stdout line into a JSON-RPC reply object; null for anything else. */
+function parseJsonRpcLine(line: string): JsonRpcMessage | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null; // non-JSON stdout noise
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const msg = parsed as Record<string, unknown>;
+  if (msg.jsonrpc !== "2.0" || (msg.id !== undefined && typeof msg.id !== "number")) return null;
+  return msg as JsonRpcMessage;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** A usable `initialize` reply: a result object carrying protocolVersion, no error. */
+function isInitializeResult(msg: JsonRpcMessage): boolean {
+  if (msg.error !== undefined) return false;
+  return isObject(msg.result) && typeof msg.result.protocolVersion === "string";
+}
+
+/** A usable `tools/list` reply: a result object carrying a tools array, no error. */
+function isToolsListResult(msg: JsonRpcMessage): boolean {
+  if (msg.error !== undefined) return false;
+  return isObject(msg.result) && Array.isArray(msg.result.tools)
+    && msg.result.tools.every(tool => isObject(tool) && typeof tool.name === "string");
+}
+
+function errorReplyText(error: unknown, fallback: string): string {
+  return isObject(error) && typeof error.message === "string" ? error.message : fallback;
 }
 
 /** Kill a spawned process AND its whole process tree/group, cross-platform.
@@ -145,6 +182,51 @@ export async function runMcpHandshake(options: McpHandshakeOptions): Promise<Mcp
       // Diagnostic only — stdout is reserved for JSON-RPC.
     });
 
+    const handleLine = (line: string): void => {
+      if (settled) return;
+      const msg = parseJsonRpcLine(line);
+      if (!msg) return;
+      if (msg.id === 1) {
+        if (msg.error !== undefined) {
+          finish({
+            ok: false,
+            stage: "initialize",
+            error: `initialize error reply: ${errorReplyText(msg.error, "initialize failed")}`,
+          });
+          return;
+        }
+        if (initializeResult || !isInitializeResult(msg)) return; // duplicate / unusable reply
+        initializeResult = msg;
+        stage = "tools/list";
+        try {
+          child?.stdin?.write(
+            JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }) + "\n",
+          );
+          child?.stdin?.write(
+            JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\n",
+          );
+        } catch (err) {
+          finish({ ok: false, stage: "write-tools-list", error: String(err) });
+        }
+        return;
+      }
+      if (msg.id === 2) {
+        if (msg.error !== undefined) {
+          finish({
+            ok: false,
+            stage: "tools/list",
+            error: `tools/list error reply: ${errorReplyText(msg.error, "tools/list failed")}`,
+          });
+          return;
+        }
+        // Success requires a valid initialize result first — an id:2 reply that
+        // arrives out of order is not a completed handshake.
+        if (!initializeResult || toolsListResult || !isToolsListResult(msg)) return;
+        toolsListResult = msg;
+        finish({ ok: true, stage: "complete" });
+      }
+    };
+
     child.stdout?.on("data", (chunk: Buffer) => {
       lineBuf += chunk.toString("utf8");
       let idx: number;
@@ -152,30 +234,32 @@ export async function runMcpHandshake(options: McpHandshakeOptions): Promise<Mcp
         const line = lineBuf.slice(0, idx).trim();
         lineBuf = lineBuf.slice(idx + 1);
         if (!line) continue;
-        let msg: JsonRpcMessage;
-        try {
-          msg = JSON.parse(line) as JsonRpcMessage;
-        } catch {
-          continue; // non-JSON stdout noise
-        }
-        if (msg.id === 1 && !initializeResult) {
-          initializeResult = msg;
-          stage = "tools/list";
-          try {
-            child?.stdin?.write(
-              JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }) + "\n",
-            );
-            child?.stdin?.write(
-              JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\n",
-            );
-          } catch (err) {
-            finish({ ok: false, stage: "write-tools-list", error: String(err) });
-          }
-        } else if (msg.id === 2 && !toolsListResult) {
-          toolsListResult = msg;
-          finish({ ok: true, stage: "complete" });
-        }
+        handleLine(line);
       }
+    });
+
+    // A child that dies (or closes stdout) without completing the handshake
+    // must resolve a failure now, not after the full timeout. `close` fires
+    // after stdout has drained, so flush any newline-less last line first.
+    child.on("close", () => {
+      const tail = lineBuf.trim();
+      lineBuf = "";
+      if (tail) handleLine(tail);
+      finish({
+        ok: false,
+        stage: `child-exited-during-${stage}`,
+        error: `child process closed during stage '${stage}' before the handshake completed`,
+      });
+    });
+
+    // stdin failures (EPIPE once the child is gone) arrive as async stream
+    // errors: unhandled, they become an uncaught exception in the caller.
+    child.stdin?.on("error", (err) => {
+      finish({
+        ok: false,
+        stage: `stdin-error-during-${stage}`,
+        error: `child stdin failed: ${String(err)}`,
+      });
     });
 
     stage = "initialize";

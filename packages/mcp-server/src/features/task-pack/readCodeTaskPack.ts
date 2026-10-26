@@ -403,6 +403,8 @@ import {
 // facet-closure hook (below) drives.
 import {
   framedCodeNamesIn,
+  conceptTermsIn,
+  conceptAliasGroupsIn,
   isFacetDescriptorTerm,
   isStructuralOnlyRequest,
   maskCallArgumentPunctuation,
@@ -413,6 +415,9 @@ import {
 } from "./requestFacets.js";
 import {
   calleeNamesIn,
+  calleeTargetsIn,
+  hasUnboundBareCallee,
+  calleePositionsIn,
   qualifiedCalleePositionsIn,
   COMMON_BUILTIN_CALLEES,
   constantLikeReferencesIn,
@@ -428,6 +433,8 @@ import {
   focalParameterNames,
   goImportPathAliasesIn,
   hasValuePositionOccurrence,
+  runtimeValueLines,
+  configurationEvidenceSpan,
   importedModuleAliasesIn,
   importSpecifiersNaming,
   isPureReferenceInitializer,
@@ -458,6 +465,8 @@ import {
   combineSubjectFacetFacts,
   evaluateFacetRequirement,
   facetClauseMatchesItem,
+  facetClausesJointlyOwnItem,
+  itemConjunctionParts,
   facetPlanFor,
   focalRequiredSpan,
   MAX_REQUIRED_CALL_SITES,
@@ -22339,6 +22348,12 @@ async function resolveImportSpecifierFile(
  * the hook already read for `focal` itself, not a new file the closure
  * budget must account for.
  */
+/** True when `receiver` is the focal's OWN parameter or local, not the import it shares a name with. */
+function focalShadowsReceiver(bodyLines: readonly string[], receiver: string, hashComment: boolean, focal: ResolvedFacetFocal): boolean {
+  return bodyDeclaresLocal(bodyLines, receiver, hashComment)
+    || focalParameterNames(bodyLines, hashComment, focal.name, focal.path).has(receiver);
+}
+
 async function resolveCalleeFile(
   calleeName: string,
   focal: ResolvedFacetFocal,
@@ -22347,6 +22362,8 @@ async function resolveCalleeFile(
   workspace: string,
   cache: FileReadCache,
   onBounded?: () => void,
+  /** The receiver of a member call (`tax` in `tax.calculate(x)`); undefined for a bare call. */
+  receiver?: string,
 ): Promise<{ path: string; content: string; name?: string; bindings?: NamedWindow[]; symbol?: { startLine: number; endLine: number } } | undefined> {
   const declaration = async (file: { path: string; content: string }, name: string, bindings: NamedWindow[]) => {
     if (!new RegExp(`(?<![\\w$])${escapeRegExp(name)}(?![\\w$])`).test(file.content)) return undefined;
@@ -22359,8 +22376,22 @@ async function resolveCalleeFile(
       symbol: { startLine: symbol.startLine, endLine: symbol.endLine } };
   };
   const focalContent = readCached(workspace, focal.path, cache);
+  // A member call on a module alias keeps its receiver identity: the callee is
+  // THAT module's export, never a bare same-named function another receiver
+  // (or the focal's own file) owns. A receiver the focal shadows as a parameter
+  // or local is never bound to the import of the same name.
+  const shadowedReceiver = receiver !== undefined && importedModuleAliasesIn(focalFileLines, hashComment).has(receiver)
+    && focalShadowsReceiver(focalFileLines.slice(focal.startLine - 1, focal.endLine), receiver, hashComment, focal);
+  const namespaceFile = receiver === undefined || focalContent === undefined
+    || !importedModuleAliasesIn(focalFileLines, hashComment).has(receiver) || shadowedReceiver
+    ? undefined : await resolveModuleNamespaceFile(receiver, focal.path, focalFileLines, workspace, cache);
   if (focalContent !== undefined) {
-    const typed = await resolveTypedCallee({ workspace, source: focalContent, focal, calleeName, hashComment, cacheToken: cache });
+    const typedPositions = receiver === undefined ? undefined : calleePositionsIn(
+      focalContent.split(/\r?\n/), focal.startLine, focal.endLine, calleeName, hashComment)
+      .filter((position) => new RegExp(`(?:^|[^\\w$.])${escapeRegExp(receiver)}\\s*(?:\\?\\.|\\.)\\s*$`, "u")
+        .test(maskNonCode(focalContent.split(/\r?\n/)[position.line] ?? "", hashComment).slice(0, position.character)));
+    const typed = await resolveTypedCallee({ workspace, source: focalContent, focal, calleeName, hashComment, cacheToken: cache,
+      ...(typedPositions !== undefined ? { positions: typedPositions } : {}) });
     if (typed.kind === "resolved") {
       const target = readCached(workspace, typed.path, cache);
       if (target === undefined || contentHash(target) !== typed.contentHash) { onBounded?.(); return undefined; }
@@ -22385,6 +22416,7 @@ async function resolveCalleeFile(
     }
     if (typed.kind === "unresolved") { onBounded?.(); return undefined; }
     if (typed.kind === "external") return undefined;
+    if (shadowedReceiver || namespaceFile === "workspace-module-unresolved") { onBounded?.(); return undefined; }
     // An explicit own receiver alias is not an unqualified same-name callable.
     // Without semantic implementation resolution, disclose the unfinished hop.
     for (const position of qualifiedCalleePositionsIn(focalFileLines, focal.startLine, focal.endLine, calleeName, hashComment)) {
@@ -22396,6 +22428,13 @@ async function resolveCalleeFile(
       const initializer = focalFileLines.slice(window.start - 1, window.end).map(line => maskNonCode(line, hashComment)).join("\n");
       const alias = new RegExp("(?:^|[,{])\\s*" + escapeRegExp(calleeName) + "\\s*:\\s*[A-Za-z_$][\\w$]*\\s*(?=[,}])");
       if (alias.test(initializer)) { onBounded?.(); return undefined; }
+    }
+    if (namespaceFile !== undefined) {
+      const found = await declaration(namespaceFile, calleeName, []);
+      if (found !== undefined) return found;
+      // The module is proven and simply does not export the member: a bare
+      // same-named function elsewhere is NOT this call's implementation.
+      if (path.extname(namespaceFile.path) === path.extname(focal.path)) return undefined;
     }
     const own = await declaration({ path: focal.path, content: focalContent }, calleeName, []);
     if (own !== undefined) return own;
@@ -23549,9 +23588,8 @@ async function constantClosureForFocal(
     // resolved" beside a pack that served the whole file. The alias set is
     // the OWNER file's, which is where the import lives.
     const ownerModuleAliases = ownerPath === focal.path ? moduleAliases : importedModuleAliasesIn(ownerLines, ownerHashComment);
-    const packageNamespaceMembersOnly = packageSpec !== undefined
-      && ownerModuleAliases.has(depName)
-      && !hasValuePositionOccurrence(readLines, ownerHashComment, depName, ownerPath, true);
+    const packageNamespaceMembersOnly = ownerModuleAliases.has(depName)
+      && !hasValuePositionOccurrence(readLines, ownerHashComment, depName, ownerPath, packageSpec !== undefined ? true : "calls");
     const importedValueRead = namedSpecs.length > 0 && !packageNamespaceMembersOnly
       && hasValuePositionOccurrence(readLines, ownerHashComment, depName, ownerPath);
     // R2-T3: a search that ended for want of its own work bound (a Go package
@@ -23659,9 +23697,8 @@ async function constantClosureForFocal(
         // A qualified constant through the alias (`cfg.TIMEOUT_MS`) is judged
         // by the qualified-reference pass below, and a bare value read of the
         // alias itself still discloses.
-        const packageNamespaceMembersOnly = packageSpec !== undefined
-          && moduleAliases.has(name)
-          && !hasValuePositionOccurrence(bodyLines, hashComment, name, focal.path, true);
+        const packageNamespaceMembersOnly = moduleAliases.has(name)
+          && !hasValuePositionOccurrence(bodyLines, hashComment, name, focal.path, packageSpec !== undefined ? true : "calls");
         const importedValueRead = namedSpecs.length > 0 && depth === 0 && !packageNamespaceMembersOnly
           && hasValuePositionOccurrence(bodyLines, hashComment, name, focal.path);
         // R2-T3 (eval-0929 final review, P0-4's cap ruling): the search for
@@ -24355,7 +24392,7 @@ function qualifiedConstantReferencesIn(
   // another "."), so a genuine property access (`a.b`, one dot) stays
   // excluded while a range operator's second dot (`0..limits`) does not.
   const ownerMemberRe = /(?<![\w$:])(?<!(?<!\.)\.)([A-Za-z_][A-Za-z0-9_]*)(?:\.|::)([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*\()/g;
-  for (const line of bodyLines) {
+  for (const line of runtimeValueLines(bodyLines, relPath)) {
     const masked = maskNonCode(line, hashComment, relPath);
     for (const match of masked.matchAll(ownerMemberRe)) {
       const owner = match[1]!;
@@ -25719,7 +25756,7 @@ async function calleeDefinitionsForFocal(
   const lines = content.split(/\r?\n/);
   const hashComment = hasHashComments(focal.path);
   const bodyLines = lines.slice(focal.startLine - 1, focal.endLine);
-  const names = calleeNamesIn(bodyLines, hashComment, focal.name, new Set([focal.name]));
+  const targets = calleeTargetsIn(bodyLines, hashComment, focal.name, new Set([focal.name]));
   // A deeper layer keeps its bounded expansion: the first
   // MAX_CALLEES_PER_REQUIREMENT workspace definitions an already-required
   // callee's body calls, among its first MAX_NESTED_CALLEE_NAMES_SCANNED call
@@ -25728,8 +25765,8 @@ async function calleeDefinitionsForFocal(
   // `validateNoDuplicates`, the check returning ErrDuplicateLeg, was cut
   // behind `Errorf`), and likewise only resolved callees count toward the
   // MAX_CALLEES_PER_REQUIREMENT that are expanded one layer deeper.
-  const callees = names.slice(0, depth === 1 ? directLimit : MAX_NESTED_CALLEE_NAMES_SCANNED);
-  let complete = depth > 1 || names.length <= callees.length;
+  const callees = targets.slice(0, depth === 1 ? directLimit : MAX_NESTED_CALLEE_NAMES_SCANNED);
+  let complete = depth > 1 || targets.length <= callees.length;
   if (!complete) {
     // Names past the scan ceiling cut the list only when one of them could be
     // an in-workspace callee: a same-file callable, or a name the file
@@ -25740,21 +25777,30 @@ async function calleeDefinitionsForFocal(
     const sameFile = new Set(((lang ? await cache.parsedSymbols(content, lang, focal.path) : null) ?? [])
       .filter((symbol) => symbolIsCallable(symbol, lines, hashComment))
       .map((symbol) => unqualifiedSymbolTail(symbol.name)));
-    complete = path.extname(focal.path) !== ".go" && names.slice(callees.length).every((name) =>
-      !sameFile.has(name) && importSpecifiersNaming(lines, name, hashComment, focal.path).length === 0);
+    complete = path.extname(focal.path) !== ".go" && targets.slice(callees.length).every(({ name, owner }) =>
+      !sameFile.has(name) && importSpecifiersNaming(lines, owner ?? name, hashComment, focal.path).length === 0);
   }
   const out: NamedWindow[] = [];
   let required = 0;
   const unresolved: string[] = [];
-  for (const calleeName of callees) {
+  for (const target of callees) {
+    const calleeName = target.name;
     if (depth > 1 && required >= MAX_CALLEES_PER_REQUIREMENT) break;
-    const bindingKey = JSON.stringify([focal.path, focal.startLine, focal.endLine, focal.name, calleeName]);
+    const bindingKey = JSON.stringify([focal.path, focal.startLine, focal.endLine, focal.name, target.owner ?? (target.qualified ? "." : ""), calleeName]);
     if (visited.has(bindingKey)) continue;
     visited.add(bindingKey);
-    const resolved = await resolveCalleeFile(calleeName, focal, lines, hashComment, workspace, cache, () => { complete = false; });
+    const resolved = await resolveCalleeFile(calleeName, focal, lines, hashComment, workspace, cache, () => { complete = false; }, target.owner);
     if (resolved?.symbol === undefined) {
-      const specs = importSpecifiersNaming(lines, calleeName, hashComment, focal.path);
-      if (specs.some((s) => s.relative && !s.wildcard)) unresolved.push(`${calleeName} in ${focal.path}`);
+      if (target.owner === undefined) {
+        const specs = importSpecifiersNaming(lines, calleeName, hashComment, focal.path);
+        const unbound = !target.qualified && specs.length === 0
+          && !bodyDeclaresLocal(bodyLines, calleeName, hashComment)
+          && hasUnboundBareCallee(bodyLines, calleeName, focal.path);
+        if (unbound || specs.some((s) => s.relative && !s.wildcard)) unresolved.push(`${calleeName} in ${focal.path}`);
+      } else {
+        const ns = await resolveModuleNamespaceFile(target.owner, focal.path, lines, workspace, cache);
+        if (ns !== undefined && ns !== "workspace-module-unresolved") unresolved.push(`${target.owner}.${calleeName} in ${focal.path}`);
+      }
       continue;
     }
     if (depth === 1 && required >= MAX_REQUIRED_CALLEE_WINDOWS) {
@@ -25975,6 +26021,13 @@ async function flowStepWindowsForNonCallableFocal(
       }
     }
     if (hit) matched.push({ symbol: member, path: memberPath });
+  }
+  // A Japanese concept may bridge to several English spellings; those
+  // spellings are alternatives, rather than separate requested members.
+  for (const aliases of requirement.subjectTermAliases ?? []) {
+    if (aliases.some((term) => terms.includes(term) && !ungroundedTerms.has(term))) {
+      for (const term of aliases) ungroundedTerms.delete(term);
+    }
   }
   const membersComplete = matched.length <= MAX_FLOW_REQUIRED_MEMBER_WINDOWS;
   const required = matched.slice(0, MAX_FLOW_REQUIRED_MEMBER_WINDOWS);
@@ -26718,7 +26771,15 @@ async function recoverFacetClosureCandidates(
     priorFocalPaths.add(focal.path);
 
     if (requirement.facet === "value" || requirement.facet === "condition") {
-      const callees = focalIsCallable(focal, workspace, cache) ? await calleesOf(focal) : undefined;
+      const ownTerms = conceptTermsIn(requirement.clause).filter((term) => term.length >= 3 && !isFacetDescriptorTerm(term));
+      const alternatives = conceptAliasGroupsIn([requirement.clause]);
+      const grouped = new Set(alternatives.flat());
+      const points = [...alternatives.filter((group) => group.some((term) => ownTerms.includes(term))),
+        ...ownTerms.filter((term) => !grouped.has(term)).map((term) => [term])];
+      const focalLines = readCached(workspace, focal.path, cache)?.split(/\r?\n/).slice(focal.startLine - 1, focal.endLine) ?? [];
+      const asksNamedTypeCallee = points.length > 0 && calleeNamesIn(focalLines, hasHashComments(focal.path), focal.name, new Set([focal.name]))
+        .some((name) => points.every((group) => group.some((term) => name.toLowerCase().includes(term))));
+      const callees = focalIsCallable(focal, workspace, cache) || asksNamedTypeCallee ? await calleesOf(focal) : undefined;
       const closure = await constantClosureForFocal(focal, workspace, cache, deadline, callees?.windows);
       // Copilot retest (2026-10-02): every constant the closure found is
       // served and required -- the focal's own and the ones its callees
@@ -42146,6 +42207,10 @@ function proveUnbindableRequestItem(
   return requestItemProofFromVerdict(decideConcernStatus(words, covered, { kind: "unserved-candidates", candidatePaths: missing }));
 }
 
+function configurationFileQuestion(query: string): boolean {
+  return /\b(?:config(?:uration)?|settings?)\s+(?:file|json)\b|設定(?:ファイル|JSON)/iu.test(query);
+}
+
 function proveRequestItem(
   item: RequestItem,
   allItems: readonly RequestItem[],
@@ -42306,6 +42371,27 @@ function proveRequestItem(
 
   if (item.kind === "definition") {
     const fileTerm = item.terms.find(looksLikeFileTerm);
+    if (fileTerm === undefined && allItems.some((other) => configurationFileQuestion(other.text))) {
+      const names = [...new Set(allItems.flatMap((other) => [...other.terms, ...other.aliases]))];
+      const fileCache = new FileReadCache();
+      const connected = [...new Set(priorEvidence.map((surface) => surface.path))]
+        .filter((candidate) => !isTestConcernPath(candidate))
+        .flatMap((candidate) => {
+          const content = readCached(workspace, candidate, fileCache);
+          if (content === undefined) return [];
+          const span = configurationEvidenceSpan(content.split(/\r?\n/), candidate, names);
+          return span === undefined ? [] : [{ path: candidate, ...span }];
+        });
+      if (connected.length > 0) {
+        const missing = connected.flatMap((span) => subtractLineSpans(span,
+          servedLineSpansOf(evidenceSurfacesForPath(priorEvidence, span.path)))
+          .map((piece) => ({ path: span.path, range: `${piece.start}-${piece.end}` })));
+        const evidence = connected.flatMap((span) => evidenceSurfacesForPath(priorEvidence, span.path)).map(readinessEvidence);
+        return missing.length > 0
+          ? { proved: false, evidence, reason: "configuration reader, defaults and path implementation are not fully served", candidatePaths: [], rangeCandidates: missing }
+          : { proved: true, evidence, reason: "the connected configuration reader, defaults and path implementation is served", candidatePaths: [] };
+      }
+    }
     const candidates = fileTerm !== undefined
       ? fileTermCandidatePaths(workspace, universe, fileTerm)
       : manifestCandidatePaths(workspace);
@@ -44766,21 +44852,32 @@ function reconcileRequestItemsWithFacets(
   const resolved = facets.entries.filter((entry) => entry.facts.focalResolved && entry.dependency !== true);
   if (resolved.length === 0) return ownedIds;
   const items = extractRequestItems(query);
+  const clauses = resolved.map((entry) => entry.requirement.clause);
   for (const item of items) {
-    if (resolved.some((entry) => facetClauseMatchesItem(entry.requirement.clause, item.text))) ownedIds.add(item.id);
+    if (resolved.some((entry) => facetClauseMatchesItem(entry.requirement.clause, item.text))
+      || facetClausesJointlyOwnItem(clauses, item.text)) ownedIds.add(item.id);
   }
   if (ownedIds.size === 0) return ownedIds;
-  const ownerOf = (itemId: string): FacetReadinessEntry | undefined => {
+  const ownersOf = (itemId: string): FacetReadinessEntry[] => {
     const text = items.find((item) => item.id === itemId)?.text;
-    return text === undefined ? undefined : resolved.find((entry) => facetClauseMatchesItem(entry.requirement.clause, text));
+    if (text === undefined) return [];
+    const single = resolved.filter((entry) => facetClauseMatchesItem(entry.requirement.clause, text));
+    if (single.length > 0) return single;
+    const owners = new Set<FacetReadinessEntry>();
+    for (const part of itemConjunctionParts(text)) {
+      const owner = resolved.find((entry) => facetClauseMatchesItem(entry.requirement.clause, part));
+      if (owner !== undefined) owners.add(owner);
+    }
+    return [...owners];
   };
   for (const obligation of readiness.obligations) {
     const itemId = obligation.id.slice(REQUEST_ITEM_OBLIGATION_PREFIX.length);
     if (!ownedIds.has(itemId) || obligation.status === "proved") continue;
-    const owner = ownerOf(itemId)!;
+    const owners = ownersOf(itemId);
+    if (owners.length === 0) continue;
     obligation.status = "proved";
-    obligation.evidence = [...owner.servedEvidence];
-    obligation.reason = `this point is tracked by ${owner.obligation.id} (its evidence closure); not duplicated as a separate request-item obligation`;
+    obligation.evidence = owners.flatMap((entry) => [...entry.servedEvidence]);
+    obligation.reason = `this point is tracked by ${owners.map((entry) => entry.obligation.id).join(", ")} (their evidence closure); not duplicated as a separate request-item obligation`;
   }
   readiness.undetermined = readiness.undetermined.filter((entry) => !ownedIds.has(entry.id));
   // WP-C (eval-0929 §6/§8): see this function's own doc comment above — an
@@ -58927,6 +59024,15 @@ async function runAnswerDependencyClosure(
     codeTaskPackSurfaces(result.surfaces).filter((surface) => surface.path === relPath && (surface.code?.length ?? 0) > 0),
   );
 
+  const configurationPaths = new Set<string>();
+  if (configurationFileQuestion(query)) {
+    for (const surface of servedSurfaces) {
+      const content = readCached(workspace, surface.path, fileCache);
+      if (content !== undefined && configurationEvidenceSpan(content.split(/\r?\n/), surface.path, [...named]) !== undefined) {
+        configurationPaths.add(surface.path);
+      }
+    }
+  }
   const focals: ResolvedFacetFocal[] = [];
   const seen = new Set<string>();
   for (const surface of servedSurfaces) {
@@ -58953,6 +59059,9 @@ async function runAnswerDependencyClosure(
       if (symbol.kind !== "function" && symbol.kind !== "method" && symbol.kind !== "class") continue;
       const name = unqualifiedSymbolTail(symbol.name);
       if (name !== surface.symbol && !named.has(name.toLowerCase())) continue;
+      // A UI/context function mentioning a setting is not another runtime
+      // value question when the connected configuration reader is available.
+      if (configurationPaths.size > 0 && !configurationPaths.has(surface.path) && !named.has(name.toLowerCase())) continue;
       const body = focalRequiredSpan(symbol.startLine, symbol.endLine, lines) ?? { start: symbol.startLine, end: symbol.endLine };
       if (!lineSpansCover(served, body)) continue;
       const key = `${surface.path}\u0000${name}`;

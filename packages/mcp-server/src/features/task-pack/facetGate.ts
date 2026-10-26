@@ -48,8 +48,8 @@
 // arithmetic; the per-language work (declarations, imports, call shapes) is
 // evidenceClosure.ts's and callerExpansion.ts's.
 
-import { asksForCallableResult, type FacetRequirement, type RequestFacet } from "./requestFacets.js";
-import { hasHashComments } from "./callerExpansion.js";
+import { asksForCallableResult, maskJapaneseRequestPredicates, type FacetRequirement, type RequestFacet } from "./requestFacets.js";
+import { hasHashComments, maskNonCode } from "./callerExpansion.js";
 import { declarationRealExtent } from "./evidenceClosure.js";
 import { languageForPath } from "../../util/languages.js";
 
@@ -488,7 +488,7 @@ export function facetClauseLabel(clause: string): string {
 }
 
 function matchKey(text: string): string {
-  return trimClause(text)
+  return trimClause(maskJapaneseRequestPredicates(text))
     .normalize("NFKC")
     .toLowerCase()
     .replace(/[\s,、;；:：.。!?！？「」『』()（）"'`]+/gu, "");
@@ -509,6 +509,29 @@ export function facetClauseMatchesItem(clause: string, itemText: string): boolea
   const itemKey = matchKey(itemText);
   if (clauseKey.length === 0 || itemKey.length === 0) return false;
   return clauseKey.includes(itemKey);
+}
+
+/** Split a request item's text into its coordinated parts (same conjunction
+ * vocabulary requestItems.ts splits items on). */
+export function itemConjunctionParts(text: string): string[] {
+  return text
+    .split(/[,;、，；]|\s+\band\b|\s+\bor\b|\s+\bplus\b|および|及び|ならびに/iu)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+/**
+ * True when facet clauses TOGETHER own a request item: the item's text splits
+ * on conjunctions into 2+ parts and EVERY part is owned by SOME clause via
+ * facetClauseMatchesItem. A composite descriptor item ("the conditions and
+ * callers") is broader than any single clause, so no single clause owns it —
+ * yet the facets jointly do. One part outside the facet set ("... and
+ * deployment scripts") keeps the item unowned.
+ */
+export function facetClausesJointlyOwnItem(clauses: readonly string[], itemText: string): boolean {
+  const parts = itemConjunctionParts(itemText);
+  if (parts.length < 2) return false;
+  return parts.every((part) => clauses.some((clause) => facetClauseMatchesItem(clause, part)));
 }
 
 // ---------------------------------------------------------------------------
@@ -1346,7 +1369,12 @@ export function evaluateFacetRequirement(
     if (constantWindows === 0) {
       const lines = ctx.fileLines(focal.path) ?? [];
       const body = lines.slice(Math.max(0, focal.start - 1), focal.end);
-      if (!body.some(lineHasLiteral)) {
+      // A condition question is answered by the served body's OWN branches
+      // (ternary/if/switch) even when the body reads no module constant and
+      // holds no literal: the branch structure IS the condition.
+      const branches = requirement.facet === "condition"
+        && body.some((line) => /\bif\s*\(|\belse\b|\bswitch\s*\(|\bcase\s|(?<!\?)\?(?![?.])|&&|\|\|/.test(maskNonCode(line, hasHashComments(focal.path), focal.path)));
+      if (!body.some(lineHasLiteral) && !branches) {
         // 2026-10-10 re-run: a question that asks what the callable RETURNS
         // ("What does the add function return?", 「add 関数は何を返しますか？」)
         // is answered by the served body itself — `return a + b` — so a body

@@ -13,6 +13,8 @@ interface TypedCalleeInput {
   focal: { path: string; name: string; startLine: number; endLine: number };
   calleeName: string;
   hashComment: boolean;
+  /** A validated subset for one receiver; the complete-name overflow guard still applies. */
+  positions?: readonly { line: number; character: number }[];
   /** The parent pack owns this lifetime; no result cache survives it. */
   cacheToken?: object;
 }
@@ -38,14 +40,16 @@ export async function resolveTypedCallee(input: TypedCalleeInput): Promise<Typed
   if (!qualifiedCalleePositionsIn(lines, input.focal.startLine, input.focal.endLine, input.calleeName, input.hashComment).length) return { kind: 'fallback', reason: 'no-qualified-call' };
   // A bare call and a member call can name different implementations. Probe
   // both before allowing the single-body closure to certify this callee name.
-  const positions = calleePositionsIn(lines, input.focal.startLine, input.focal.endLine, input.calleeName, input.hashComment);
+  const allPositions = calleePositionsIn(lines, input.focal.startLine, input.focal.endLine, input.calleeName, input.hashComment);
   // The final coordinate is an overflow sentinel, not a complete call list.
-  // An external-only prefix cannot prove that a later receiver is external.
-  if (positions.length > MAX_QUALIFIED_CALLEE_POSITIONS) return { kind: 'unresolved', reason: 'typed-pack-budget' };
+  // Filtering to one receiver must never bypass the complete-name bound.
+  if (allPositions.length > MAX_QUALIFIED_CALLEE_POSITIONS) return { kind: 'unresolved', reason: 'typed-pack-budget' };
+  const positions = input.positions ?? allPositions;
+  if (positions.length === 0 || positions.some(position => !allPositions.some(actual => actual.line === position.line && actual.character === position.character))) return { kind: 'unresolved', reason: 'invalid-call-position' };
   const aliases: Record<string, string> = { ts: 'typescript', js: 'javascript', py: 'python', rs: 'rust', cs: 'csharp', kt: 'kotlin', rb: 'ruby' };
   const servers = Object.fromEntries(Object.entries(configuration.typedSymbols.servers).map(([language, command]) => [aliases[language] ?? language, command]));
   const sourceHash = contentHash(input.source);
-  const key = JSON.stringify([input.workspace, input.focal, input.calleeName, sourceHash, configuration.typedSymbols]);
+  const key = JSON.stringify([input.workspace, input.focal, input.calleeName, positions, sourceHash, configuration.typedSymbols]);
   let budget = input.cacheToken ? packResults.get(input.cacheToken) : undefined;
   if (!budget) {
     budget = { results: new Map(), attempts: 0, probes: 0, unavailableAttempts: 0, expires: Date.now() + MAX_MS_PER_PACK };

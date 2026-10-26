@@ -23,6 +23,42 @@ async function call(name = 'run', cacheToken = {}) {
   }));
 }
 describe('typed callee budgets remain unknown rather than unavailable', () => {
+  it('separates cached definitions for distinct same-named receiver calls', async () => {
+    const source = 'tax.calculate(1); shipping.calculate(2);';
+    const first = { line: 0, character: source.indexOf('calculate') };
+    const second = { line: 0, character: source.lastIndexOf('calculate') };
+    backend.resolve.mockImplementation(async request => ({
+      status: 'resolved', backend: 'lsp', language: 'python', semantic: true,
+      locations: [{ relation: 'definition', path: request.position.character === first.character ? 'tax.py' : 'shipping.py',
+        contentHash: 'verified', range: { start: { line: 0, character: 0 }, end: { line: 2, character: 0 } } }], gaps: [],
+    }));
+    const config = defaultEngineConfiguration(); config.typedSymbols.enabled = true;
+    const cacheToken = {};
+    const base = { workspace: '/fixture', source, calleeName: 'calculate', hashComment: false, cacheToken,
+      focal: { path: 'main.py', name: 'invoice', startLine: 1, endLine: 1 } };
+    await withEngineConfiguration(config, async () => {
+      const results = await Promise.all([first, second].map(position => resolveTypedCallee({ ...base, positions: [position] })));
+      expect(results.map(value => value.kind === 'resolved' && value.path)).toEqual(['tax.py', 'shipping.py']);
+      expect(await resolveTypedCallee({ ...base, positions: [first] })).toMatchObject({ kind: 'resolved', path: 'tax.py' });
+    });
+    expect(backend.resolve).toHaveBeenCalledTimes(2);
+  });
+  it('rejects an invalid receiver coordinate without probing the backend', async () => {
+    const config = defaultEngineConfiguration(); config.typedSymbols.enabled = true;
+    expect(await withEngineConfiguration(config, () => resolveTypedCallee({
+      workspace: '/fixture', source: 'tax.calculate(1);', calleeName: 'calculate', hashComment: false,
+      focal: { path: 'main.ts', name: 'invoice', startLine: 1, endLine: 1 }, positions: [{ line: 0, character: 0 }],
+    }))).toEqual({ kind: 'unresolved', reason: 'invalid-call-position' });
+    expect(backend.resolve).not.toHaveBeenCalled();
+  });
+  it('keeps the complete-name coordinate bound when selecting one receiver', async () => {
+    const config = defaultEngineConfiguration(); config.typedSymbols.enabled = true;
+    expect(await withEngineConfiguration(config, () => resolveTypedCallee({
+      workspace: '/fixture', source: 'tax.calculate(1); '.repeat(5), calleeName: 'calculate', hashComment: false,
+      focal: { path: 'main.ts', name: 'invoice', startLine: 1, endLine: 1 }, positions: [{ line: 0, character: 4 }],
+    }))).toEqual({ kind: 'unresolved', reason: 'typed-pack-budget' });
+    expect(backend.resolve).not.toHaveBeenCalled();
+  });
   it('discloses the qualified-call coordinate overflow before accepting an external-only prefix', async () => {
     backend.resolve.mockResolvedValue(result('unresolved', 'external-definition'));
     const config = defaultEngineConfiguration(); config.typedSymbols.enabled = true;

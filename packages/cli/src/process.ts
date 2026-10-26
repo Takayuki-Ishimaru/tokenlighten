@@ -134,6 +134,25 @@ export function removePidFile(pidPath: string): void {
   }
 }
 
+/**
+ * Remove the PID file only while it still describes the instance we stopped.
+ * A newer instance may have rewritten it (same PID reused, or a fresh
+ * instance_id / started_at_unix / identity_token); deleting then would destroy
+ * the live instance's metadata.
+ */
+function removePidFileIfStillOurs(pidPath: string, data: PidFileData): void {
+  const current = readPidFile(pidPath);
+  if (
+    current
+    && current.pid === data.pid
+    && current.started_at_unix === data.started_at_unix
+    && current.instance_id === data.instance_id
+    && current.identity_token === data.identity_token
+  ) {
+    removePidFile(pidPath);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Process liveness check
 // ---------------------------------------------------------------------------
@@ -256,7 +275,7 @@ export async function stopMcp(
     throw new Error(`Refusing to stop PID ${pid}: PID file is missing, invalid, or changed`);
   }
   if (!isPidAlive(pid)) {
-    removePidFile(pidPath);
+    removePidFileIfStillOurs(pidPath, data);
     return;
   }
   const verifyIdentity = options.verifyIdentity ?? processMatchesPidFile;
@@ -271,7 +290,7 @@ export async function stopMcp(
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     if (!isPidAlive(pid)) {
-      removePidFile(pidPath);
+      removePidFileIfStillOurs(pidPath, data);
       return;
     }
     await sleep(100);
@@ -285,11 +304,11 @@ export async function stopMcp(
   await sleep(1000);
 
   if (!isPidAlive(pid)) {
-    removePidFile(pidPath);
+    removePidFileIfStillOurs(pidPath, data);
     return;
   }
 
-  // Process survived — remove PID file and warn
-  removePidFile(pidPath);
+  // Process survived SIGKILL — keep the PID file so a live daemon stays
+  // discoverable (a later stop retries; deleting it would orphan the server).
   throw new Error(`Failed to stop MCP server (PID ${pid}): process still alive after SIGKILL`);
 }

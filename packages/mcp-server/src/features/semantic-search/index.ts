@@ -121,7 +121,7 @@ export class LocalSemanticSearch {
       if (admitted >= this.maxSources && !anchor) { reasons.add("source-budget"); continue; }
       if (chunks.length >= this.maxChunks && !anchor) { reasons.add("chunk-budget"); continue; }
       const start = boundedInteger(source.startLine, 1, Number.MAX_SAFE_INTEGER);
-      const lines = source.text.split(/\r?\n/);
+      const lines = source.text.split(/\r\n|\r|\n/);
       if (anchor) {
         const line = boundedInteger(anchor.line, start, Number.MAX_SAFE_INTEGER);
         if (line >= start && line < start + lines.length) candidates.set(source.path, {

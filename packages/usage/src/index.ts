@@ -627,9 +627,25 @@ export function readUsageEvents(
     .sort();
   for (const name of names) {
     const logPath = join(dir, name);
-    const stat = lstatSync(logPath);
+    // Log rotation can unlink this file between readdirSync and the stat/read
+    // below. Only ENOENT means "the file is gone; nothing to read here" — any
+    // other error (permissions, I/O) must still surface instead of silently
+    // shrinking the totals.
+    let stat;
+    try {
+      stat = lstatSync(logPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") continue;
+      throw error;
+    }
     if (stat.isSymbolicLink() || !stat.isFile()) continue;
-    const text = readFileSync(logPath, "utf8");
+    let text: string;
+    try {
+      text = readFileSync(logPath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") continue;
+      throw error;
+    }
     for (const line of text.split("\n")) {
       if (!line.trim()) continue;
       try {

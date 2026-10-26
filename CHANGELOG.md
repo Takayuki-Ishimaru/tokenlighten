@@ -2,6 +2,30 @@
 
 User-facing release highlights for TokenLighten.
 
+## 0.16.2
+
+- Explanation requests include the relevant conditions, callers and configuration
+  readers instead of stopping at declarations or unrelated matches.
+- English and Japanese compound questions retain their named subjects,
+  requested values, processing steps and error-handling details.
+- Calls to same-named methods in different imported modules retain their
+  receiver identity. TypeScript type-only references no longer create false
+  runtime-value gaps; genuinely missing implementations remain disclosed.
+- Comma-separated and Japanese coordinated lists of files that must not be
+  edited protect every listed file while keeping later edit commands separate.
+- Optional typed-symbol lookup distinguishes same-named receiver calls;
+  semantic-search anchors preserve line positions across LF, CRLF and CR.
+- CLI connection checks reject error or malformed replies and report child
+  exit or input-stream failure before a handshake completes. Stopping a
+  server preserves metadata for a newer or still-running instance.
+- Usage-log reads tolerate files removed during rotation while continuing
+  to report permission and I/O failures.
+
+Upgrade the archive or VSIX, refresh workspace setup and reconnect your
+client. The three tools and canonical top-level request fields are unchanged
+from v0.16.1. See the
+[v0.16.2 release notes](release-docs/github-release-v0.16.2.md).
+
 ## 0.16.1
 
 - Explicit `edits[].range` bounds path- and handle-based replacement content

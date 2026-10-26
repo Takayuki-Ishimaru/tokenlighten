@@ -142,6 +142,8 @@ export interface FacetRequirement {
    * other reader of `subjectTerms` is unchanged. Absent = none.
    */
   readonly nonPointTerms?: readonly string[];
+  /** Spellings of one prose concept; grounding any spelling grounds the group. */
+  readonly subjectTermAliases?: readonly (readonly string[])[];
 }
 
 // ---------------------------------------------------------------------------
@@ -422,7 +424,7 @@ const VALUE_PERCENTAGE_RATE_RE = /\bwhat(?:'s|\s+is)\s+the\b(?:\s+\w+){0,3}?\s+(
 // 引数 / 変数 (「retry 関数を教えて」 asks for the function, and minted a value
 // facet whose emptiness was then disclosed).
 const VALUE_BARE_JA_RE =
-  /既定値|既定|デフォルト値|デフォルト|初期値|設定値|上限|下限|最大値|最大|最小値|最小|しきい値|閾値|回数|件数|秒数|いくつ|値|ステータスコード|設定されている|設定されてる|いくら|割り当てられている|割り当てられてる|(?<![関引変])数を教えて|率/;
+  /デバウンス(?:時間|間隔)?|監視(?:対象)?(?:の)?言語|表示言語|既定値|既定|デフォルト値|デフォルト|初期値|設定値|上限|下限|最大値|最大|最小値|最小|しきい値|閾値|回数|件数|秒数|いくつ|値|ステータスコード|設定されている|設定されてる|いくら|割り当てられている|割り当てられてる|(?<![関引変])数を教えて|率/;
 // WP-C (2026-09-29, eval-0929 §8, orchestrator chip adopted from WP-B): a
 // relative clause "AがBする<value-shaped noun>" ("the <noun> that A does B
 // to/with") asks about that noun as A's own value/parameter -- the JA
@@ -939,8 +941,12 @@ const CALLERS_VALUE_AGENT_SPAN_RE = new RegExp(
   "gi",
 );
 
+const CALLEES_ATTRIBUTIVE_JA_RE = /呼び出(?:している|してる|す)(?:関数|メソッド|ルーチン)/u;
+const FAILURE_BEHAVIOR_JA_RE = /(?:エラー|失敗|例外)時の(?:扱い|処理|動作|挙動)/u;
+
 function isCallersClause(guardedClause: string): boolean {
-  const clause = guardedClause.replace(CALLERS_VALUE_AGENT_SPAN_RE, (span: string, lead: string) => lead + "□".repeat(span.length - lead.length));
+  const clause = guardedClause.replace(CALLERS_VALUE_AGENT_SPAN_RE, (span: string, lead: string) => lead + "□".repeat(span.length - lead.length))
+    .replace(CALLEES_ATTRIBUTIVE_JA_RE, (span) => " ".repeat(span.length));
   return CALLERS_PHRASE_EN_RE.test(clause)
     || CALLERS_WHO_VERB_RE.test(clause)
     || CALLERS_WHERE_RE.test(clause)
@@ -1292,6 +1298,8 @@ function isFlowClause(guardedClause: string, cues: SentenceCallCues): boolean {
     || FLOW_JA_RE.test(guardedClause)
     || FLOW_TRACE_VERB_JA_RE.test(guardedClause)
     || FLOW_PROCEDURE_JA_RE.test(guardedClause)
+    || CALLEES_ATTRIBUTIVE_JA_RE.test(guardedClause)
+    || FAILURE_BEHAVIOR_JA_RE.test(guardedClause)
     || isFlowFramedJaClause(guardedClause);
 }
 
@@ -1321,7 +1329,8 @@ function detectFacets(
   cues: SentenceCallCues = sentenceCallCues(guarded),
 ): RequestFacet[] {
   const hits = new Set<RequestFacet>();
-  if (isValueClause(guarded) || asksForCallReturnValue(clause)) hits.add("value");
+  if (isValueClause(guarded) || asksForCallReturnValue(clause)
+    || /\bcontribut(?:e|es|ing)\s+to\s+(?:the\s+)?(?:returned\s+)?(?:total|result|output|value)\b/iu.test(guarded)) hits.add("value");
   if (isConditionClause(guarded)) hits.add("condition");
   if (isCallersClause(guarded)) hits.add("callers");
   if (isFlowClause(guarded, cues)) hits.add("flow");
@@ -1542,7 +1551,12 @@ export function explicitIdentifiersIn(clause: string): string[] {
   const backticked = new Set(
     [...cleaned.matchAll(/`([\p{L}\p{Nl}_$][\p{L}\p{N}\p{Mn}\p{Mc}\p{Pc}_$]*)`/gu)].map((m) => m[1]!.toLowerCase()),
   );
-  const tokens = cleaned.match(SCRIPT_AWARE_IDENTIFIER_TOKEN_RE) ?? [];
+  const fileBound = [...clause.matchAll(/([^\s「」`]+\.[A-Za-z][A-Za-z0-9]{0,8})\s*(?:の|にある|の中の)\s+([A-Za-z_$][\w$]*)\s*(?=が|は|の|関数|メソッド|について)/gu)]
+    .filter((match) => languageForPath(match[1]!) !== undefined).map((match) => match[2]!);
+  for (const match of clause.matchAll(/\b(?:explain|describe|trace)\s+([A-Za-z_$][\w$]*)\s+(?:(?:function|method)\s+)?in\s+([^\s,;]+\.[A-Za-z][A-Za-z0-9]{0,8})/giu)) {
+    if (languageForPath(match[2]!) !== undefined) fileBound.push(match[1]!);
+  }
+  const tokens = [...fileBound, ...(cleaned.match(SCRIPT_AWARE_IDENTIFIER_TOKEN_RE) ?? [])];
   const seen = new Set<string>();
   const out: string[] = [];
   for (const token of tokens) {
@@ -1552,7 +1566,8 @@ export function explicitIdentifiersIn(clause: string): string[] {
       || /^[a-z][A-Za-z0-9]*[A-Z]/.test(token)
       || isPascalCaseHump(token)
       || (/^[A-Z][A-Z0-9]{2,}$/.test(token) && !isProseAcronym(token))
-      || backticked.has(key);
+      || backticked.has(key)
+      || fileBound.includes(token);
     if (!codeShaped) continue;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -1875,7 +1890,7 @@ const JA_REQUEST_ADVERB = "(?:(?:実装|ソース(?:コード)?|コード)に(?:
  * requestItems.ts's READ_VERB_JA_* lead roots, which decide read leads and are
  * deliberately narrower).
  */
-const JA_REQUEST_VERB = "(?:(?:教え|述べ|調べ|見せ|知らせ|聞かせ|挙げ)(?:て|ろ)|示(?:して|せ)|読んで|(?:説明|解説|確認|列挙|紹介|案内|記述|要約|整理|提示|図示|例示|特定|調査|分析|比較|診断|検証|報告)(?:して|しろ|せよ|しなさい))";
+const JA_REQUEST_VERB = "(?:(?:教え|述べ|調べ|見せ|知らせ|聞かせ|挙げ|含め)(?:て|ろ)|示(?:して|せ)|読んで|(?:説明|解説|確認|列挙|紹介|案内|記述|要約|整理|提示|図示|例示|特定|調査|分析|比較|診断|検証|報告)(?:して|しろ|せよ|しなさい))";
 /** What a request te-form takes after it: a polite or benefactive ending, optionally a question and a softener. */
 const JA_REQUEST_ENDING = "(?:くださ(?:い|いませ)|下さい|ほしい|欲しい|もら(?:える|えます|えません|いたい|えない)|いただ(?:ける|けます|けません|きたい)|頂(?:ける|けます|けません|きたい)|くれ(?:る|ます|ません|ない)?|ちょうだい)?(?:です)?(?:か)?(?:と(?:助かります|幸いです|嬉しいです|うれしいです|ありがたいです))?";
 /** "I want to know / understand / see …" (〜を知りたいです). */
@@ -1902,6 +1917,8 @@ const JA_REQUEST_PREDICATE_RE = new RegExp(
 /** Quoted spans (ASCII quotes and 「」/『』) — verbatim, never masked (TL142-04). */
 const JA_PREDICATE_QUOTED_SPAN_RE = /[`"']([^`"']{2,})[`"']|「([^」]{2,})」|『([^』]{2,})』/gu;
 const JA_PREDICATE_TEST_RE = /[ぁ-んァ-ヶー一-鿿]/u;
+const JA_READ_ONLY_SENTENCE_RE = /(^|[。！？;；\n])([\t ]*(?:(?:コード|ソース(?:コード)?|ファイル)の)?(?:変更|修正|編集)(?:は|も)?不要(?:です)?[\t ]*)(?=[。！？;；\n]|$)/gu;
+
 
 /**
  * `text` with every Japanese request / politeness predicate that closes a
@@ -1913,7 +1930,9 @@ const JA_PREDICATE_TEST_RE = /[ぁ-んァ-ヶー一-鿿]/u;
 export function maskJapaneseRequestPredicates(text: string): string {
   if (!JA_PREDICATE_TEST_RE.test(text)) return text;
   const quoted = [...text.matchAll(JA_PREDICATE_QUOTED_SPAN_RE)].map((m) => ({ start: m.index ?? 0, end: (m.index ?? 0) + m[0].length }));
-  let out = text;
+  let out = text.replace(JA_READ_ONLY_SENTENCE_RE, (span: string, boundary: string, instruction: string, offset: number) =>
+    quoted.some((range) => offset < range.end && offset + span.length > range.start)
+      ? span : boundary + " ".repeat(instruction.length));
   for (let pass = 0; pass < 3; pass += 1) {
     const next = out.replace(JA_REQUEST_PREDICATE_RE, (m: string, ...rest: unknown[]) => {
       const offset = rest[rest.length - 2] as number;
@@ -2061,7 +2080,7 @@ const CJK_TEXT_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
 /** True when `term` is a flow / explanation-kind or declaration-kind word — for a Japanese run, when nothing but such nouns and particles is left of it. */
 function isNonPointWord(term: string): boolean {
   if (CJK_TEXT_RE.test(term)) {
-    return term.replace(FLOW_JA_PHRASE_ALL_RE, " ").replace(effFlowOrderVocabEnabled() ? new RegExp(FLOW_JA_CALL_ORDER_RE.source, "gu") : /$^/u, " ").split(JA_RUN_PARTICLES_RE).filter((segment) => segment.length > 0)
+    return term.replace(FAILURE_BEHAVIOR_JA_RE, " ").replace(FLOW_JA_PHRASE_ALL_RE, " ").replace(effFlowOrderVocabEnabled() ? new RegExp(FLOW_JA_CALL_ORDER_RE.source, "gu") : /$^/u, " ").split(JA_RUN_PARTICLES_RE).filter((segment) => segment.length > 0)
       .every((segment) => FLOW_DESCRIPTOR_WORDS_JA.has(segment) || DECLARATION_KIND_WORDS_JA.has(segment));
   }
   const lower = term.toLowerCase();
@@ -2083,7 +2102,10 @@ function blankNonPointSpans(text: string): string {
   return stripPathSpans("", text)
     .replace(BARE_FILE_NAME_RE, (name: string) =>
       languageForPath(name) === undefined || /^[A-Z][^.]*\.[^.]+$/u.test(name) ? name : " ".repeat(name.length))
-    .replace(HOW_WORKS_FRAME_RE, (_m: string, how: string, mid: string, verb: string) => `${how}${mid}${" ".repeat(verb.length)}`);
+    .replace(HOW_WORKS_FRAME_RE, (_m: string, how: string, mid: string, verb: string) => `${how}${mid}${" ".repeat(verb.length)}`)
+    // A conjugated observation verb describes the flow, rather than naming
+    // an additional member. Its object (e.g. the saved event) remains.
+    .replace(/(?:検知|検出|監視)(?:して|する|した|している)/gu, (span) => " ".repeat(span.length));
 }
 
 /**
@@ -2095,6 +2117,21 @@ function blankNonPointSpans(text: string): string {
  * lowercase token), and it is no flow / explanation-kind or declaration-kind
  * word.
  */
+/** Alternative English spellings contributed by one Japanese concept. */
+export function conceptAliasGroupsIn(texts: readonly string[]): string[][] {
+  const groups: Array<readonly [string, readonly string[]]> = [
+    ["保存", ["save", "store"]],
+    ["言語", ["language", "locale"]],
+    ["表示", ["display", "show"]],
+    ["監視", ["monitor", "watch"]],
+    ["拡張", ["extend", "extension"]],
+  ];
+  const source = texts.map(maskJapaneseRequestPredicates).join(" ");
+  return groups.filter(([word, alternatives]) => source.includes(word)
+    && !alternatives.some((term) => new RegExp(`\\b${term}\\b`, "iu").test(source)))
+    .map(([, alternatives]) => [...alternatives]);
+}
+
 export function nonPointTermsIn(subjectTerms: readonly string[], texts: readonly string[]): string[] {
   const prose = new Set<string>();
   for (const text of texts) {
@@ -2384,6 +2421,7 @@ export function extractFacetRequirements(query: string): FacetRequirement[] {
       if (
         identifiers.length === 0
         && isQualifierClause(declawed)
+        && !FAILURE_BEHAVIOR_JA_RE.test(declawed)
         && facets.every((facet) => requirements.some((earlier) => earlier.facet === facet))
       ) continue;
       const termsClause = isCallOrderClause(guardedClause, sentenceCues)
@@ -2417,6 +2455,7 @@ export function extractFacetRequirements(query: string): FacetRequirement[] {
           qualifiedMembers, subjectWeakCandidates: weakCandidates,
           ...(subjectCallables.length > 0 ? { subjectCallables } : {}),
           ...(facet === "flow" && nonPointTerms.length > 0 ? { nonPointTerms } : {}),
+          ...(facet === "flow" ? { subjectTermAliases: conceptAliasGroupsIn(inheritedFromLead ? [termsClause, leadTermsSource] : [termsClause]) } : {}),
         });
       }
     }

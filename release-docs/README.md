@@ -1,6 +1,6 @@
 # TokenLighten release documentation
 
-This directory contains the public documentation for TokenLighten v0.16.1.
+This directory contains the public documentation for TokenLighten v0.16.2.
 
 ## Start here
 
@@ -14,7 +14,9 @@ This directory contains the public documentation for TokenLighten v0.16.1.
 - [Privacy, security, and support](privacy-security-support.md).
 - [Licensing](licensing.md).
 - [Local analysis engines](local-analysis.md) — defaults, model download and language-server configuration.
-- [GitHub Release v0.16.1](github-release-v0.16.1.md) — ranged edits,
+- [GitHub Release v0.16.2](github-release-v0.16.2.md) — code explanations,
+  protected-file lists, local analysis and CLI reliability.
+- [Historical GitHub Release v0.16.1](github-release-v0.16.1.md) — ranged edits,
   protected-file constraints, and English/Japanese explanation requests.
 - [Historical GitHub Release v0.16.0](github-release-v0.16.0.md) — local analysis engines,
   discovery and continuation, edit context, and client workflow improvements.
@@ -56,7 +58,7 @@ This directory contains the public documentation for TokenLighten v0.16.1.
 
 ## Release scope
 
-The v0.16.1 public release includes four platform install archives (CLI,
+The v0.16.2 public release includes four platform install archives (CLI,
 MCP server and a bundled Node.js runtime), the CLI and MCP server as source
 with selected developer tests, and the VS Code extension. The desktop
 application is not included.
