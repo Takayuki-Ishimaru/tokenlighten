@@ -26,9 +26,9 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | @img/sharp-libvips-darwin-arm64@1.3.4 | LGPL-3.0-or-later | Lovell Fuller | https://github.com/lovell/sharp-libvips |
 | @img/sharp-wasm32@0.35.5 | Apache-2.0 AND LGPL-3.0-or-later AND MIT | Lovell Fuller | https://github.com/lovell/sharp |
 | @libpdf/core@0.3.6 | MIT | Lucas Smith | https://github.com/LibPDF-js/core |
-| @modelcontextprotocol/core@2.3.1 | Apache-2.0 | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
-| @modelcontextprotocol/sdk@1.32.1 | MIT | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
-| @modelcontextprotocol/server@2.3.1 | Apache-2.0 | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
+| @modelcontextprotocol/core@2.4.0 | Apache-2.0 | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
+| @modelcontextprotocol/sdk@1.32.2 | MIT | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
+| @modelcontextprotocol/server@2.4.0 | Apache-2.0 | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
 | @noble/ciphers@2.2.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-ciphers |
 | @noble/hashes@1.4.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-hashes |
 | @noble/hashes@2.4.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-hashes |
@@ -306,7 +306,7 @@ OTHER DEALINGS IN THE SOFTWARE.
 
 ### Apache-2.0 — SHA-256 0382b0057770ca05e9c350a50aa3b1c1fea84da0bc81d723bf00b9aa841be58a
 
-Applies to: `@modelcontextprotocol/core@2.3.1`, `@modelcontextprotocol/server@2.3.1`
+Applies to: `@modelcontextprotocol/core@2.4.0`, `@modelcontextprotocol/server@2.4.0`
 
 ```text
 The MCP project is undergoing a licensing transition from the MIT License to the Apache License, Version 2.0 ("Apache-2.0"). All new code and specification contributions to the project are licensed under Apache-2.0. Documentation contributions (excluding specifications) are licensed under CC-BY-4.0.
@@ -3450,7 +3450,7 @@ https://github.com/lovell/sharp-libvips/issues/new
 
 ### MIT — SHA-256 5e13dbbc1d120fc2a03cecde7c91424ae2d7de11b63d58ded2f4431e261ee50d
 
-Applies to: `@modelcontextprotocol/sdk@1.32.1`
+Applies to: `@modelcontextprotocol/sdk@1.32.2`
 
 ```text
 MIT License

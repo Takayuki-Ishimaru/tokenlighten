@@ -19,7 +19,7 @@ jobs:
         include:
           - os: ubuntu-latest
             full_tests: true
-          - os: macos-latest
+          - os: macos-15
             full_tests: true
           - os: windows-latest
             full_tests: false
@@ -40,8 +40,13 @@ jobs:
       - run: npm run licenses:notices
       - run: node scripts/verify-vscode-notices.mjs
       - run: git ls-files --error-unmatch THIRD_PARTY_NOTICES.md
+      # Notices describe the installed dependency set, including host-specific
+      # optional binaries. Compare the committed macOS arm64 inventory on its
+      # canonical host; every host still regenerates and verifies its notices.
       - run: git diff --exit-code -- THIRD_PARTY_NOTICES.md
+        if: matrix.os == 'macos-15'
       - run: git diff --exit-code -- packages/vscode-extension/THIRD_PARTY_NOTICES.md
+        if: matrix.os == 'macos-15'
       - run: npm audit --omit=dev --audit-level=high
       - run: npm run doctor
       - name: Package dry run
