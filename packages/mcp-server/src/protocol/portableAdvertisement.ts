@@ -59,7 +59,7 @@ export function portableToolDefinition<T extends PortableToolDefinition>(definit
   if (target) target["properties"] = pick(object(target["properties"]) ?? {}, ["path", "handle", "range", "ranges", "symbol", "purpose"]);
   const edits = object(properties["edits"]);
   const edit = object(edits?.["items"]);
-  if (edit) edit["properties"] = pick(object(edit["properties"]) ?? {}, ["path", "handle", "search", "replace", "create", "content", "precondition", "allowPathFallback", "all"]);
+  if (edit) edit["properties"] = pick(object(edit["properties"]) ?? {}, ["path", "handle", "search", "replace", "range", "create", "content", "from", "intent", "precondition", "allowPathFallback", "all"]);
   // Keep first-class routing/budget/task fields; collapse only specialist
   // selectors. Their complete server-issued continuations must pass hosts.
   const scope = object(properties["scope"]);

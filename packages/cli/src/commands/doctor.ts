@@ -725,7 +725,7 @@ export async function evaluateDoctor(opts: DoctorOptions = {}): Promise<DoctorRe
     ...(opts.skipFsChecks ? [] : [checkConfigDirWrite()]),
     checkTreeSitter(),
     await checkExcelJs(),
-    checkLicenseChecker(development),
+    ...(development ? [checkLicenseChecker(true)] : []),
     checkMcpDistFresh(opts),
     checkMcpCore2Excluded(opts),
     checkNoNulBytes(opts),
@@ -756,14 +756,16 @@ export async function evaluateDoctorAsync(opts: DoctorOptions = {}): Promise<Doc
     ...(opts.skipFsChecks ? [] : [checkConfigDirWrite()]),
     checkTreeSitter(),
     await checkExcelJs(),
-    checkLicenseChecker(development),
+    ...(development ? [checkLicenseChecker(true)] : []),
     checkMcpDistFresh(opts),
     checkMcpCore2Excluded(opts),
     checkNoNulBytes(opts),
     ...(development ? [] : [checkInstallConsistency(opts)]),
   ];
 
-  const prereqs = await detectPrereqs(["node", "python", "git"]);
+  // Python is used by contributor tooling (`tl bench`) rather than the
+  // packaged runtime, so keep it out of ordinary doctor output entirely.
+  const prereqs = await detectPrereqs(development ? ["node", "python", "git"] : ["node", "git"]);
   const missing: PrereqId[] = prereqs
     .filter((p) => !p.found || !p.meetsMin)
     .map((p) => p.id);

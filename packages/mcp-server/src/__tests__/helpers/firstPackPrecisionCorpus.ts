@@ -624,7 +624,7 @@ export function listFilesRecursive(root: string): string[] {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) walk(full);
-      else out.push(path.relative(root, full));
+      else out.push(path.relative(root, full).split(path.sep).join("/"));
     }
   };
   walk(root);

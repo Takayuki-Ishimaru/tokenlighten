@@ -288,7 +288,7 @@ export function resolvePythonCommand(): PythonCommand | null {
   const candidates: [string, string[]][] =
     process.platform === "win32"
       ? [["python3", ["-V"]], ["python", ["-V"]], ["py", ["-3", "-V"]]]
-      : [["python3.12", ["-V"]], ["python3.11", ["-V"]], ["python3", ["-V"]], ["python", ["-V"]]];
+      : [["python3", ["-V"]], ["python3.12", ["-V"]], ["python3.11", ["-V"]], ["python", ["-V"]]];
 
   for (const [bin, args] of candidates) {
     // `bin` is a bare candidate name (python3/python/py) — on Windows this

@@ -145,7 +145,9 @@ export interface TokenLightenUsageSummary {
   /** @deprecated Use estimatedTokenReductionPercent. */
   estimatedReductionPercent: number | null;
   estimatedTokenReductionPercent: number | null;
+  /** Input-token equivalent using an explicitly supplied rate; not billing savings. */
   estimatedBaselineCostUsd: number | null;
+  /** Model-estimated full-session reduction, identical to sessionEstimate.costReductionPercent. */
   estimatedCostReductionPercent: number | null;
   pricingMode: "automatic" | "manual";
   costPerMillionTokensUsd: number | null;
@@ -153,6 +155,7 @@ export interface TokenLightenUsageSummary {
     asOf: string;
     byClient: Record<TokenLightenClient, TokenLightenAutomaticPrice>;
   };
+  /** Input-token equivalent using an explicitly supplied rate; not billing savings. */
   estimatedSavedCostUsd: number | null;
   /** Full-session actual usage plus deterministic no-TL counterfactual. */
   sessionEstimate: TokenLightenSessionEstimate;

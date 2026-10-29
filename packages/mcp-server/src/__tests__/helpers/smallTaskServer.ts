@@ -14,6 +14,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { killServerGroup } from "./killServerGroup.js";
+import { rmDirWithRetry, waitForExit } from "./rmDirWithRetry.js";
 import { TSX_NODE_ARGS } from "./tsxNode.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -37,7 +38,7 @@ export interface SmallTaskServer {
   notify(method: string, params?: unknown): void;
   /** `light_answer_pack` trace events written so far (needs TL_TRACE=1 in the env). */
   lightAnswerEvents(): number;
-  kill(): void;
+  kill(): Promise<void>;
 }
 
 /** A fresh workspace (realpath) holding `files`. */
@@ -138,9 +139,10 @@ export async function startSmallTaskServer(ws: string, options: StartOptions = {
       }
       return count;
     },
-    kill() {
+    async kill() {
       try { killServerGroup(child); } catch { /* already gone */ }
-      try { fs.rmSync(home, { recursive: true, force: true }); } catch { /* best effort */ }
+      await waitForExit(child);
+      await rmDirWithRetry(home);
     },
   };
 }

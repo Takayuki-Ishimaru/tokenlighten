@@ -444,6 +444,10 @@ export function extractNext(response: any): { next: ToolCallShape | undefined; s
 
 export interface FollowOptions {
   hopCap?: number;
+  /** Readiness checks can stop at the answer; replay-stability callers keep walking. */
+  stopAtAnswer?: boolean;
+  /** Public query reference learned before starting from a mid-chain next call. */
+  resumeQref?: string;
   /** How many times a dead-end (no `next`, but a `qref` was seen) may be
    *  resumed via `{qref, cwd}` alone. See header: a `discover` chain that
    *  bottoms out at a bodyless zoom has not necessarily reached the task's
@@ -459,12 +463,13 @@ export interface FollowOptions {
  * a response has no `next` AND (having exhausted `maxQrefRepacks`) no more
  * qref re-pack is available, or when `hopCap` is reached.
  */
-export async function followNextToEnd(server: ServerHandle, firstCall: ToolCallShape, opts: FollowOptions): Promise<ChainResult> {
+export async function followNextToEnd(server: Pick<ServerHandle, "callTool">, firstCall: ToolCallShape, opts: FollowOptions): Promise<ChainResult> {
   const hopCap = opts.hopCap ?? 12;
   const maxQrefRepacks = opts.maxQrefRepacks ?? 2;
   const hops: Hop[] = [];
   let call: ToolCallShape | undefined = firstCall;
-  let lastQref: string | undefined;
+  let lastQref: string | undefined = opts.resumeQref
+    ?? (typeof firstCall.arguments["qref"] === "string" ? firstCall.arguments["qref"] : undefined);
   let repacksUsed = 0;
   let capped = false;
 
@@ -478,6 +483,8 @@ export async function followNextToEnd(server: ServerHandle, firstCall: ToolCallS
 
     const { next, source } = extractNext(body);
     hops.push({ hopIndex: hops.length, call, response: body, textBytes, nextSource: source });
+
+    if (opts.stopAtAnswer === true && body?.decision?.kind === "act.answer") break;
 
     if (next !== undefined) {
       call = next;

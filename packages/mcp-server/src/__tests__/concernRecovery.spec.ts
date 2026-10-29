@@ -1142,6 +1142,76 @@ describe("runClauseLocateRecovery", () => {
     expect(calls).toBe(1);
   });
 
+  it("a proven bounded inventory retains retries and later clauses under scheduler delay", async () => {
+    let calls = 0;
+    let time = 0;
+    const deps = makeDeps({
+      boundedWork: true,
+      locate: async () => {
+        calls += 1;
+        time += 1100;
+        return { hit: false, candidateDetails: [] };
+      },
+      stemNeighbours: () => ["neighbourword"],
+      now: () => time,
+    });
+    const clauses = Array.from({ length: 4 }, (_, i) => ({ id: `c${i}`, text: `clause number ${i}` }));
+    const outcome = await runClauseLocateRecovery(clauses, [], deps);
+    expect(calls).toBe(5);
+    expect(outcome.locateCallsUsed).toBe(5);
+  });
+
+  it("bounded recovery still stops at its emergency deadline", async () => {
+    let calls = 0;
+    let time = 0;
+    const deps = makeDeps({
+      boundedWork: true,
+      locate: async () => {
+        calls += 1;
+        time += 20_000;
+        return { hit: false, candidateDetails: [] };
+      },
+      stemNeighbours: () => ["neighbourword"],
+      now: () => time,
+    });
+    await runClauseLocateRecovery([{ id: "a", text: "alpha" }, { id: "b", text: "beta" }], [], deps);
+    expect(calls).toBe(1);
+  });
+
+  it("cancellation stops a bounded retry without cancelling a concurrent recovery", async () => {
+    const controller = new AbortController();
+    const reason = new Error("cancel this request");
+    let cancelledCalls = 0;
+    const cancelled = runClauseLocateRecovery([{ id: "a", text: "alpha" }], [], makeDeps({
+      boundedWork: true,
+      signal: controller.signal,
+      stemNeighbours: () => ["neighbourword"],
+      locate: async () => {
+        cancelledCalls += 1;
+        controller.abort(reason);
+        return { hit: false, candidateDetails: [] };
+      },
+    }));
+    const independent = runClauseLocateRecovery([{ id: "b", text: "where is a clause" }], [], makeDeps({
+      boundedWork: true,
+      locate: async () => ({ hit: true, primary: [{ path: "src/clause.ts", confidence: 1 }] }),
+    }));
+    await expect(cancelled).rejects.toBe(reason);
+    expect(cancelledCalls).toBe(1);
+    expect((await independent).picks).toHaveLength(1);
+  });
+
+  it("propagates locate failures without attempting another bounded call", async () => {
+    let calls = 0;
+    const error = new Error("unavailable workspace");
+    await expect(runClauseLocateRecovery([{ id: "a", text: "alpha" }], [], makeDeps({
+      boundedWork: true,
+      stemNeighbours: () => ["neighbourword"],
+      locate: async () => { calls += 1; throw error; },
+    }))).rejects.toBe(error);
+    expect(calls).toBe(1);
+  });
+
   it("Japanese clause: retries with jaBridgeRecoveryQuery when the first attempt fails, and the pick is accepted once it passes coverage extended with jaBridgeExpansionTokens", async () => {
     const queries: string[] = [];
     const deps = makeDeps({

@@ -409,11 +409,11 @@ describe("privacy-preserving usage recording", () => {
       measuredBaselineBytes: 2000,
       estimatedReductionPercent: 80,
       estimatedTokenReductionPercent: 80,
-      estimatedBaselineCostUsd: 0.001,
-      estimatedCostReductionPercent: 80,
+      estimatedBaselineCostUsd: null,
+      estimatedCostReductionPercent: null,
       pricingMode: "automatic",
       costPerMillionTokensUsd: null,
-      estimatedSavedCostUsd: 0.0008,
+      estimatedSavedCostUsd: null,
     });
     const raw = readFileSync(
       join(directory, `usage-${events[0]!.occurredAt.slice(0, 10)}.ndjson`),
@@ -513,8 +513,8 @@ describe("privacy-preserving usage recording", () => {
     expect(summarizeUsage(events)).toMatchObject({
       estimatedSavedTokens: -50,
       estimatedTokenReductionPercent: -100,
-      estimatedSavedCostUsd: -0.0001,
-      estimatedCostReductionPercent: -100,
+      estimatedSavedCostUsd: null,
+      estimatedCostReductionPercent: null,
     });
   });
 
@@ -717,11 +717,11 @@ describe("privacy-preserving usage recording", () => {
       measuredBaselineBytes: 2000,
       estimatedReductionPercent: 80,
       estimatedTokenReductionPercent: 80,
-      estimatedBaselineCostUsd: 0.001,
-      estimatedCostReductionPercent: 80,
+      estimatedBaselineCostUsd: null,
+      estimatedCostReductionPercent: null,
       pricingMode: "automatic",
       costPerMillionTokensUsd: null,
-      estimatedSavedCostUsd: 0.0008,
+      estimatedSavedCostUsd: null,
     });
   });
 
@@ -830,9 +830,9 @@ describe("privacy-preserving usage recording", () => {
     });
   });
 
-  it("uses automatic client pricing until the user supplies an override", () => {
+  it("retains legacy price metadata without using it for savings", () => {
     const automatic = summarizeUsage([]);
-    expect(automatic.estimatedSavedCostUsd).toBe(0);
+    expect(automatic.estimatedSavedCostUsd).toBeNull();
     expect(automatic.pricingMode).toBe("automatic");
     expect(automatic.costPerMillionTokensUsd).toBeNull();
     expect(automatic.automaticPricing.byClient["claude-code"]).toMatchObject({
@@ -920,9 +920,9 @@ describe("privacy-preserving usage recording", () => {
     expect(summary.byClient).toMatchObject({ codex: 1, "claude-code": 1 });
     expect(summary.estimatedReductionPercent).toBeCloseTo(40 / 3);
     expect(summary.estimatedTokenReductionPercent).toBeCloseTo(40 / 3);
-    expect(summary.estimatedSavedCostUsd).toBeCloseTo(0.00004);
-    expect(summary.estimatedBaselineCostUsd).toBeCloseTo(0.0008);
-    expect(summary.estimatedCostReductionPercent).toBeCloseTo(5);
+    expect(summary.estimatedSavedCostUsd).toBeNull();
+    expect(summary.estimatedBaselineCostUsd).toBeNull();
+    expect(summary.estimatedCostReductionPercent).toBeNull();
   });
 
   it("reads only structured usage from AI sessions that used TokenLighten", () => {
@@ -1080,6 +1080,7 @@ describe("privacy-preserving usage recording", () => {
     expect(summary.sessionEstimate.actualTotalCostUsd).toBeCloseTo(0.00284);
     expect(summary.sessionEstimate.predictedWithoutTlCostUsd).toBeCloseTo(0.00484);
     expect(summary.sessionEstimate.costReductionPercent).toBeCloseTo(0.002 / 0.00484 * 100);
+    expect(summary.estimatedCostReductionPercent).toBe(summary.sessionEstimate.costReductionPercent);
 
     const regression = summarizeUsage([
       {
@@ -1361,9 +1362,10 @@ describe("privacy-preserving usage recording", () => {
     expect(summary.measuredBaselineTokens).toBe(1_000_000);
     expect(summary.estimatedSavedTokens).toBe(1_000_000);
     expect(summary.sessionEstimate.predictedSavedTokens).toBe(11_000_000);
-    expect(summary.sessionEstimate.predictedSavedCostUsd).toBeCloseTo(6.75);
+    expect(summary.sessionEstimate.predictedSavedCostUsd).toBeNull();
     expect(summary.sessionEstimate.actualTotalCostUsd).not.toBeNull();
-    expect(summary.sessionEstimate.costReductionPercent).not.toBeNull();
+    expect(summary.sessionEstimate.costReductionPercent).toBeNull();
+    expect(summary.estimatedCostReductionPercent).toBeNull();
     expect(summary.sessionEstimate.unpricedTokenShare).toBe(0.5);
     expect(summary.sessionEstimate.warnings).toContain("one-or-more-models-unpriced");
     expect(summary.sessionEstimate.residencyModel).toMatchObject({

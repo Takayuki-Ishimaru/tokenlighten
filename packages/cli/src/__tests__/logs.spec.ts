@@ -212,8 +212,8 @@ describe("tl logs summary scoping", () => {
     // existing fail-closed lines below remain exactly "unavailable".
     expect(text).toContain("Observed full-session tokens: unavailable\n");
     expect(text).toContain("Predicted no-TL tokens: unavailable\n");
-    expect(text).toContain("Full-session token reduction: unavailable\n");
-    expect(text).toContain("Full-session cost reduction: unavailable\n");
+    expect(text).toContain("Model-estimated full-session token reduction: unavailable\n");
+    expect(text).toContain("Model-estimated full-session cost reduction: unavailable\n");
   });
 
   it("feeds the display from task-grouped successful totals and excludes errors", async () => {

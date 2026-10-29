@@ -287,26 +287,57 @@ interface CompileDb {
   union: string[];
 }
 
-/** POSIX-shell word splitting (quotes and backslash escapes) of a compile `command`. */
-function shellSplit(command: string): string[] {
+/** Split compile commands, retaining native Windows paths alongside shell quoting. */
+export function splitCompileCommand(command: string, windowsPaths = process.platform === "win32"): string[] {
   const out: string[] = [];
   let cur = "";
   let has = false;
   let quote: string | undefined;
+  let nativePath = false;
   for (let i = 0; i < command.length; i++) {
     const c = command[i]!;
+    if (c === "\\" && quote !== "'") {
+      // A native drive/UNC path is not a POSIX escape sequence. Recognize only
+      // complete path prefixes, optionally attached to a known include flag.
+      nativePath ||= windowsPaths && (
+        /^(?:-isystem|-iquote|-idirafter|-I|\/I|-external:I|-imsvc)?[A-Za-z]:/.test(cur)
+        || (command[i + 1] === "\\" && /^(?:-isystem|-iquote|-idirafter|-I|\/I|-external:I|-imsvc)?$/.test(cur))
+      );
+      if (nativePath) {
+        let end = i + 1;
+        while (command[end] === "\\") end++;
+        const count = end - i;
+        if (command[end] === '"') {
+          // Windows argv quoting: pairs before a quote are literal slashes;
+          // an odd final slash escapes the quote instead of closing it.
+          cur += "\\".repeat(Math.floor(count / 2));
+          if (count % 2) { cur += '"'; i = end; }
+          else i = end - 1;
+        } else {
+          cur += "\\".repeat(count);
+          i = end - 1;
+        }
+        has = true;
+        continue;
+      }
+    }
     if (quote !== undefined) {
       if (c === quote) quote = undefined;
-      else if (c === "\\" && quote === "\"" && i + 1 < command.length) cur += command[++i];
+      else if (c === "\\" && quote === "\"" && /["\\$`\n]/.test(command[i + 1] ?? "")) {
+        const escaped = command[++i];
+        if (escaped !== "\n") cur += escaped;
+      }
       else cur += c;
     } else if (c === "'" || c === "\"") {
       quote = c;
       has = true;
     } else if (c === "\\" && i + 1 < command.length) {
-      cur += command[++i];
+      const escaped = command[++i];
+      if (escaped !== "\n") cur += escaped;
       has = true;
     } else if (/\s/.test(c)) {
       if (has) { out.push(cur); cur = ""; has = false; }
+      nativePath = false;
     } else {
       cur += c;
       has = true;
@@ -348,7 +379,7 @@ function parseCompileCommands(text: string): CompileDb {
     const args = Array.isArray(e["arguments"])
       ? e["arguments"].filter((a): a is string => typeof a === "string")
       : typeof e["command"] === "string"
-        ? shellSplit(e["command"])
+        ? splitCompileCommand(e["command"])
         : [];
     const dirs = unique(includeDirsOfArgs(args, directory));
     if (file.length > 0) db.byFile.set(path.resolve(directory, file), dirs);

@@ -14,10 +14,9 @@
 //    every internal import is static, so esbuild inlines it into one file
 //    (dist/tl-cli.js), along with whatever it statically imports from
 //    sibling packages (@tokenlighten/types and @tokenlighten/usage).
-//    @tokenlighten/agents-md is deliberately external here even though
-//    workspace.ts imports it statically: its renderers locate templates from
-//    their real package directory, so the CLI must resolve the runtime package
-//    copied under dist/node_modules instead of an inlined copy in tl-cli.js.
+//    agents-md and skeleton-engine stay external despite workspace.ts's static
+//    imports: their templates/package metadata resolve relative to each real
+//    package. Use the runtime copies under dist/node_modules, not tl-cli.js.
 //
 //  - @tokenlighten/mcp-server, @tokenlighten/skeleton-engine, and
 //    @tokenlighten/agents-md are NOT reachable that way for every use, even
@@ -119,7 +118,7 @@ const publicCore2ExclusionPlugin = {
   name: "tokenlighten-public-core2-exclusion",
   setup(buildContext) {
     const serverEntry = join(REPO_ROOT, "packages/mcp-server/src/server.ts");
-    buildContext.onLoad({ filter: /\/server\.ts$/ }, (args) => {
+    buildContext.onLoad({ filter: /[\\/]server\.ts$/ }, (args) => {
       if (args.path !== serverEntry) return undefined;
       let contents = readFileSync(args.path, "utf8");
       const replacements = [
@@ -346,7 +345,7 @@ export async function bundleCli({ outDir = DEFAULT_DIST, nativeSemanticRuntime =
     ...commonOpts,
     entryPoints: [join(REPO_ROOT, "packages/cli/src/index.ts")],
     outfile: join(outDir, "tl-cli.js"),
-    external: ["@tokenlighten/agents-md"],
+    external: ["@tokenlighten/agents-md", "@tokenlighten/skeleton-engine"],
   });
   // version.ts / help.ts read their own version via
   // require.resolve("@tokenlighten/cli/package.json") (not a hardcoded

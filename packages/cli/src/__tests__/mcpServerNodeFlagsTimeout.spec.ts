@@ -6,31 +6,31 @@
  * to no flag. The timeout is now 3 s.
  *
  * A separate file (never edits mcp.spec.ts's shared spawn/fs mocks) because this test needs a REAL
- * executable on disk that spawnSync can actually exec and that hangs past the timeout.
+ * child process that really hangs past the timeout. A POSIX shell fixture is
+ * not executable on Windows, so the probe seam runs a hanging Node child.
  */
-import { describe, it, expect } from "vitest";
-import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
+import { describe, it, expect, vi } from "vitest";
+
+const probe = vi.hoisted(() => ({ spawn: vi.fn() }));
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  probe.spawn.mockImplementation((_file, _args, options) => actual.spawnSync(
+    process.execPath, ["-e", "setTimeout(() => {}, 30000)"], options,
+  ));
+  return { ...actual, spawnSync: probe.spawn };
+});
 
 describe("serverNodeFlags — bounded probe timeout", () => {
   it("falls back to no flag well under the old 10s timeout when the probed runtime hangs", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "tl-hang-probe-"));
-    const script = join(dir, "hangs");
-    try {
-      writeFileSync(script, "#!/bin/sh\nsleep 30\n");
-      chmodSync(script, 0o755);
+    const { serverNodeFlags } = await import("../commands/mcp.js");
+    const start = Date.now();
+    expect(serverNodeFlags(process.execPath)).toEqual([]);
+    const elapsedMs = Date.now() - start;
+    expect(probe.spawn).toHaveBeenCalledWith(process.execPath, ["--liftoff-only", "--version"],
+      expect.objectContaining({ shell: false, timeout: 3000 }));
 
-      const { serverNodeFlags } = await import("../commands/mcp.js");
-      const start = Date.now();
-      expect(serverNodeFlags(script)).toEqual([]);
-      const elapsedMs = Date.now() - start;
-
-      // Actually hit the timeout (not a fast ENOENT-style failure) but nowhere near the old 10s bound.
-      expect(elapsedMs).toBeGreaterThanOrEqual(2500);
-      expect(elapsedMs).toBeLessThan(8000);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    // Actually hit the timeout (not a fast ENOENT-style failure) but nowhere near the old 10s bound.
+    expect(elapsedMs).toBeGreaterThanOrEqual(2500);
+    expect(elapsedMs).toBeLessThan(8000);
   }, 15_000);
 });

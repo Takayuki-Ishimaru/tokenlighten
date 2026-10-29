@@ -21,6 +21,8 @@
 //
 // Restart and durability cases still need a real process: a reset is not a
 // restart, so on-disk state is never reloaded by it.
+// With TL_TEST_SESSION_CWD the harness keeps the physical cwd in a stable
+// directory, avoiding Windows fixture deletion locks while activeRoot changes.
 import { resetServerStateForSessionReset } from "../server.js";
 import { resetAll as resetSessions, resetClockForTest } from "../state/session.js";
 import { handleTable } from "../util/handles.js";
@@ -68,7 +70,7 @@ import { resetLedgerBindingIndexForTests } from "../protocol/ledgerCertificateBi
 import { resetLexicalSegmentsCache } from "../tools/lexicalRanges.js";
 import { resetGitignorePatternsCache, resetTokenlightenIgnoreCache } from "../tools/walkRepo.js";
 import { resetProofCompletionLiveCounterForTest } from "../util/flags.js";
-import { resetStartupWarmupForTest } from "../util/startupWarmup.js";
+import { noteToolCallStarted, resetStartupWarmupForTest, startupWarmupSettledForTest } from "../util/startupWarmup.js";
 import { resetTraceStateForTests } from "../util/trace.js";
 import { resetVerificationKitDedupeForTest } from "../util/verificationPack.js";
 import { resetPythonProbeCacheForTest } from "../util/pythonInterpreter.js";
@@ -80,17 +82,32 @@ export interface SessionResetResult {
   readonly root: string;
 }
 
+/** Test-pool framing on stderr; the following safe token ends at the newline. */
+export const TEST_RESET_STDERR_PREFIX = "\u001eTL_TEST_RESET_STDERR:";
+
 /**
- * Re-roots the server at `params.workspaceRoot` (process cwd `params.cwd`,
- * default the root) and clears all per-session state (see the header).
+ * Re-roots the server at `params.workspaceRoot` (logical cwd `params.cwd`,
+ * default the root) and clears all per-session state (see the header). Physical
+ * cwd remains stable when the test pool supplies TL_TEST_SESSION_CWD.
  */
-export function resetServerSessionForTests(params: unknown): SessionResetResult {
-  const { workspaceRoot, cwd } = (params ?? {}) as { workspaceRoot?: unknown; cwd?: unknown };
+export async function resetServerSessionForTests(params: unknown): Promise<SessionResetResult> {
+  const { workspaceRoot, cwd, stderrBarrier } = (params ?? {}) as {
+    workspaceRoot?: unknown; cwd?: unknown; stderrBarrier?: unknown;
+  };
   if (typeof workspaceRoot !== "string" || workspaceRoot === "") {
     throw new Error("tokenlighten/testReset needs params.workspaceRoot (an absolute path)");
   }
+  if (stderrBarrier !== undefined && (typeof stderrBarrier !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(stderrBarrier))) {
+    throw new Error("tokenlighten/testReset params.stderrBarrier must be 1-80 ASCII letters, digits, underscores or hyphens");
+  }
   // Re-root first: it validates the new root and throws before anything is cleared.
   const root = resetServerStateForSessionReset(workspaceRoot, typeof cwd === "string" && cwd !== "" ? cwd : workspaceRoot);
+
+  // A scheduled or currently running warm-up belongs to the old session. Stop
+  // and drain it before clearing its latch; otherwise resetting stopped=false
+  // can revive the old pass and let it mutate caches after the stderr barrier.
+  noteToolCallStarted();
+  await startupWarmupSettledForTest();
 
   // Session, lane and task state.
   resetSessions();
@@ -151,5 +168,9 @@ export function resetServerSessionForTests(params: unknown): SessionResetResult 
   __resetShadowGitForTests();
   resetNestedWorkspaceCache();
 
+  // stderr and stdout are independent pipes. The pool must receive BOTH this
+  // marker and the reset RPC acknowledgement before exposing the next session.
+  // Writing the marker last keeps all preceding stderr in the old session.
+  if (stderrBarrier !== undefined) process.stderr.write(`${TEST_RESET_STDERR_PREFIX}${stderrBarrier}\n`);
   return { reset: true, root };
 }

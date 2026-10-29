@@ -203,9 +203,10 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       const hop1 = await server.callTool("tl_read_file", { targets: [{ handle, range: ZOOM_RANGE }], cwd: ws, lane });
       expect(hop1.body?.kind).toBe("read.text");
       expect(
-        JSON.stringify(hop1.body).includes(ZOOM_IDENTIFIER),
-        `the zoom itself must serve the identifier's body: ${JSON.stringify(hop1.body)}`,
+        [...hop0.body.evidence, ...hop1.body.evidence].some((row: { body?: string }) => row.body?.includes(ZOOM_IDENTIFIER)),
+        `the initial pack and zoom must carry the identifier: ${JSON.stringify(hop1.body)}`,
       ).toBe(true);
+      expect(hop1.body.evidence.some((row: { body?: string }) => row.body?.includes("stagesCompleted < totalStages"))).toBe(true);
 
       const hop2 = await server.callTool("tl_read_file", { qref, cwd: ws, lane });
       // THE CORE ASSERTION: the re-pack must not re-open the concern the zoom

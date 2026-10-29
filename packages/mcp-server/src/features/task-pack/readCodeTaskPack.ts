@@ -13,6 +13,7 @@ import {makeSourceBodyCapsule, sourceCapsuleCovers, type SourceBodyCapsule} from
 import {clearSourceCapsules, sourceCapsulePrior, stageSourceCapsules} from "./sourceCapsuleCallScope.js";
 import {rehydrateHandleEntry} from "../../state/stateHandles.js";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { currentRequestSignal } from "../../util/requestCancellation.js";
 import {protocolCallContext} from "../../protocol/envelope.js";
 import {estimateAnswerBody, isExactContiguousBody, preferExactAnswerBody} from "../../protocol/answerBodyPolicy.js";
 import {goReturnedLocalReview, bindGoReviewOrigin} from "../../goReturnedLocalReview.js";
@@ -59,7 +60,7 @@ import {
 } from "../../tools/walkRepo.js";
 import { buildCompactTree } from "../../tools/exploreTree.js";
 import { getCurrentDiff } from "../../tools/getCurrentDiff.js";
-import { callWorkspace, handleTable, shaOfBytes, shaOfText } from "../../util/handles.js";
+import { callWorkspace, handleTable, shaOfBytes, shaOfText, type HandleEntry } from "../../util/handles.js";
 import { classifySurface, surfaceInventory, deriveTokenVariants } from "../../util/impact.js";
 import { readFileSafe, readServedTextSafe, safeResolve, isWithin, resolveReal, statReadTargetSync } from "../../util/safePath.js";
 import { decodeTextBuffer, readServedText, servedTextOrUndefined, type ServedTextVerdict } from "../../util/textDecode.js";
@@ -99,6 +100,7 @@ import {
   planArtifactConsumers,
 } from "./artifactConsumers.js";
 import { expandOneHop } from "./openUniverseExpansion.js";
+import { scanRequestItemLiteral } from "./requestItemScan.js";
 import { containsWholeIdentifier, nearMissIdentifiersIn, wholeIdentifierOffsets } from "./wholeIdentifier.js";
 import {
   createScanContentCache,
@@ -162,7 +164,7 @@ import {
   nextStringToCall,
   type ContinuationPlan,
 } from "../../util/continuation.js";
-import { collectSymbols, symbolCollectorSupports, type CollectedSymbol, type CollectedSymbolKind } from "../../symbols/collectSymbols.js";
+import { collectSymbols, preferPythonImplementations, symbolCollectorSupports, type CollectedSymbol, type CollectedSymbolKind } from "../../symbols/collectSymbols.js";
 import {
   answerFirstCover,
   answerFormFree,
@@ -179,7 +181,7 @@ import {
   type StructureMapType,
 } from "./structureMap.js";
 import { resolveImportsOf } from "./importResolution.js";
-import { recordPackChecks, getPackChecks, tokenizeForEpoch, deriveCheckId, recordConcernTokens, recordServedEditAdmissibility, recordWithheldEditAddresses, isCandidateListPackPending, recordServedRange, beginServeCall, servedFindWindowHasUnservedLines, servedClusterRanges, servedRangeReceipt, servedRangeCoverage, getIntentEditObserved, getSession, type PackCheckRecord } from "../../state/session.js";
+import { bindReceiptExecutionAddresses, type ReceiptExecutionAddress, recordPackChecks, getPackChecks, tokenizeForEpoch, deriveCheckId, recordConcernTokens, recordServedEditAdmissibility, recordWithheldEditAddresses, isCandidateListPackPending, recordServedRange, beginServeCall, servedFindWindowHasUnservedLines, servedClusterRanges, servedRangeReceipt, servedRangeCoverage, getIntentEditObserved, getSession, type PackCheckRecord } from "../../state/session.js";
 import {
   createRequestItemIndexView,
   stripDelegationActorSpans,
@@ -1211,6 +1213,7 @@ export class FileReadCache {
     let parsed: ParsedSymbols | null;
     try {
       parsed = await collectSymbols(text, lang, {});
+      if (lang === "python") parsed = preferPythonImplementations(parsed, text);
     } catch {
       parsed = null;
     }
@@ -4803,6 +4806,14 @@ async function buildTaskPackCore(
     )
       ? inferredNamedProjectScope
       : undefined;
+  if (cleanedProfile === "answer" && !cleanedPath && !args.symbol && cleanedEntries.length === 0
+    && namedProjectScope === undefined && queryNamedPathTokens(locatingQuery).length === 0
+    && !DOC_MENTION_WORD_RE.test(locatingQuery)) {
+    const commandTarget = commandLiteralAnswerTarget(locatingQuery, workspace);
+    if (commandTarget !== undefined) {
+      return buildSeededTaskPack({ ...args, paths: [commandTarget], autoDiscoveredLocation: true }, query, workspace);
+    }
+  }
   // WP-S8 (TL_NAMED_TARGET_RESOLUTION, 2026-09-20): the repair above was
   // written for a directory the model GUESSED before it had located the
   // project ("src", "backend") -- but it drops EVERY directory entry once an
@@ -5275,15 +5286,11 @@ async function buildTaskPackCore(
   }
 
   // -------------------------------------------------------------------------
-  // Symptom-shaped (fix/bug) routing: when the query describes a defect
-  // rather than a feature addition, the working tree's own drift from its
-  // git baseline is almost always the actual answer (the changed lines ARE
-  // the bug), so return DRIFT surfaces instead of running the enum-variant
-  // template against files the query happens to text-match. Falls through
-  // to the normal locate flow when there is no usable diff (clean tree, no
-  // git repo, or query is not path/symbol-scoped in a way locate wants).
+  // A defect can already be committed. Use drift as the requested scope only
+  // when the caller explicitly ties the defect to their working-tree changes.
+  // Incidental setup files and runtime journals are never evidence of its cause.
   // -------------------------------------------------------------------------
-  if (!args.path && !args.symbol && isSymptomShapedQuery(query)) {
+  if (!args.path && !args.symbol && isSymptomShapedQuery(query) && requestsWorkingTreeInvestigation(query)) {
     const diffPack = await buildDiffTaskPack(query, workspace);
     if (diffPack) {
       // DESIGN-v0.8 coverage-honesty (Part 5): a symptom/bug query records its
@@ -6244,6 +6251,8 @@ async function buildAnswerTaskPack(
         jaExpansionTokens: (clauseText) => jaBridgeExpansionTokens(clauseText, workspace),
         jaRecoveryQuery: (clauseText) => jaBridgeRecoveryQuery(clauseText, workspace),
         now: () => Date.now(),
+        boundedWork: boundedClauseRecoveryWork(),
+        signal: currentRequestSignal(),
         onLocateAttempt: recordClauseLocateAttempt,
       });
       if (clauseRecovery.picks.length > 0) {
@@ -13719,6 +13728,8 @@ async function buildSeededTaskPack(
             jaExpansionTokens: (clauseText) => jaBridgeExpansionTokens(clauseText, workspace),
             jaRecoveryQuery: (clauseText) => jaBridgeRecoveryQuery(clauseText, workspace),
             now: () => Date.now(),
+            boundedWork: boundedClauseRecoveryWork(),
+            signal: currentRequestSignal(),
             onLocateAttempt: recordClauseLocateAttempt,
           },
         );
@@ -13976,6 +13987,8 @@ async function buildSeededTaskPack(
             jaExpansionTokens: (clauseText) => jaBridgeExpansionTokens(clauseText, workspace),
             jaRecoveryQuery: (clauseText) => jaBridgeRecoveryQuery(clauseText, workspace),
             now: () => Date.now(),
+            boundedWork: boundedClauseRecoveryWork(),
+            signal: currentRequestSignal(),
             onLocateAttempt: recordClauseLocateAttempt,
           },
         );
@@ -14460,6 +14473,40 @@ function answerRecoveryQuery(query: string): string | undefined {
     recovered.push(token);
   }
   return recovered.length >= 2 ? recovered.join(" ") : undefined;
+}
+
+/** A quoted CLI command and its literal options can identify a unique source file before prose ranking. */
+function commandLiteralAnswerTarget(query: string, workspace: string): TaskPackPathEntry | undefined {
+  const commands = new Set<string>();
+  for (const quoted of query.matchAll(/`([^`\r\n]+)`/gu)) {
+    const words = quoted[1]!.trim().split(/\s+/u);
+    if (words.length < 2 || !/^[A-Za-z0-9_./-]+$/u.test(words[0]!)) continue;
+    const subcommands: string[] = [];
+    for (const word of words.slice(1)) {
+      if (word.startsWith("-")) break;
+      if (!/^[a-z][a-z0-9_-]*$/u.test(word)) break;
+      subcommands.push(word);
+    }
+    if (subcommands.length > 0) commands.add(subcommands[subcommands.length - 1]!);
+  }
+  const options = [...new Set(query.match(/--[A-Za-z][A-Za-z0-9-]*/gu) ?? [])];
+  if (commands.size !== 1 || options.length === 0 || options.length > 4) return undefined;
+  const command = [...commands][0]!;
+  // File-stem identity and every option's exact spelling must agree. A tie
+  // remains an ordinary discovery request, never a guessed project binding.
+  const candidates = [...new Set(scanLiteral(options[0]!, workspace, { caseInsensitive: false }).map((hit) => hit.path))]
+    .filter((candidate) => path.basename(candidate, path.extname(candidate)) === command
+      && isImplementationPath(candidate) && !isTestConcernPath(candidate));
+  const matches = candidates.flatMap((candidate) => {
+    const content = readCached(workspace, candidate);
+    if (content === undefined || !options.every((option) =>
+      new RegExp(`${escapeRegExp(option)}(?![A-Za-z0-9-])`, "u").test(content))) return [];
+    // Naming the command's file locates the investigation, not its answer.
+    // Retain its unserved extent so a matching header/help string cannot
+    // certify a description of the runtime behavior by itself.
+    return [{ path: candidate, range: `1-${countLines(content)}` }];
+  });
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 /** Lexical-overlap weight for a query token found in the symbol's BODY text — bodies are long and noisier, so a body-only hit counts for less than a name hit. */
@@ -15729,14 +15776,8 @@ async function anchorFocusForLocatorCandidate(
 }
 
 // ---------------------------------------------------------------------------
-// A4: symptom-shaped (fix/bug) queries route to working-tree drift instead
-// of the enum-variant template. The query wording that decides a bug fix
-// ("windup", "race condition", "sign flip", ...) rarely text-matches
-// the files that actually need to change, but `git diff` against the
-// working tree's own baseline almost always points straight at them,
-// because the bug (or its fix) IS the drift. task_pack already had the
-// capability (explore action=diff / getCurrentDiff) — it just never routed
-// symptom-shaped queries there.
+// Explicit working-tree defect investigations can use changed source regions.
+// Symptom wording alone does not establish any relationship to a git diff.
 // ---------------------------------------------------------------------------
 
 /** Words that mark a query as describing a defect rather than a feature addition. */
@@ -15746,6 +15787,18 @@ const SYMPTOM_WORDS =
 /** True when the query reads like a bug-fix task rather than a feature addition. */
 function isSymptomShapedQuery(query: string): boolean {
   return SYMPTOM_WORDS.test(query);
+}
+
+function requestsWorkingTreeInvestigation(query: string): boolean {
+  return /\b(?:working[- ]tree|(?:uncommitted|unstaged|staged)\s+(?:changes?|diffs?|edits?|files?)|git\s+diff|my\s+(?:recent\s+)?changes|changes\s+I\s+(?:just\s+)?made)\b/iu.test(query)
+    || /(?:未コミット|ステージ済み|ステージング)(?:の)?(?:変更|差分|編集|ファイル)|作業ツリー|自分の変更|直前の変更/u.test(query);
+}
+
+function isTaskPackGeneratedDrift(relPath: string, workspace: string): boolean {
+  if (/(?:^|\/)(?:dist|build|__pycache__|node_modules|\.tokenlighten)(?:\/|$)/u.test(relPath)) return true;
+  if (!/^(?:\.mcp\.json|\.codex\/config\.toml|\.vscode\/(?:mcp|settings)\.json|AGENTS\.md|CLAUDE\.md|\.github\/copilot-instructions\.md)$/u.test(relPath)) return false;
+  const content = readCached(workspace, relPath);
+  return content !== undefined && /tokenlighten|tl-mcp|tokenlighten:mcp-instructions/iu.test(content);
 }
 
 /**
@@ -15810,7 +15863,7 @@ async function buildDiffTaskPack(query: string, workspace: string): Promise<Task
     if (file.status === "deleted") continue; // nothing left on disk to slice
     if (prefix && !file.path.startsWith(prefix)) continue; // defensive: outside workspace despite scoping
     const relPath = prefix ? file.path.slice(prefix.length) : file.path;
-    if (/\/(dist|build|__pycache__|node_modules)\//.test(relPath)) continue;
+    if (isTaskPackGeneratedDrift(relPath, workspace)) continue;
 
     // Anchor the range on the first changed hunk (the actual edit site),
     // not the file header — widen a few lines of context around it.
@@ -41842,7 +41895,7 @@ function proveUnbindableRequestItem(
     // `replenishInventory`), and so does every word's variant/path-name scan.
     const explicitIdentifier = isCodeShapedTerm(word);
     const lineCache = explicitIdentifier ? new FileReadCache() : undefined;
-    for (const match of scanLiteral(word, workspace, { files: universe.files, caseInsensitive: true, coverage, ...(contentCache ? { contentCache } : {}) })) {
+    for (const match of scanRequestItemLiteral(word, workspace, { files: universe.files, caseInsensitive: true, coverage, ...(contentCache ? { contentCache } : {}) })) {
       if (explicitIdentifier && !hitLineHoldsWholeIdentifier(workspace, match, word, lineCache)) continue;
       addMatch(match.path, match.line);
     }
@@ -41888,7 +41941,7 @@ function proveUnbindableRequestItem(
       const isJapaneseWord = containsJapanese(word);
       for (const variant of variants) {
         if (variant === word.toLowerCase()) continue;
-        for (const match of scanLiteral(variant, workspace, { files: universe.files, caseInsensitive: true, coverage, ...(contentCache ? { contentCache } : {}) })) {
+        for (const match of scanRequestItemLiteral(variant, workspace, { files: universe.files, caseInsensitive: true, coverage, ...(contentCache ? { contentCache } : {}) })) {
           if (isJapaneseWord || (match.text !== undefined && textHasWordVariant(match.text, word))) {
             addMatch(match.path, match.line);
           }
@@ -43225,7 +43278,7 @@ function distinctiveSalientAbsence(
       for (const variant of inflectionVariants(word)) {
         if (variantFound) break;
         if (variant === word.toLowerCase()) continue;
-        for (const match of scanLiteral(variant, workspace, { files: universe.files, caseInsensitive: true, coverage, ...(contentCache ? { contentCache } : {}) })) {
+        for (const match of scanRequestItemLiteral(variant, workspace, { files: universe.files, caseInsensitive: true, coverage, ...(contentCache ? { contentCache } : {}) })) {
           if (match.text !== undefined && textHasWordVariant(match.text, word)) {
             variantFound = true;
             break;
@@ -43240,7 +43293,7 @@ function distinctiveSalientAbsence(
     if (bridged !== undefined) {
       let jaMatch = false;
       for (const candidate of bridged.variants) {
-        for (const _ of scanLiteral(candidate, workspace, { files: universe.files, caseInsensitive: true, coverage, ...(contentCache ? { contentCache } : {}) })) {
+        for (const _ of scanRequestItemLiteral(candidate, workspace, { files: universe.files, caseInsensitive: true, coverage, ...(contentCache ? { contentCache } : {}) })) {
           jaMatch = true;
           break;
         }
@@ -43268,7 +43321,7 @@ function distinctiveSalientAbsence(
       continue;
     }
     let hasMatch = false;
-    for (const _ of scanLiteral(word, workspace, { files: universe.files, caseInsensitive: true, coverage, ...(contentCache ? { contentCache } : {}) })) {
+    for (const _ of scanRequestItemLiteral(word, workspace, { files: universe.files, caseInsensitive: true, coverage, ...(contentCache ? { contentCache } : {}) })) {
       hasMatch = true;
       break;
     }
@@ -43333,6 +43386,7 @@ const MAX_DECISION_TREE_SITTER_CANDIDATES = 8;
 
 interface RequestItemPrewalk {
   universe: FindTextUniverse;
+  boundedClauseRecovery?: boolean;
   contentCache: ScanContentCache;
   /** `relPath -> identifier -> AST-resolved declaration range`, consulted by `declarationRangeInFile` above. An ABSENT entry is the honest "the AST could not bound this" answer, never an invitation to estimate. Never mutated after `prepareRequestItemPrewalk` returns. */
   astDeclarationRanges: ReadonlyMap<string, ReadonlyMap<string, LineSpan>>;
@@ -43340,6 +43394,33 @@ interface RequestItemPrewalk {
 
 /** `undefined` outside a `buildTaskPack` call, or when the pre-pass determined nothing needed resolving (a single-item query, or a composite query with no `decision` item) — `declarationRangeInFile` treats a missing store, a missing file entry and a missing identifier entry identically: `{source:"unresolved"}`, i.e. only whole-file coverage can prove that candidate. See the module doc comment just above for the full ALS rationale. */
 const requestItemPrewalkStorage = new AsyncLocalStorage<RequestItemPrewalk | undefined>();
+
+/** A conservative work proof over the existing composite-request prewalk.
+ * Its full-recall, 8 MiB text inventory includes docs and manifests and is a
+ * superset of locate's code/CSS and wide-literal scans. Artifacts never enter
+ * locate ranking or parsing. Unknown/omitted inventories keep the old time
+ * guards. This performs at most 128 stats, and never another directory walk.
+ */
+export function clauseRecoveryInventoryIsBounded(universe: FindTextUniverse): boolean {
+  if (universe.scopes.length !== 1 || universe.scopes[0] !== "."
+    || anyWalkOmission(universe.omissions) || universe.files.length > 128) return false;
+  let bytes = 0;
+  for (const file of universe.files) {
+    try {
+      const stat = fs.statSync(file.absPath);
+      if (!stat.isFile()) return false;
+      bytes += stat.size;
+      if (bytes > 1024 * 1024) return false;
+    } catch { return false; }
+  }
+  return true;
+}
+
+function boundedClauseRecoveryWork(): boolean {
+  const prewalk = requestItemPrewalkStorage.getStore();
+  if (prewalk === undefined) return false;
+  return prewalk.boundedClauseRecovery ??= clauseRecoveryInventoryIsBounded(prewalk.universe);
+}
 
 /**
  * Resolves the AST-backed declaration range for every `decision` request
@@ -50620,6 +50701,8 @@ interface ServedPackRecord {
     path: string;
     range: string;
     role: string;
+    /** Capability identity captured before proof compaction; never emitted. */
+    handleIdentity?: Readonly<HandleEntry>;
     content_completeness?: "partial";
     total_lines?: number;
     remaining_ranges?: string[];
@@ -51573,6 +51656,7 @@ function writeServedPackRecord(
     path: s.path,
     range: s.range,
     role: s.role,
+    handleIdentity: handleTable.get(s.handle) ? { ...handleTable.get(s.handle)! } : undefined,
     // B5/P1-6: thread the honesty markers through — see ServedPackRecord.surfaces.
     ...(s.content_completeness !== undefined ? { content_completeness: s.content_completeness } : {}),
     ...(s.total_lines !== undefined ? { total_lines: s.total_lines } : {}),
@@ -53434,6 +53518,26 @@ function compactReceiptFromRecord(
   // ask, never "answer anyway"). A coherent receipt passes through untouched,
   // so the pinned prepared/discovery receipt bytes are unchanged.
   applyCanonicalTaskDecision(receipt);
+  // Bind address metadata only after all receipt freshness/prior checks. The
+  // compact proof intentionally omits obligation evidence; the runtime fence
+  // must still resolve its EXISTING write handles to the same address. A
+  // bodyless/auxiliary row or a changed/unknown capability cannot supply it.
+  const receiptAddresses: ReceiptExecutionAddress[] = [];
+  const identities = new Map<string, ReturnType<typeof surfaceFileIdentity>>();
+  const writeHandles = new Set(receipt.execution_contract?.readiness_certificate?.action_frontier ?? []);
+  for (const surface of prev.surfaces) {
+    if (!writeHandles.has(surface.handle) || surface.handleIdentity === undefined
+      || receiptShipped.get(shippedKey(surface.path, surface.range)) !== true) continue;
+    if (!identities.has(surface.path)) identities.set(surface.path, surfaceFileIdentity(workspace, surface.path));
+    const identity = identities.get(surface.path);
+    if (identity === undefined || identity.sha !== shaByPath.get(surface.path)) continue;
+    receiptAddresses.push({
+      handle: surface.handle, path: surface.path, range: surface.range,
+      fileSha: identity.sha, totalLines: identity.totalLines,
+      handleIdentity: surface.handleIdentity,
+    });
+  }
+  bindReceiptExecutionAddresses(workspace, receipt.execution_contract, receiptAddresses);
   return receipt;
 }
 
@@ -54014,6 +54118,7 @@ function tryServeSubsetReceipt(
       path: s.path,
       range: s.range,
       role: s.role,
+      handleIdentity: handleTable.get(s.handle) ? { ...handleTable.get(s.handle)! } : undefined,
       // B5/P1-6: keep this ad-hoc record's fields accurate too — never stored
       // (see the "never F2-matched" note below), but compactReceiptFromRecord's
       // shared surface-projection reads them uniformly regardless of which
@@ -59840,6 +59945,12 @@ async function dedupeTrimAndPersist(
   // BEFORE trimToCap can touch it, so reconciliation can tell "trimToCap
   // changed this body" from "trimToCap left it exactly as constructed" and
   // touch only the former.
+  // Semantic wiring replaces the locator surfaces after the early dedupe pass.
+  // Reuse only proven same-task bodies on those new objects before budgeting:
+  // stripping them at the exit is too late to make room for the next page.
+  if (!forceServePack && result.wiring?.strategy === "semantic-multihop") {
+    applyPackDedupe(workspace, result, opts?.args?.taskBinding, dedupExempt);
+  }
   priorBodyRestoration.strip(codeTaskPackSurfaces(result.surfaces), forceServePack);
   const callerRangePreTrim = snapshotCallerRangeSurfaces(result);
   // Surfaces added AFTER the early residency pass above (the readiness-

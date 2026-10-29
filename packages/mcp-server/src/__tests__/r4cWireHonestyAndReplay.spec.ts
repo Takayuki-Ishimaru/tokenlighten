@@ -383,16 +383,12 @@ describe("P2-15: a code-unchanged receipt never claims a request whose last requ
       throw new Error(`a bare-request "3-6" answered with a code-unchanged receipt after only "1-5" was ever served -- line 6 (blank) was never examined: ${JSON.stringify(body)}`);
     }
 
-    // The normal path: a real body covering the full 4-line window.
-    const evidence = body?.evidence?.[0];
-    const served = typeof evidence?.body === "string" ? evidence.body : (typeof body?.content === "string" ? body.content : undefined);
-    expect(served, `no body served for range 3-6: ${JSON.stringify(body)}`).toBeDefined();
-    const servedLines = (served ?? "").split("\n");
-    // Lines 3,4,5,6 = "  c: number;", "}", "", (trailing join artifact) --
-    // the served text must contain the blank line 6 as a real line, not be
-    // silently truncated to only 3,4,5.
-    expect(servedLines.length, `served body looks truncated to 3 lines, not 4: ${JSON.stringify(served)}`).toBeGreaterThanOrEqual(3);
-    expect(String(evidence?.range ?? body?.range ?? "")).toBe("3-6");
+    // B8 may reference 3-5, but line 6 must be served now even when empty.
+    expect(body.evidence.map((row: { range: string }) => row.range)).toEqual(["3-5", "6-6"]);
+    expect(typeof body.evidence[0].prior).toBe("string");
+    expect(body.evidence[0].body).toBeUndefined();
+    expect(body.evidence[1].body).toBe("");
+    expect(body.evidence[1].prior).toBeUndefined();
   }, 60_000);
 
   it("recall control: an EXACT re-request of an already-fully-served window (no blank-tail ambiguity) still gets an honest code-unchanged receipt", async () => {

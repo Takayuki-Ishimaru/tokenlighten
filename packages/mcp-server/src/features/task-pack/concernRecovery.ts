@@ -1124,6 +1124,8 @@ export const MAX_TOTAL_CLAUSE_LOCATE_CALLS = 5;
 export const CLAUSE_LOCATE_SLOW_MS = 800;
 /** Cumulative wall-clock across the WHOLE per-clause pass (first attempts + retries combined): once crossed, no further NEW clause is started (a clause already in flight always finishes). Corpus-adaptive rather than a fixed call count -- a fast corpus still gets all MAX_CLAUSE_LOCATES clauses; a slow one (a large/self-referential codebase, where a single locate call can itself take over a second) tapers off before the mechanism's own cost dominates the pack. */
 export const CUMULATIVE_LOCATE_BUDGET_MS = 1000;
+/** Small, fully inventoried work uses deterministic call caps; this remains an emergency stop. */
+export const BOUNDED_CLAUSE_LOCATE_EMERGENCY_MS = 20_000;
 
 function clauseMentionsAny(
   clauseText: string,
@@ -1226,6 +1228,10 @@ export interface ClauseLocateRecoveryDeps<C extends { path: string; confidence: 
   readonly jaExpansionTokens: (clauseText: string) => readonly string[];
   readonly jaRecoveryQuery: (clauseText: string) => string | undefined;
   readonly now: () => number;
+  /** Caller proved the entire locate text inventory is at most 128 files / 1 MiB. */
+  readonly boundedWork?: boolean;
+  /** Request cancellation is checked before starting each additional locate. */
+  readonly signal?: AbortSignal;
   readonly onLocateAttempt?: () => void;
 }
 
@@ -1298,10 +1304,12 @@ export async function runClauseLocateRecovery<C extends { path: string; confiden
   const picks: ClauseLocateRecoveryPick<C>[] = [];
   let locateCallsUsed = 0;
   let cumulativeElapsedMs = 0;
+  const elapsedBudget = deps.boundedWork === true ? BOUNDED_CLAUSE_LOCATE_EMERGENCY_MS : CUMULATIVE_LOCATE_BUDGET_MS;
 
   for (const clause of uncovered.slice(0, MAX_CLAUSE_LOCATES)) {
+    deps.signal?.throwIfAborted();
     if (locateCallsUsed >= MAX_TOTAL_CLAUSE_LOCATE_CALLS) break;
-    if (cumulativeElapsedMs >= CUMULATIVE_LOCATE_BUDGET_MS) break;
+    if (cumulativeElapsedMs >= elapsedBudget) break;
 
     const isJapanese = deps.containsJapanese(clause.text);
     const baseTokens = clauseCoverageTokenSet(clause.text, deps.tokenize);
@@ -1327,10 +1335,11 @@ export async function runClauseLocateRecovery<C extends { path: string; confiden
 
     const canRetry = picked === undefined
       && locateCallsUsed < MAX_TOTAL_CLAUSE_LOCATE_CALLS
-      && firstAttemptMs <= CLAUSE_LOCATE_SLOW_MS
-      && cumulativeElapsedMs < CUMULATIVE_LOCATE_BUDGET_MS
+      && (deps.boundedWork === true || firstAttemptMs <= CLAUSE_LOCATE_SLOW_MS)
+      && cumulativeElapsedMs < elapsedBudget
       && (isJapanese ? deps.jaRecoveryQuery(clause.text) !== undefined : neighbourWords.length > 0);
     if (canRetry) {
+      deps.signal?.throwIfAborted();
       const retryQuery = isJapanese ? deps.jaRecoveryQuery(clause.text)! : [clause.text, ...neighbourWords].join(" ");
       deps.onLocateAttempt?.();
       locateCallsUsed += 1;

@@ -648,18 +648,32 @@ function addressesForeignPath(value: unknown, paths: ReadonlySet<string>): boole
  * own terminal rule does not own it and must not delete it
  * (`addressesForeignPath`).
  */
-function clearContinuation(payload: ShedPayload, paths: ReadonlySet<string>): ShedPayload {
+function clearContinuation(payload: ShedPayload, targets: StagedReadRequest["state"]["targets"]): ShedPayload {
+  const paths = new Set(targets.map(target => target.path));
+  const ownsNext = (value: unknown): boolean => {
+    if (!replaceableNext(value) || addressesForeignPath(value, paths)) return false;
+    // Completing the default representation does not complete the producer's
+    // explicit recovery of comment bytes it only disclosed. Preserve that
+    // different representation's next, in both the size preview and settle.
+    // This never creates a next: a fully byte-held receipt has none to retain.
+    const args = isRecord(value) && isRecord(value["arguments"]) ? value["arguments"] : undefined;
+    const select = args !== undefined && isRecord(args["select"]) ? args["select"] : undefined;
+    if (select?.["comments"] === "keep") {
+      const named = toolCallNamedPaths(value);
+      const addressed = named.size > 0 ? targets.filter(target => named.has(target.path)) : targets;
+      if (addressed.length > 0 && addressed.every(target => target.representation.comments === "elide")) return false;
+    }
+    return true;
+  };
   const limit = payload["limit"];
-  const dropLimit = isRecord(limit) && limit["cause"] === "wire" && replaceableNext(limit["next"])
-    && !addressesForeignPath(limit["next"], paths);
-  const dropNext = replaceableNext(payload["next"]) && !addressesForeignPath(payload["next"], paths);
+  const dropLimit = isRecord(limit) && limit["cause"] === "wire" && ownsNext(limit["next"]);
+  const dropNext = ownsNext(payload["next"]);
   // finding 7's other half: a stale receipt-side cursor (minted at dispatch
   // time, before this settle found D empty) must not survive past the point
   // §3.3's terminal rule fires — an empty-D response owes no continuation in
   // ANY position, `receipt.next` included.
   const receipt = payload["receipt"];
-  const dropReceiptNext = isRecord(receipt) && replaceableNext(receipt["next"])
-    && !addressesForeignPath(receipt["next"], paths);
+  const dropReceiptNext = isRecord(receipt) && ownsNext(receipt["next"]);
   const evidence = payload["evidence"];
   const clearable = Array.isArray(evidence)
     && evidence.some((entry) => {
@@ -799,7 +813,6 @@ export function applyReadRequestContinuation(
     return claim.stateless === true ? statelessContinuation(payload, staged) : payload;
   }
 
-  const paths = new Set(settled.targets.map((target) => target.path));
   const complete = readRequestComplete(settled);
   // DESIGN-v0.15 §6.2 (R4): index this request (by path) while it is still
   // owed lines, so a LATER plain read of the same path — no cursor, just an
@@ -808,7 +821,7 @@ export function applyReadRequestContinuation(
   // moment a settle (this one, or one run from that later lookup) empties D.
   markReadRequestOpenness(staged, complete);
   if (complete) {
-    const cleared = clearContinuation(payload, paths);
+    const cleared = clearContinuation(payload, settled.targets);
     return claim.restateElided === true ? restateElidedWindows(cleared, elidedByPathOf(settled.targets)) : cleared;
   }
 
@@ -902,9 +915,8 @@ function remainderCall(
  */
 function statelessContinuation(payload: ShedPayload, staged: StagedReadRequest): ShedPayload {
   const remaining = previewSettledRemaining(staged, shippedWindowsByPath(payload));
-  const paths = new Set(staged.state.targets.map((target) => target.path));
   if (staged.state.targets.every((target) => (remaining.get(target.path) ?? []).length === 0)) {
-    return restateElidedWindows(clearContinuation(payload, paths), elidedByPathOf(staged.state.targets));
+    return restateElidedWindows(clearContinuation(payload, staged.state.targets), elidedByPathOf(staged.state.targets));
   }
   const call = remainderCall(staged, remaining);
   if (call === undefined) return payload;
@@ -973,10 +985,9 @@ function previewContinuation(
 ): { payload: ShedPayload; continued: boolean } {
   const remaining = previewSettledRemaining(staged, shippedWindowsByPath(payload));
   const targets = staged.state.targets;
-  const paths = new Set(targets.map((target) => target.path));
   const complete = targets.every((target) => (remaining.get(target.path) ?? []).length === 0);
   if (complete) {
-    const cleared = clearContinuation(payload, paths);
+    const cleared = clearContinuation(payload, targets);
     return { payload: restateElided ? restateElidedWindows(cleared, elidedByPathOf(targets)) : cleared, continued: false };
   }
   const installed = typeof call === "function" ? call(remaining) : call;

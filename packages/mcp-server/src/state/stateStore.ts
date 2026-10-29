@@ -23,11 +23,9 @@
  *   snapshot.json     compacted state, published by atomic rename
  *   *.corrupt-<ts>    preserved unusable files (never deleted)
  *
- * `.tokenlighten/` is already ignored repo-wide (`.gitignore:48`, an
- * unanchored `\.tokenlighten/` pattern that matches at every depth) exactly as
- * `.tokenlighten/index` and `.tokenlighten/checkpoints` are — so this store
- * needs NO new ignore rule and MUST NOT add one. That is the managed-gitignore
- * discipline here: reuse the directory whose ignore contract already exists.
+ * `.tokenlighten/.gitignore` excludes runtime files in every workspace,
+ * independently of the user's repository-level ignore rules. This store
+ * creates the local ignore file without changing repository-level rules.
  *
  * CORRUPTION IS FAIL-CLOSED TO EMPTY. Any unreadable/unparseable snapshot or
  * journal line makes the whole load abort to an EMPTY store, with the offending
@@ -82,6 +80,7 @@ import {
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
+import { ensureRuntimeDirectory } from "@tokenlighten/skeleton-engine";
 
 import { acquireWriterLock } from "./writerLock.js";
 
@@ -252,6 +251,7 @@ export class WorkspaceStateStore {
       if (!statSync(workspaceRoot).isDirectory()) {
         throw new Error("workspace root is not a directory");
       }
+      ensureRuntimeDirectory(workspaceRoot);
       mkdirSync(dir, { recursive: true, mode: DIR_MODE });
       const stat = lstatSync(dir);
       if (stat.isSymbolicLink() || !stat.isDirectory()) {

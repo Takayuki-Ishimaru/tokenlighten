@@ -62,6 +62,8 @@ import { clientAcknowledgedPrior } from "../state/contextAttestation.js";
 // structural reason flag-off is byte-identical rather than merely tested to be.
 import { effEditNoteEnabled, effPlanTrimEnabled, receiptCoverageEnabled, sfRelationPacketsEnabled, sfVerifyFirstEnabled } from "../util/flags.js";
 import { recordedVerifyObligations } from "../state/session.js";
+import { protocolCallContext } from "./envelope.js";
+import { resolveReadReplyCeiling } from "./codec/clientProfile.js";
 import type { CoveredSpan } from "./coverageReceipt.js";
 // FX-OH F2: the demote pass's own withholding marks — the ONLY driver of
 // `nextTargetsWithheldFrontierRow`, and empty with `TL_SF_DEMOTE` off.
@@ -2469,7 +2471,11 @@ function projectTaskPack(body: Body): Body {
   // carries (4.3 KB per T13 pack, 2026-10-01). Server-side consumers read it
   // from the internal result before this projection, so dropping it here
   // changes no decision or `next`; TL_SF_RELATION_PACKETS keeps it.
-  if (effPlanTrimEnabled() && !sfRelationPacketsEnabled() && isRecord(plan["wiring"]) && "evidence_graph" in plan["wiring"]) {
+  const boundedWiring = isRecord(plan["wiring"]) && plan["wiring"]["strategy"] === "semantic-multihop"
+    && resolveReadReplyCeiling(protocolCallContext()?.clientId) !== undefined;
+  // Under a transport ceiling, the derivable graph index must not crowd out
+  // the source that proves its endpoints. Keep the server's full graph intact.
+  if ((effPlanTrimEnabled() || boundedWiring) && !sfRelationPacketsEnabled() && isRecord(plan["wiring"]) && "evidence_graph" in plan["wiring"]) {
     const { evidence_graph: _evidenceGraph, ...wiring } = plan["wiring"];
     plan["wiring"] = wiring;
   }

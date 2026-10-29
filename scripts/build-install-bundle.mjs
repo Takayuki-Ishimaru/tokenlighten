@@ -446,12 +446,15 @@ function sha256File(pathname) {
  * simulate an unavailable/failing `zip` binary without touching PATH or
  * running a real archiver.
  */
-export function packArchive({ outRoot, dirName, platform, noZip = false, spawnFn = spawnSync }) {
+export function packArchive({ outRoot, dirName, platform, noZip = false, spawnFn = spawnSync, hostPlatform = process.platform }) {
   const tgzPath = join(outRoot, `${dirName}.tgz`);
   rmSync(tgzPath, { force: true });
   // macOS copyfile metadata becomes visible AppleDouble files on Linux/Windows.
   // Ship only the payload; code signatures embedded in the runtime stay intact.
-  const tarResult = spawnFn("tar", ["czf", tgzPath, "-C", outRoot, dirName], {
+  // COPYFILE_DISABLE suppresses AppleDouble; bsdtar still writes PAX xattr
+  // records unless --no-xattrs is set explicitly on the macOS build host.
+  const tarFlags = hostPlatform === "darwin" ? ["--no-xattrs"] : [];
+  const tarResult = spawnFn("tar", ["czf", tgzPath, ...tarFlags, "-C", outRoot, dirName], {
     encoding: "utf8", env: { ...process.env, COPYFILE_DISABLE: "1" },
   });
   if (tarResult.error || tarResult.status !== 0) {

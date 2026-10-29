@@ -2699,6 +2699,7 @@ async function locateTaskContextBase(workspace: string, input: LocateInput): Pro
     const symResult = await searchSymbols(
       {
         query: input.symbol,
+        includeFuzzy: true,
         ...(input.lang ? { lang: input.lang } : {}),
         ...(scope ? { path: scope } : {}),
         limit: 10,
@@ -2740,6 +2741,7 @@ async function locateTaskContextBase(workspace: string, input: LocateInput): Pro
     const classResult = await searchSymbols(
       {
         query: className,
+        includeFuzzy: true,
         ...(input.lang ? { lang: input.lang } : {}),
         ...(scope ? { path: scope } : {}),
         limit: 10,
@@ -2799,6 +2801,7 @@ async function locateTaskContextBase(workspace: string, input: LocateInput): Pro
     const memberResult = await searchSymbols(
       {
         query: member,
+        includeFuzzy: true,
         ...(input.lang ? { lang: input.lang } : {}),
         ...(scope ? { path: scope } : {}),
         limit: 10,
@@ -2849,6 +2852,7 @@ async function locateTaskContextBase(workspace: string, input: LocateInput): Pro
       const symResult = await searchSymbols(
         {
           query: symbolQuery,
+          includeFuzzy: true,
           ...(input.lang ? { lang: input.lang } : {}),
           ...(scope ? { path: scope } : {}),
           limit: SYMBOL_SEARCH_FETCH_LIMIT,

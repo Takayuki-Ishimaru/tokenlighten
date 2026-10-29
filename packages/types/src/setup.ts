@@ -78,6 +78,14 @@ export interface TokenLightenWorkspaceSetupResult {
   rulesWritten: readonly string[];
   configFilesWritten: readonly string[];
   warnings: readonly string[];
+  /** Setup introduced Codex's default startup grace value where none existed. */
+  managedCodexStartupGrace?: boolean;
+  /** Setup created `.codex/config.toml` because it did not previously exist. */
+  codexConfigCreated?: boolean;
+  /** Setup created `.vscode/settings.json` because it did not previously exist. */
+  copilotSettingsCreated?: boolean;
+  /** Absolute paths of setup outputs that did not exist before this run. */
+  createdFiles?: readonly string[];
   /* DESIGN copilot-inline-results: absent only for a schema that predates
    * this field — a real setup run always populates it (see workspace.ts). */
   copilotInlineResults?: CopilotInlineResultsReport;

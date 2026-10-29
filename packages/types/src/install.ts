@@ -52,6 +52,15 @@ export interface InstallWorkspaceEntry {
   root: string;
   files: readonly string[];
   guide_block: boolean;
+  /** True when setup added the default Codex startup grace key to a config
+   * that previously had no value; uninstall removes it only while unchanged. */
+  managed_codex_startup_grace?: boolean;
+  /** True when this setup created `.codex/config.toml` from nothing. */
+  codex_config_created?: boolean;
+  /** True when this setup created `.vscode/settings.json` from nothing. */
+  copilot_settings_created?: boolean;
+  /** Absolute paths of files this workspace setup created from nothing. */
+  created_files?: readonly string[];
 }
 
 /** One staged version's launch entry, recorded so `--use <version>` can

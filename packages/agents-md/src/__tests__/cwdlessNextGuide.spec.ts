@@ -10,13 +10,13 @@ describe("the per-call cwd rule leaves a server-issued next as written", () => {
   const en = "add no `cwd` to a `next`", plain = "add no cwd to a next", jp = "`next`にcwd追加禁止";
 
   it.each([
-    ["compact EN", () => renderCompactBlock("en"), `top-level \`cwd\` (no pwd; else \`cwd-required-for-edit\`); ${en}; alone omit \`lane\``],
-    ["compact JP", () => renderCompactBlock("jp"), `なければ\`cwd-required-for-edit\`); ${jp}; 単独\`lane\`省略`],
+    ["compact EN", () => renderCompactBlock("en"), `top-level \`cwd\` (no pwd; else \`cwd-required-for-edit\`); ${en}. Working alone, omit \`lane\``],
+    ["compact JP", () => renderCompactBlock("jp"), `なければ\`cwd-required-for-edit\`); ${jp}. 単独作業では\`lane\`を省略`],
     ["medium EN", () => renderMediumBlock("en"), `Top-level \`cwd\`; ${en}; alone omit \`lane\``],
     ["medium JP", () => renderMediumBlock("jp"), `最上位\`cwd\`; ${jp}; 単独は\`lane\`省略`],
     ["full EN", () => renderCanonicalBlock("en"), `on EVERY call; otherwise \`cwd-required-for-edit\`. Add no \`cwd\` to a \`next\`.`],
     ["full JP", () => renderCanonicalBlock("jp"), `無宣言rootは\`cwd-required-for-edit\`. ${jp}.`],
-    ["portable code", () => renderPortableCodeBlock(), `Every call: top-level cwd; ${plain}; alone omit lane`],
+    ["portable code", () => renderPortableCodeBlock(), `Every call: top-level cwd; ${plain}. Working alone, omit lane`],
     ["read-only code", () => renderReadOnlyCodeBlock(), `Every call: own cwd at top level; ${plain}; alone omit lane`],
     ["Copilot standalone", () => renderBlock("copilot", "en", INSTRUCTIONS_VERSION, "full", "full", "standalone"), `Every call: own \`cwd\`; ${en}; shared workspace: fixed \`lane\``],
   ])("%s", (_name, render, sentence) => {

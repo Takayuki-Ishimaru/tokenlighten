@@ -16,6 +16,7 @@
  */
 
 import { createHash } from "crypto";
+import { handleTable, type HandleEntry } from "../util/handles.js";
 import type { TaskExecutionContract, TaskVerifyObligation } from "@tokenlighten/types";
 import { currentSessionLane, laneScopedKey, rootOfLaneScopedKey } from "../util/laneKey.js";
 import { batchEditFrontierEnabled, frontierStrictWritesEnabled, receiptCoverageEnabled } from "../util/flags.js";
@@ -4312,6 +4313,69 @@ export function recordCreatedEditAdmissibility(
   });
 }
 
+/** An address on a verified compact receipt, not an additional proof/target. */
+export interface ReceiptExecutionAddress {
+  handle: string;
+  path: string;
+  range: string;
+  fileSha: string;
+  totalLines: number;
+  handleIdentity: Readonly<HandleEntry>;
+}
+
+type ReceiptCertificate = NonNullable<TaskExecutionContract["readiness_certificate"]>;
+// Keyed by this response's certificate object, never by a reusable certificate
+// id. attachSupply shallow-copies the contract but retains this object. The
+// session identity also prevents a reset/lane change from reviving the binding.
+let receiptExecutionAddresses = new WeakMap<ReceiptCertificate, {
+  session: WorkspaceSession;
+  workspace: string;
+  lane: string;
+  certificateId: string;
+  taskFingerprint: string;
+  addresses: ReceiptExecutionAddress[];
+}>();
+
+export function bindReceiptExecutionAddresses(
+  workspace: string,
+  contract: TaskExecutionContract | undefined,
+  addresses: readonly ReceiptExecutionAddress[],
+): void {
+  const certificate = contract?.readiness_certificate;
+  if (certificate === undefined || contract?.state !== "ready" || contract.next_action !== "edit") return;
+  const frontier = new Set(certificate.action_frontier);
+  receiptExecutionAddresses.set(certificate, {
+    session: getSession(workspace), workspace, lane: currentSessionLane(),
+    certificateId: certificate.id, taskFingerprint: certificate.task_fingerprint,
+    addresses: addresses.filter((entry) => frontier.has(entry.handle))
+      .map((entry) => ({ ...entry, handleIdentity: { ...entry.handleIdentity } })),
+  });
+}
+
+function verifiedReceiptExecutionAddresses(workspace: string, certificate: ReceiptCertificate): ReceiptExecutionAddress[] {
+  const binding = receiptExecutionAddresses.get(certificate);
+  if (binding === undefined || binding.workspace !== workspace || binding.lane !== currentSessionLane()
+    || binding.certificateId !== certificate.id || binding.taskFingerprint !== certificate.task_fingerprint
+    || binding.session !== getSession(workspace)) return [];
+  return binding.addresses.filter((entry) => {
+    if (!certificate.action_frontier.includes(entry.handle)) return false;
+    const live = handleTable.get(entry.handle);
+    const captured = entry.handleIdentity;
+    if (live === undefined || live.purpose !== "content" || live.workspaceRoot !== workspace
+      || (live.lane ?? "") !== currentSessionLane() || live.path !== entry.path || live.range !== entry.range
+      || live.id !== captured.id || live.createdAt !== captured.createdAt || live.kind !== captured.kind
+      || live.workspaceRoot !== captured.workspaceRoot || live.path !== captured.path || live.range !== captured.range
+      || live.sha !== captured.sha || live.lane !== captured.lane) return false;
+    const match = /^(\d+)-(\d+)$/.exec(entry.range);
+    if (match === null || !Number.isSafeInteger(entry.totalLines) || entry.totalLines < 1) return false;
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 1 || end < start || end > entry.totalLines) return false;
+    const held = servedRangeCoverage(workspace, entry.path, entry.fileSha, entry.totalLines);
+    return held?.served.some(([a, b]) => a <= start && b >= end) === true;
+  });
+}
+
 /** Install (or clear) the workspace's runtime fence from a final wire contract. */
 export function recordExecutionContract(
   workspaceRoot: string,
@@ -4391,6 +4455,14 @@ export function recordExecutionContract(
   // the admissible union come from `evidence_handles`/`action_frontier`, which
   // both forms carry.
   const evidence = certificate.obligations.flatMap((obligation) => obligation.evidence ?? []);
+  // Compact receipts omit proof payloads. Restore only the address pairing of
+  // an already-certified write handle whose exact current range/version was
+  // proven resident by the receipt producer. This does not add obligations,
+  // evidence handles or frontier members, and still passes the withheld gate.
+  const knownEvidenceHandles = new Set(evidence.map((item) => item.handle));
+  const addressEvidence = [...evidence, ...(contract.next_action === "edit"
+    ? verifiedReceiptExecutionAddresses(workspaceRoot, certificate) : [])
+    .filter((item) => !knownEvidenceHandles.has(item.handle))];
   const evidenceHandleSet = new Set(certificate.evidence_handles);
   // Wave 4 fix (2026-07-24 T13 forensics): action_frontier entries were
   // intersected with evidence_handles, so a frontier handle minted outside the
@@ -4410,7 +4482,7 @@ export function recordExecutionContract(
   // entry (the Wave-4 comment above: "a frontier handle minted outside the
   // obligation evidence set") gets path:"" rather than being silently
   // dropped from the pairing.
-  const evidenceByHandle = new Map(evidence.map((item) => [item.handle, item.path] as const));
+  const evidenceByHandle = new Map(addressEvidence.map((item) => [item.handle, item.path] as const));
   const actionTargetPairs: HandlePathPair[] = [
     ...[...actionHandles].map((handle) => ({ handle, path: evidenceByHandle.get(handle) ?? "" })),
     ...explicitActionPaths.map((path) => ({ handle: "", path })),
@@ -4461,7 +4533,7 @@ export function recordExecutionContract(
     [...actionHandles].filter((handle) => addressShipped(handle, pathOf(handle))),
   );
   const shippedExplicitActionPaths = explicitActionPaths.filter((entry) => addressShipped("", entry));
-  const shippedEvidence = evidence.filter((item) => addressShipped(item.handle, item.path));
+  const shippedEvidence = addressEvidence.filter((item) => addressShipped(item.handle, item.path));
   const shippedEvidenceHandleSet = new Set(
     [...evidenceHandleSet].filter((handle) => addressShipped(handle, pathOf(handle))),
   );
@@ -9983,6 +10055,7 @@ export function resetWorkspace(workspaceRoot: string): void {
 
 /** Clears all session state. Test hook. */
 export function resetAll(): void {
+  receiptExecutionAddresses = new WeakMap();
   _sessions.clear();
   // FX-N: the staging registry names session KEYS, so a leftover entry would
   // point at a session that no longer exists. Cleared with them.

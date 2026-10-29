@@ -257,7 +257,9 @@ export function emitFinalizedPayload(
   // `cap-exceeded` refusal: a budget retry cannot lift a profile ceiling, and a
   // continuation would repeat the same impossible line. `refusalLimit` retains
   // the caller-budget/calibrated-floor behavior for ordinary budget shortfalls.
-  const pageCeiling = (kind === "read.text" || kind === "read.batch") && opts?.budgetOverrideBytes === undefined
+  const claudeReadOrSearch = context.clientId?.toLowerCase() === "claude-code"
+    && (kind.startsWith("read.") || kind.startsWith("search."));
+  const pageCeiling = (kind === "read.text" || kind === "read.batch" || claudeReadOrSearch) && opts?.budgetOverrideBytes === undefined
     ? resolveReadReplyCeiling(context.clientId)
     : undefined;
   const boundMaxBytes = bindToResponseCeiling(declaredMaxBytes, pageCeiling);

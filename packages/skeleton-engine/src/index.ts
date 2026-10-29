@@ -40,4 +40,5 @@ export { languageForPathWithContent, extractSymbolsRegex } from "./graph.js";
 export type { ExtractedSymbol } from "./graph.js";
 export { buildTlGraphFromManifest, writeGraphIfStale } from "./graphBuilder.js";
 export { searchSymbols as searchIndexSymbols, isTestPath } from "./searchIndex.js";
+export { ensureRuntimeDirectory } from "./safeWritePath.js";
 export type { SearchInput, SearchContext, RankedLocation } from "./searchIndex.js";

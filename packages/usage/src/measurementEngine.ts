@@ -22,11 +22,11 @@
  *   2. `TokenLightenUsageEvent`-shaped records (this package's own
  *      index.ts/`createUsageRecorder` channel), recognized by their
  *      `estimatedSavedTokens` field — the ALREADY-MEASURED, already-shipped
- *      per-call baseline-vs-response delta (0.9.x scoped usage-metrics,
+ *      per-call baseline-vs-response delta (scoped usage-metrics,
  *      2026-08-11). This engine does not recompute that number; it only
  *      surfaces it inside the plan's four-way decomposition shape.
  *
- * HONESTY INVARIANT (matches the shipped 0.9.x usage-metrics design exactly,
+ * HONESTY INVARIANT (matches the usage-metrics design,
  * per the task brief — "the engine must NEVER present an estimated component
  * as measured"): `tokens`/`cashUsd` are `null` if and only if
  * `provenance.status === "unavailable"`. A coefficient-driven figure is
@@ -233,7 +233,7 @@ function computeDirectContextSaving(
   if (usageLike.length === 0) {
     return unavailable(
       "no usage-channel events (estimatedSavedTokens) were supplied — this "
-      + "component surfaces the already-shipped 0.9.x usage-metrics "
+      + "component surfaces the usage-metrics "
       + "baseline-vs-response delta and has nothing of its own to estimate",
     );
   }
@@ -241,7 +241,7 @@ function computeDirectContextSaving(
   return measured(
     tokens,
     `sum of estimatedSavedTokens across ${usageLike.length} measured usage `
-    + "event(s) (0.9.x usage-metrics channel; exact arithmetic, no coefficient)",
+    + "event(s) (usage-metrics channel; exact arithmetic, no coefficient)",
     pricing,
   );
 }

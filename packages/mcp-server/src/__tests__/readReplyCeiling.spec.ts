@@ -16,7 +16,7 @@
 // applied by protocol/emit.ts to `read.text` / `read.batch` and by server.ts's
 // sizing sites): reply bound = min(declared budget, ceiling); the declared one
 // wins when it is the tighter, a larger one is clamped, none = the ceiling; a
-// client without a ceiling (claude-code, generic) is unbound, byte for byte. The
+// client without a ceiling (codex, generic) is unbound, byte for byte. The
 // paging mechanics carry what does not fit: no line asked for is dropped, and a
 // page that cannot get under the ceiling because a source line is wider than it
 // returns a bounded terminal refusal with no misleading retry continuation.
@@ -58,9 +58,10 @@ type Body = Record<string, unknown>;
 const PROFILES = [
   { label: "copilot-cli", clientName: "copilot-cli", ceiling: 18 * 1024 },
   { label: "vscode", clientName: "Visual Studio Code", ceiling: 14336 },
+  { label: "claude-code", clientName: "claude-code", ceiling: 20_000 },
 ] as const;
 
-const ENV_KEYS = ["TOKENLIGHTEN_CLIENT_ID", "TOKENLIGHTEN_TASK_PACK_MAX_BYTES", "TOKENLIGHTEN_STATE_STORE"] as const;
+const ENV_KEYS = ["TOKENLIGHTEN_CLIENT_ID", "TOKENLIGHTEN_TASK_PACK_MAX_BYTES", "TOKENLIGHTEN_STATE_STORE", "MAX_MCP_OUTPUT_TOKENS"] as const;
 let savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
@@ -273,7 +274,7 @@ describe("bindToResponseCeiling / resolveReadReplyCeiling (unit)", () => {
     expect(resolveReadReplyCeiling("copilot-cli", "8192")).toBe(8192);
     expect(resolveReadReplyCeiling("copilot-cli", "0")).toBeUndefined();
     // Clients whose profile carries no ceiling are unbound, by construction.
-    expect(resolveReadReplyCeiling("claude-code", undefined)).toBeUndefined();
+    expect(resolveReadReplyCeiling("claude-code", undefined)).toBe(20_000);
     expect(resolveReadReplyCeiling("codex-mcp-client", undefined)).toBeUndefined();
     expect(resolveReadReplyCeiling(undefined, undefined)).toBeUndefined();
   });
@@ -326,9 +327,18 @@ function readBatchPayload(count: number): Body {
 }
 
 describe("emitFinalizedPayload binds a read.text / read.batch reply to the client's ceiling", () => {
+  it("honors Claude Code's host token limit even with an oversized or disabled pack preference", () => {
+    process.env["MAX_MCP_OUTPUT_TOKENS"] = "10000";
+    expect(resolveReadReplyCeiling("claude-code", undefined)).toBe(8000);
+    expect(resolveReadReplyCeiling("claude-code", "0")).toBe(8000);
+    expect(resolveReadReplyCeiling("claude-code", "120000")).toBe(8000);
+    expect(resolveReadReplyCeiling("claude-code", "6000")).toBe(6000);
+    const reply = emit(readTextPayload(380), "read.text", "claude-code", 120_000);
+    expect(reply.bytes).toBeLessThanOrEqual(8000);
+  });
   it("a 30 KB read.text is cut to the ceiling for copilot-cli and vscode, and left whole for a client without one", () => {
     const payload = readTextPayload(380);
-    const whole = emit(payload, "read.text", "claude-code");
+    const whole = emit(payload, "read.text", "generic");
     expect(whole.bytes).toBeGreaterThan(25_000);
     expect(emit(payload, "read.text", undefined).bytes).toBe(whole.bytes);
     expect(emit(payload, "read.text", "codex-mcp-client").bytes).toBe(whole.bytes);
@@ -354,7 +364,7 @@ describe("emitFinalizedPayload binds a read.text / read.batch reply to the clien
       expect(clamped.bytes).toBeGreaterThan(profile.ceiling * 0.5);
     }
     // ...and the same declared budget is honoured exactly as before for a client without a ceiling.
-    expect(emit(payload, "read.text", "claude-code", 60_000).bytes).toBe(emit(payload, "read.text", "claude-code").bytes);
+    expect(emit(payload, "read.text", "generic", 60_000).bytes).toBe(emit(payload, "read.text", "generic").bytes);
   });
 
   it("TOKENLIGHTEN_TASK_PACK_MAX_BYTES replaces the profile ceiling for reads exactly as for packs, and 0 lifts it", () => {
@@ -362,12 +372,12 @@ describe("emitFinalizedPayload binds a read.text / read.batch reply to the clien
     process.env["TOKENLIGHTEN_TASK_PACK_MAX_BYTES"] = "8192";
     expect(emit(payload, "read.text", "copilot-cli").bytes).toBeLessThanOrEqual(8192);
     process.env["TOKENLIGHTEN_TASK_PACK_MAX_BYTES"] = "0";
-    expect(emit(payload, "read.text", "copilot-cli").bytes).toBe(emit(payload, "read.text", "claude-code").bytes);
+    expect(emit(payload, "read.text", "copilot-cli").bytes).toBe(emit(payload, "read.text", "generic").bytes);
   });
 
   it("a read.batch gives back WHOLE trailing entries into one next, never a half of every entry", () => {
     const payload = readBatchPayload(14);
-    expect(emit(payload, "read.batch", "claude-code").bytes).toBeGreaterThan(30_000);
+    expect(emit(payload, "read.batch", "generic").bytes).toBeGreaterThan(30_000);
     for (const profile of PROFILES) {
       const bound = emit(payload, "read.batch", profile.label);
       expect(bound.bytes, profile.label).toBeLessThanOrEqual(profile.ceiling);
@@ -493,8 +503,8 @@ describe.each(PROFILES)("$label: the read pages of a large class fit the client'
   it("a read of one symbol larger than the ceiling is paged, not spilled", async () => {
     await handshake(clientName);
     const ws = mkWorkspace(`symbol-${label}`);
-    // ~21 KB of body: under the producer's 24 KiB symbol cap (so the pre-change reply was one 22 KB page), over both ceilings.
-    const body = Array.from({ length: 330 }, (_, i) => `  const v${i} = ${i}; // padding padding padding padding ${i}`).join("\n");
+    // Enough body to exceed every host ceiling, including Claude Code's 20 KB.
+    const body = Array.from({ length: 400 }, (_, i) => `  const v${i} = ${i}; // padding padding padding padding ${i}`).join("\n");
     writeFile(ws, "src/big.ts", `export function processPayload() {\n${body}\n  return 0;\n}\n`);
 
     const chain = await followChain({ targets: [{ path: "src/big.ts", symbol: "processPayload" }], content: "auto" }, ws);
@@ -502,7 +512,7 @@ describe.each(PROFILES)("$label: the read pages of a large class fit the client'
     expect(chain.ended).toBe(true);
     for (const [index, page] of chain.pages.entries()) expect(page.bytes, `page ${index}`).toBeLessThanOrEqual(ceiling);
     expect(chain.pages.length).toBeGreaterThan(1);
-    expectServed(chain, "src/big.ts", [[1, 333]]);
+    expectServed(chain, "src/big.ts", [[1, 403]]);
   }, CHAIN_TIMEOUT_MS);
 
   it("a read.batch of 54 windows over two handles is paged by whole entries, every window arrives", async () => {
@@ -837,6 +847,51 @@ describe.each(PROFILES)("$label: the read pages of a large class fit the client'
   }, CHAIN_TIMEOUT_MS);
 });
 
+describe("Claude Code oversized explicit request regression", () => {
+  it("clamps the 30000-token allowFull request, serves every line, and does not receipt an unserved tail", async () => {
+    await handshake("claude-code");
+    const ws = mkWorkspace("claude-explicit-eval");
+    const source = bigClassSource(1250);
+    expect(Buffer.byteLength(source, "utf8")).toBeGreaterThan(90_000);
+    writeFile(ws, "src/core.cs", source);
+    const request = { targets: [{ path: "src/core.cs", range: "1-1250" }], budget: { allowFull: true, tokens: 30000 } };
+    const first = await read({ cwd: ws, ...request });
+    expect(first.bytes).toBeLessThanOrEqual(20_000);
+    expect(first.body["kind"]).toBe("read.text");
+    const delivered = new Map<string, Set<number>>();
+    recordServed(first.body, delivered);
+    expect(delivered.get("src/core.cs")?.has(1200)).not.toBe(true);
+
+    const tail = await read({ cwd: ws, targets: [{ path: "src/core.cs", range: "1200-1250" }] });
+    expect(tail.bytes).toBeLessThanOrEqual(20_000);
+    expect(tail.body["kind"]).toBe("read.text");
+    expect(JSON.stringify(tail.body)).toContain("step01199");
+
+    // Independently follow the original request from a clean ledger, so the
+    // probe above cannot satisfy part of its pending continuation.
+    resetAllSessions();
+    const chain = await followChain(request, ws);
+    expect(chain.ended).toBe(true);
+    expect(chain.pages.length).toBeGreaterThan(1);
+    for (const page of chain.pages) expect(page.bytes).toBeLessThanOrEqual(20_000);
+    expectServed(chain, "src/core.cs", [[1, 1250]]);
+  }, CHAIN_TIMEOUT_MS);
+
+  it("does not record source as served when an oversized line is refused", async () => {
+    await handshake("claude-code");
+    const ws = mkWorkspace("claude-refusal-eval");
+    writeFile(ws, "src/huge.js", `const huge = "${"z".repeat(24_000)}";\n`);
+    const request = { cwd: ws, targets: [{ path: "src/huge.js", range: "1-1" }], budget: { allowFull: true, tokens: 30000 } };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const reply = await read(request);
+      expect(reply.bytes).toBeLessThanOrEqual(20_000);
+      expect(reply.body["kind"]).toBe("refusal");
+      expect(reply.body["code"]).toBe("cap-exceeded");
+      expect(JSON.stringify(reply.body)).not.toContain("const huge");
+    }
+  }, CHAIN_TIMEOUT_MS);
+});
+
 // ---------------------------------------------------------------------------
 // A client without a ceiling is unbound, byte for byte
 // ---------------------------------------------------------------------------
@@ -862,8 +917,8 @@ describe("a client without a ceiling reads exactly as before", () => {
     });
   }
 
-  it("claude-code, codex and an unknown client get the producer's 24 KiB pages and its own handle+range next", async () => {
-    const claude = await firstPages("claude-code");
+  it("generic, codex and an unknown client get the producer's 24 KiB pages and its own handle+range next", async () => {
+    const claude = await firstPages("generic");
     expect(claude[0]!.bytes).toBeGreaterThan(24_000);
     expect(claude[0]!.next).not.toContain("cursor");
     expect(claude[0]!.next).toContain("targets");
@@ -872,7 +927,7 @@ describe("a client without a ceiling reads exactly as before", () => {
   });
 
   it("a ceiling lifted with TOKENLIGHTEN_TASK_PACK_MAX_BYTES=0 is the unbound read, byte for byte", async () => {
-    const claude = await firstPages("claude-code");
+    const claude = await firstPages("generic");
     expect(await firstPages("copilot-cli", { TOKENLIGHTEN_TASK_PACK_MAX_BYTES: "0" })).toEqual(claude);
     expect(await firstPages("Visual Studio Code", { TOKENLIGHTEN_TASK_PACK_MAX_BYTES: "0" })).toEqual(claude);
   });

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import { activeEngineConfiguration, activeEngineDiscoveryGaps, defaultEngineConfiguration,
   engineConfigurationSha256, readEngineConfiguration, readEngineConfigurationStrict, recordEngineDiscoveryGap, withEngineConfiguration, writeEngineConfiguration, updateEngineConfiguration } from "../features/engines/config.js";
 import { computedConfigSha256 } from "../util/trace.js";
@@ -39,7 +40,7 @@ describe("local engine settings", () => {
       const initial = defaultEngineConfiguration(); initial.typedSymbols.enabled = true;
       writeEngineConfiguration(initial, file);
       const records = ["typedSymbols", "compoundRequests"].map(key => {
-        const child = spawn(process.execPath, ["--import", createRequire(import.meta.url).resolve("tsx"), "--input-type=module", "-e", script, file, key],
+        const child = spawn(process.execPath, ["--import", pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href, "--input-type=module", "-e", script, file, key],
           { stdio: ["ignore", "ignore", "pipe", "ipc"] });
         children.push(child);
         let stderr = ""; child.stderr!.on("data", chunk => { stderr += String(chunk); });

@@ -2,6 +2,33 @@
 
 User-facing release highlights for TokenLighten.
 
+## 0.16.3
+
+- Updated the MCP transport dependency `@hono/node-server` to patched
+  upstream version 2.1.3.
+- Repository discovery retains explicit file and project scope, locates quoted
+  CLI commands by their options, and uses working-tree changes as defect
+  evidence only when the request asks to investigate those changes.
+- Compound English and Japanese questions retain their individual requirements
+  through continued discovery. Python symbol reads prefer a unique implementation
+  over overload declarations in the same scope.
+- Forced resends, budgeted batches and reads of omitted comments retain the
+  source and continuation needed to complete the request. Compact read
+  acknowledgements preserve valid edit addresses for the current task.
+- Windows C/C++ compilation commands preserve native include paths and quoting.
+- Version switching, pruning and uninstall honor `--dry-run` and require `--yes`
+  in non-interactive shells. Uninstall cleans empty setup-created files whose
+  creation was recorded, preserving user content.
+- New runtime directories include a local ignore file. Setup reports the actual
+  usage-log path; ordinary doctor checks omit contributor-only prerequisites.
+  Usage summaries distinguish token estimates from cost estimates and withhold
+  full-session cost reductions when any usage is unpriced.
+
+Upgrade the archive or VSIX, refresh workspace setup and reconnect your
+client. The three tools and canonical top-level request fields are unchanged
+from v0.16.2. See the
+[v0.16.3 release notes](release-docs/github-release-v0.16.3.md).
+
 ## 0.16.2
 
 - Explanation requests include the relevant conditions, callers and configuration

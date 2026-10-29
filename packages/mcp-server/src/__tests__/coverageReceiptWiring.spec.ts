@@ -322,8 +322,8 @@ describe("W-WIRE-2A: coverageReceiptFor wired into mode=slice (flag ON)", () => 
   });
 });
 
-describe("W-WIRE-2A: flag OFF stays byte-identical to pre-2A behavior", () => {
-  it("the overlap scenario above serves the whole window with no covered_by/prior, exactly as before", async () => {
+describe("W-WIRE-2A: flag OFF retains source residency without optional coverage receipts", () => {
+  it("the overlap accounts for held rows and serves every new line without covered_by", async () => {
     delete process.env["TL_RECEIPT_COVERAGE"];
     const ws = mkWs("flag-off");
     write(ws, "src/plain.ts", plainFile());
@@ -336,9 +336,11 @@ describe("W-WIRE-2A: flag OFF stays byte-identical to pre-2A behavior", () => {
     expect(overlap.body["kind"]).toBe("read.text");
     expect(overlap.body["segments"]).toBeUndefined();
     const evidence = (overlap.body["evidence"] ?? []) as Array<Record<string, unknown>>;
-    const body = String(evidence[0]?.["body"] ?? "");
-    expect(body).toContain("L30 = 30");
-    expect(body).toContain("L55 = 55");
+    expect(evidence.map((row) => row["range"])).toEqual(["30-40", "41-55"]);
+    expect(typeof evidence[0]?.["prior"]).toBe("string");
+    expect(evidence[0]?.["body"]).toBeUndefined();
+    expect(evidence[1]?.["prior"]).toBeUndefined();
+    expect(evidence[1]?.["body"]).toBe(plainFile().split("\n").slice(40, 55).join("\n"));
     expect(JSON.stringify(overlap.body)).not.toContain("covered_by");
   });
 });

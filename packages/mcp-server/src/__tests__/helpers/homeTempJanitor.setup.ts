@@ -51,6 +51,9 @@ interface MutableFs {
 const fsModule = createRequire(import.meta.url)("node:fs") as MutableFs;
 
 const PATCHED = Symbol.for("tokenlighten.test.homeTempJanitor");
+const POOL_CLEANUPS = Symbol.for("tokenlighten.test.serverPoolCleanups");
+const registry = globalThis as unknown as Record<symbol, Set<() => void> | undefined>;
+const serverPoolCleanups = registry[POOL_CLEANUPS] ??= new Set<() => void>();
 
 function realpathOrSelf(target: string): string {
   try {
@@ -171,6 +174,8 @@ function install(): void {
 install();
 
 afterAll(() => {
+  for (const closePool of serverPoolCleanups) closePool();
+  serverPoolCleanups.clear();
   const survivors = sweepHomeTempDirs();
   if (survivors.length > 0) {
     console.warn(

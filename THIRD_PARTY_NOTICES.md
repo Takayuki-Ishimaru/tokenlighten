@@ -17,7 +17,7 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | @emnapi/runtime@1.11.3 | MIT | toyobayashi | https://github.com/toyobayashi/emnapi |
 | @fast-csv/format@4.3.5 | MIT | doug-martin | https://github.com/C2FO/fast-csv |
 | @fast-csv/parse@4.3.6 | MIT | doug-martin | https://github.com/C2FO/fast-csv |
-| @hono/node-server@1.19.17 | MIT | Yusuke Wada | https://github.com/honojs/node-server |
+| @hono/node-server@2.1.3 | MIT | Yusuke Wada | https://github.com/honojs/node-server |
 | @huggingface/jinja@0.5.10 | MIT | Hugging Face | https://github.com/huggingface/huggingface.js |
 | @huggingface/tokenizers@0.2.0 | Apache-2.0 | Hugging Face | https://github.com/huggingface/tokenizers.js |
 | @huggingface/transformers@4.3.1 | Apache-2.0 | Hugging Face | https://github.com/huggingface/transformers.js |
@@ -3718,7 +3718,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### MIT — SHA-256 6895190430d809c4c57a7582ecc2f99acbc2ea39a5dfad20262a41d5b3e91733
 
-Applies to: `@hono/node-server@1.19.17`
+Applies to: `@hono/node-server@2.1.3`
 
 ```text
 MIT License

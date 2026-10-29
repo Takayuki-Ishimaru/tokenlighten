@@ -3,8 +3,9 @@ import {
   lstatSync,
   mkdirSync,
   realpathSync,
+  writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export function isPathInside(root: string, candidate: string): boolean {
   const rel = relative(root, candidate);
@@ -46,6 +47,21 @@ export function ensureSafeWriteParent(
       throw new Error(`unsafe-write-path: parent escapes repository root: ${cursor}`);
     }
   }
+  if (createParents && targetRel.split(sep)[0] === ".tokenlighten") {
+    const ignore = join(root, ".tokenlighten", ".gitignore");
+    try {
+      writeFileSync(ignore, "# TokenLighten runtime files\n*\n", { flag: "wx", mode: 0o600 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const stat = lstatSync(ignore);
+      if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("unsafe runtime .gitignore");
+    }
+  }
+}
+
+/** Create only the private runtime directory, never a missing workspace. */
+export function ensureRuntimeDirectory(root: string): void {
+  ensureSafeWriteParent(root, join(root, ".tokenlighten", ".runtime"), true);
 }
 
 export function assertSafeWriteTarget(repoRoot: string, targetPath: string): void {

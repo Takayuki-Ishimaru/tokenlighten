@@ -14,6 +14,7 @@ import {measureResponseBytes} from "./budget/measure.js";
 import {groupEvidencePaths} from "./evidencePathGroups.js";
 import {protocolCallContext, runWithProtocolCall} from "./envelope.js";
 import {semanticFrontierGuardEnabled, sfDemoteEnabled} from "../util/flags.js";
+import {resolveReadReplyCeiling} from "./codec/clientProfile.js";
 
 /**
  * Which `next` a size preview counts. "shipped": the calls the transport copy
@@ -75,12 +76,14 @@ export const TASK_PACK_PREVIEW_PREPARED_RESERVE_BYTES = 512;
 /** …and beside a pack whose decision is derived later (a discover pack): the task/call defaults and the decision the contract adds. */
 export const TASK_PACK_PREVIEW_DISCOVER_RESERVE_BYTES = 2048;
 
-/** Size a read-only compact-host pack with the actual wire projectors.
+/** Size eligible answer and bounded semantic-wiring packs with the wire projectors.
  * Construction-only contracts and routes do not consume response capacity.
  * This preview never books evidence, aliases, task state or write authority.
  */
 export function taskPackSizePreview(result: TaskPackResult, clientId: string | undefined, next: PreviewNext = "shipped"): number | undefined {
-  if (result.task_profile !== "answer" || !preferExactAnswerBody(clientId)
+  const semanticWiring = result.task_profile !== "answer" && result.wiring?.strategy === "semantic-multihop"
+    && resolveReadReplyCeiling(clientId) !== undefined;
+  if ((!semanticWiring && (result.task_profile !== "answer" || !preferExactAnswerBody(clientId)))
     || semanticFrontierGuardEnabled() || sfDemoteEnabled()) return undefined;
   const context = protocolCallContext();
   return runWithProtocolCall({...context, tool: context?.tool ?? "tl_read_file", clientId, sizePreview: true}, () => {
@@ -91,17 +94,20 @@ export function taskPackSizePreview(result: TaskPackResult, clientId: string | u
   const canonical = prepared ? deriveCanonicalTaskDecision(copy as unknown as TaskPackResult) : undefined;
   const decision = projectTaskDecision({result: copy, contract, canonicalKind: canonical?.kind, evidence});
   const task = {...projectTaskRef(copy, contract, "size-preview"), id: "x".repeat(192)};
-  const projected = projectReadBody("read.task_pack", {...copy, task, profile: "answer", evidence,
+  const projected = projectReadBody("read.task_pack", {...copy, task, profile: result.task_profile === "answer" ? "answer" : "generic", evidence,
     ...(decision !== undefined ? {decision} : {})});
   const first = result.surfaces.find(row => row.handle !== undefined);
   const workspace = context?.workspace ?? context?.codecTraceWorkspace
     ?? (first === undefined ? undefined : handleTable.get(first.handle)?.workspaceRoot);
   if (workspace === undefined || workspace === "") return undefined;
   const faithful = applySourceFidelity(projected, "read.task_pack", {readServeWorkspace: workspace});
-  // Ambiguous/prefix/synthetic bodies retain the old conservative accounting.
+  // Ambiguous answer bodies retain the old conservative accounting.
   const rows = faithful["evidence"];
   const sourceCache = new Map<string, string | undefined>();
-  if (!Array.isArray(rows) || rows.some(row => {
+  // Wiring's disjoint construction excerpts are already measured in their
+  // final source-fidelity presentation. They do not receive an answer gutter,
+  // so an intentionally assembled body need not be a contiguous answer slice.
+  if (!Array.isArray(rows) || (!semanticWiring && rows.some(row => {
     if (row === null || typeof row !== "object") return true;
     const entry = row as Record<string, unknown>;
     if (typeof entry["body"] !== "string") return false;
@@ -114,7 +120,7 @@ export function taskPackSizePreview(result: TaskPackResult, clientId: string | u
     if (!sourceCache.has(filePath)) sourceCache.set(filePath, readWorkspaceFileSync(filePath, workspace));
     const source = sourceCache.get(filePath);
     return source === undefined || !isExactContiguousBody(entry["body"], source, Number(span[1]), Number(span[2]));
-  })) return undefined;
+  }))) return undefined;
   // Future task/call defaults and, before contract construction, its decision.
   // TL_EFF_EVIDENCE_PATH_GROUPS: the rows ship grouped (emit.ts), so they are
   // priced grouped; the proof loop above has already read each row whole, and

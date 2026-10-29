@@ -69,8 +69,8 @@ export interface ClientProfile {
    * `resolveReadReplyCeiling` below (protocol/emit.ts and server.ts's page-sizing
    * sites). There an explicit caller budget BELOW the ceiling still wins, but one
    * above it is clamped to it (`bindToResponseCeiling`): the ceiling is the
-   * client's transport limit, not a default the caller can outbid. (A pack and a
-   * find page keep their older rule, in which an explicit budget replaces it.)
+   * client's transport limit, not a default the caller can outbid. Claude Code
+   * also applies it to every read/search reply, including task packs.
    */
   readonly responseByteCeiling?: number;
 }
@@ -186,6 +186,20 @@ const COPILOT_CLI_CLIENT_PROFILE: ClientProfile = {
   responseByteCeiling: 18 * 1024,
 };
 
+/** Use bytes conservatively: even token-dense source must fit the host limit. */
+function claudeCodeProfile(): ClientProfile {
+  const raw = process.env["MAX_MCP_OUTPUT_TOKENS"];
+  const parsed = raw !== undefined && /^[1-9][0-9]*$/.test(raw.trim()) ? Number(raw) : NaN;
+  const tokens = Number.isSafeInteger(parsed) ? parsed : 25_000;
+  return {
+    id: "claude-code",
+    profileVersion: "1",
+    lastValidated: "2026-10-28",
+    allowedCodecIds: [],
+    responseByteCeiling: Math.max(1, Math.floor(tokens * 0.8)),
+  };
+}
+
 /** True when `clientId` (a raw clientInfo.name) identifies VS Code's built-in MCP client -- see VSCODE_CLIENT_NAME_SUBSTRINGS' doc comment above for exactly which builds match and why. */
 function isVsCodeClientId(clientId: string): boolean {
   const lower = clientId.toLowerCase();
@@ -212,6 +226,7 @@ export function resolveClientProfile(clientId: string | undefined, now: number =
   // a channel suffix an exact map key can never match), not a replacement
   // for it.
   const profile = KNOWN_CLIENT_PROFILES.get(clientId)
+    ?? (clientId.toLowerCase() === "claude-code" ? claudeCodeProfile() : undefined)
     ?? (clientId.toLowerCase() === "copilot-cli" ? COPILOT_CLI_CLIENT_PROFILE : undefined)
     ?? (isVsCodeClientId(clientId) ? VSCODE_CLIENT_PROFILE : undefined);
   if (profile === undefined) return UNKNOWN_CLIENT_PROFILE;
@@ -231,9 +246,10 @@ export function isCodecAllowedForClient(profile: ClientProfile, codecIdAndVersio
  *
  * Precedence (documented once, here, since every size-governance consumer
  * defers to this function rather than re-deriving it): an EXPLICIT per-call
- * maxBytes/maxTokens argument always wins over both of these and is
+ * maxBytes/maxTokens argument normally wins over both of these and is
  * therefore resolved by the CALLER of this function, never here (see
- * readCodeModes.ts's resolveCallerByteCeiling). Between what remains:
+ * readCodeModes.ts's resolveCallerByteCeiling). Claude Code's final transport
+ * ceiling always clamps these preferences. Between what remains:
  *
  *   1. `envRaw` (TOKENLIGHTEN_TASK_PACK_MAX_BYTES), when it parses as a
  *      non-negative integer, REPLACES the profile ceiling outright -- it
@@ -263,7 +279,12 @@ export function resolveDefaultResponseByteCeiling(
     // intend as "a byte count".
     if (/^[0-9]+$/.test(trimmed)) {
       const parsed = Number(trimmed);
-      return parsed === 0 ? undefined : parsed;
+      if (Number.isSafeInteger(parsed)) {
+        // A task-pack preference cannot lift Claude Code's transport limit.
+        return profile.id === "claude-code"
+          ? (parsed === 0 ? profile.responseByteCeiling : Math.min(parsed, profile.responseByteCeiling!))
+          : (parsed === 0 ? undefined : parsed);
+      }
     }
     console.error(
       `[tl-mcp] TOKENLIGHTEN_TASK_PACK_MAX_BYTES=${JSON.stringify(envRaw)} is not a non-negative integer; ignoring it (falling back to the client-profile ceiling)`,
@@ -276,10 +297,10 @@ export function resolveDefaultResponseByteCeiling(
  * 2026-10-24 (read-page ceiling): the response ceiling a `read.text` /
  * `read.batch` reply is bound to for `clientId` -- the SAME number a task pack
  * is bound to (`resolveDefaultResponseByteCeiling` over the resolved profile
- * and TOKENLIGHTEN_TASK_PACK_MAX_BYTES, which is why that env var, set to 0,
- * lifts it for reads too), so the two families can never be held to different
+ * and TOKENLIGHTEN_TASK_PACK_MAX_BYTES; 0 lifts that preference except for
+ * Claude Code's hard transport ceiling), so the families use the same
  * limits by one client. `undefined` for a client whose profile carries none
- * (claude-code, codex, any unrecognised or stale id): such a client's read
+ * (codex, any unrecognised or stale id): such a client's read
  * replies are sized exactly as they were before this function existed.
  *
  * `protocol/emit.ts` calls this with the per-call `ProtocolCallContext.clientId`

@@ -815,10 +815,14 @@ describe("argMatrix — tl_edit_file — already sane / documented (no change)",
     expect(String(symHandle)).toMatch(/^h[0-9a-z]+$/);
     const widened = await srv.call("tl_read_file", { handle: symHandle, range: "1-9" });
     expect(widened["kind"]).toBe("read.text");
-    const widenedEvidence = (widened["evidence"] as Array<Record<string, unknown>>)[0]!;
-    expect(widenedEvidence["range"]).toBe("1-9");
-    expect(String(widenedEvidence["body"])).toContain("alpha");
-    expect(String(widenedEvidence["body"])).toContain("gamma");
+    const evidence = widened["evidence"] as Array<Record<string, unknown>>;
+    const prior = evidence.filter((row) => typeof row["prior"] === "string");
+    expect(prior.map((row) => row["range"])).toEqual(["5-7"]);
+    expect(prior.every((row) => row["body"] === undefined)).toBe(true);
+    const served = evidence.filter((row) => typeof row["body"] === "string");
+    expect(served.map((row) => row["range"])).toEqual(["1-4", "8-9"]);
+    expect(String(served[0]?.["body"])).toContain("alpha");
+    expect(String(served[1]?.["body"])).toContain("gamma");
   }, 30000);
 });
 

@@ -206,9 +206,9 @@ export async function runLogs(args: string[]): Promise<void> {
         + `Matched AI sessions: ${session.matchedSessions}\n`
         + `Observed full-session tokens: ${session.actualTotalTokens ?? "unavailable"}\n`
         + `Predicted no-TL tokens: ${session.predictedWithoutTlTokens ?? "unavailable"}\n`
-        + `Full-session token reduction: ${tokenReduction}\n`
+        + `Model-estimated full-session token reduction: ${tokenReduction}\n`
         + formatReductionRange(session.tokenReductionPercent95)
-        + `Full-session cost reduction: ${costReduction}\n`
+        + `Model-estimated full-session cost reduction: ${costReduction}\n`
         + residencyLine
         + `Confidence: ${session.confidence}\n`,
     );

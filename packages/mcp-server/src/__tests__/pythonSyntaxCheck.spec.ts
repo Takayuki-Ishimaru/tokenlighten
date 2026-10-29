@@ -106,8 +106,9 @@ function fakeHost(bins: Record<string, FakePython>, aliases: Record<string, stri
 }
 
 /** The command word as pythonSyntaxCheck's shellWord writes it on POSIX. */
-function word(text: string): string {
-  return /^[A-Za-z0-9_./+=:@%,-]+$/.test(text) ? text : `'${text.replace(/'/g, "'\\''")}'`;
+function word(text: string, platform: NodeJS.Platform = "linux"): string {
+  if (/^[A-Za-z0-9_./+=:@%,-]+$/.test(text)) return text;
+  return platform === "win32" ? `"${text.replace(/"/g, '\\"')}"` : `'${text.replace(/'/g, "'\\''")}'`;
 }
 
 const ECHO = '; echo "exit=$?"';
@@ -561,7 +562,7 @@ describe("where the check rides", () => {
     fakeHost({ python3: { version: "3.9.6" }, "python3.12": { version: "3.12.13", modules: ["openpyxl"] } });
     const pack = await buildTaskPack({ query: "Fix total_premium in svc/svc_pkg/engine.py: it must skip rows without a rate.", paths: [target] }, ws);
     expect(pack.verify, JSON.stringify(pack.verify)).toEqual([
-      `${word(fakeBin("python3.12"))} -m py_compile ${target}${process.platform === "win32" ? "" : ECHO}`,
+      `${word(fakeBin("python3.12"), process.platform)} -m py_compile ${target}${process.platform === "win32" ? "" : ECHO}`,
       `python3 is 3.9.6 (requires-python >=3.10) and lacks openpyxl; python3.12 satisfies both; run smoke checks with it from the workspace root${clause}`,
     ]);
 
@@ -598,7 +599,7 @@ describe("where the check rides", () => {
       paths: ["docs/rate-table.xlsx", target],
     }, ws);
     const verify = pack.verify ?? [];
-    const command = `${word(fakeBin("python3.12"))} -m py_compile ${target}${process.platform === "win32" ? "" : ECHO}`;
+    const command = `${word(fakeBin("python3.12"), process.platform)} -m py_compile ${target}${process.platform === "win32" ? "" : ECHO}`;
     expect(verify.some((line) => line.startsWith("validate the produced module the cheap way")), JSON.stringify(verify)).toBe(true);
     expect(verify.filter((line) => line === command), JSON.stringify(verify)).toHaveLength(1);
     expect(verify[verify.indexOf(command) + 1]).toBe(

@@ -771,7 +771,16 @@ function workspaceRootArg(args: readonly string[]): string | undefined {
 // `assertActiveRootExists` (below `run()`) to validate the SAME value every
 // downstream resolver (`resolveWorkspaceRoot`, `checkCwdOrRefuse`) sees; it
 // does not by itself make the path exist.
-export let activeRoot = path.resolve(workspaceRootArg(argv) ?? process.env["TOKENLIGHTEN_ROOT"] ?? process.cwd());
+// A pooled test process must not hold a removable fixture as its physical cwd
+// on Windows. The harness launches from a stable directory and supplies the
+// original launch cwd only for workspace resolution. Production ignores it.
+const pooledSessionCwd = process.env["TL_TEST_SESSION_RESET"] === "1"
+  ? process.env["TL_TEST_SESSION_CWD"] : undefined;
+if (pooledSessionCwd !== undefined && (!path.isAbsolute(pooledSessionCwd) || realDirectory(pooledSessionCwd) === undefined)) {
+  throw new Error("TL_TEST_SESSION_CWD must name an existing absolute directory");
+}
+const launchCwd = pooledSessionCwd ?? process.cwd();
+export let activeRoot = path.resolve(launchCwd, workspaceRootArg(argv) ?? process.env["TOKENLIGHTEN_ROOT"] ?? launchCwd);
 
 // F-A7 (v0.11 wave C): the client identity `initialize`'s clientInfo declares,
 // captured once per connection below (the only leg where our own code ever
@@ -797,8 +806,13 @@ export function resetServerStateForSessionReset(workspaceRoot: string, cwd: stri
   if (realDirectory(next) === undefined) {
     throw new Error(`workspace root does not exist or is not a directory: ${next}`);
   }
-  // A fresh server runs in the directory its launcher chose; so does a reset one.
-  process.chdir(path.resolve(next, cwd));
+  const nextCwd = path.resolve(next, cwd);
+  if (pooledSessionCwd === undefined) {
+    // Preserve the original reset behavior for harnesses without neutral cwd.
+    process.chdir(nextCwd);
+  } else if (realDirectory(nextCwd) === undefined) {
+    throw new Error(`session cwd does not exist or is not a directory: ${nextCwd}`);
+  }
   activeRoot = next;
   capturedClientId = undefined;
   creditedReadPathsByLane.clear();
@@ -1628,6 +1642,7 @@ function resolveTaskPackQueryArg(
 // for the measured cost this restoration accepts (ledger comment there
 // records the before/after).
 const closed = (properties: Record<string, unknown>) => ({
+  type: "object",
   additionalProperties: false,
   properties,
 });
@@ -2396,7 +2411,6 @@ export const ALL_TOOLS: ToolEntry[] = [
       _meta: { "anthropic/alwaysLoad": true, ...PROTOCOL_META },
       annotations: { readOnlyHint: true },
       inputSchema: {
-        type: "object",
         ...closed({
           query: { type: "string", description: "Task-pack intent, verbatim." },
           qref: { type: "string", description: "Replay token; re-pack with it." },
@@ -2506,7 +2520,6 @@ export const ALL_TOOLS: ToolEntry[] = [
       // old `edit.scope` positive case is removed to match (D-REPORT
       // records the before/after).
       inputSchema: {
-        type: "object",
         ...closed({
           edits: { type: "array", items: CANONICAL_EDIT_ITEM, description: "Batch independent edits, ONE call." },
           artifact: {
@@ -2516,7 +2529,6 @@ export const ALL_TOOLS: ToolEntry[] = [
                 type: "array",
                 description: "Sheet/cell/value/formula writes.",
                 items: {
-                  type: "object",
                   ...closed({
                     sheet: { type: "string", description: "Worksheet name." },
                     cell: { type: "string", description: "A1-style cell address." },
@@ -2529,7 +2541,6 @@ export const ALL_TOOLS: ToolEntry[] = [
                 type: "array",
                 description: "search/replace/all text edits.",
                 items: {
-                  type: "object",
                   ...closed({
                     search: { type: "string", description: "Text to find." },
                     replace: { type: "string", description: "Replacement text." },
@@ -2543,7 +2554,6 @@ export const ALL_TOOLS: ToolEntry[] = [
                 type: "array",
                 description: "Zip member ops: add/replace/delete.",
                 items: {
-                  type: "object",
                   ...closed({
                     action: { type: "string", description: "Member op: add, replace, or delete." },
                     member: { type: "string", description: "Member path in the archive." },
@@ -2587,7 +2597,6 @@ export const ALL_TOOLS: ToolEntry[] = [
       _meta: { "anthropic/alwaysLoad": true },
       annotations: { readOnlyHint: true },
       inputSchema: {
-        type: "object",
         ...closed({
           action: { enum: ["find", "references", "diff", "tree"], description: "find/references/diff/tree." },
           // W9 (2026-08-22) / W3-2 restoration: `queries` had no description at
@@ -14090,6 +14099,7 @@ function stageWindowReadRequest(
   content: string,
   ranges: string | string[],
   keepComments: boolean,
+  forceServeOrigin = false,
 ): void {
   const args = protocolCallContext()?.args;
   const totalLines = countLines(content);
@@ -14111,7 +14121,8 @@ function stageWindowReadRequest(
   }
   stageReadRequestForServe({
     workspace, relPath: filePath, fileSha: shaOfText(content), totalLines,
-    requested, content: "auto", keepComments, args, elided,
+    requested, content: "auto", keepComments,
+    args: forceServeOrigin ? {...args, force_serve: true} : args, elided,
   });
 }
 
@@ -15787,7 +15798,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // mode branch below consults `keepComments`.
       const commentsMode = parseCommentsMode(args["comments"]);
       if (!commentsMode.ok) return toolError("comments must be elide or keep", { code: "invalid-input" });
-      const keepComments = commentsMode.keep;
+      let keepComments = commentsMode.keep;
       // TL-05 (plan §7.1): the ORIGINAL canonical `content:"full"` fact,
       // surviving normalizeCanonicalRequest's `delete args["content"]` via
       // RANGE_CONTENT_FULL_INPUT (see that Symbol's own doc comment). Read
@@ -15843,7 +15854,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       //
       // `SERVED_CONTENT_RECEIPT_NOTE` (server.ts, above) is updated to match:
       // it no longer tells a caller that `content:"full"` forces the bytes.
-      const forceContentServe = args["force_serve"] === true
+      let forceContentServe = args["force_serve"] === true
         // P2-1 (2026-09-08): `allowFull` decoupled from forcing for the
         // CANONICAL dialect (budget.allowFull is a byte-cap extension only
         // now) — the legacy flat `allowFull` field keeps forcing, pinned by
@@ -15959,7 +15970,10 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
                 ...restartBudget,
                 ...(cursorCwd !== undefined ? { cwd: cursorCwd } : {}),
                 ...(cursorLane !== "" ? { lane: cursorLane } : {}),
-                ...(cursorTaskHandle !== undefined ? { task: { handle: cursorTaskHandle } } : {}),
+                ...(cursorTaskHandle !== undefined ? { task: {
+                  handle: cursorTaskHandle,
+                  ...(staged.state.force_serve_origin === true ? { force_serve: true } : {}),
+                } } : {}),
               }),
             });
           }
@@ -16165,6 +16179,14 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // REWRITE INTO THE ORDINARY WINDOW SERVE. One path per page (see
         // `readRequestStore.ts`'s "ONE PAGE, ONE PATH" note).
         const pagePath = cursorPage.windows[0]!.path;
+        // A page retains the request's resend and representation contract.
+        // Restore it only after validating every source revision; replaying
+        // epoch:new here would create a different task on every page.
+        if (staged.state.force_serve_origin === true) {
+          args["force_serve"] = true;
+          forceContentServe = true;
+        }
+        keepComments = staged.state.targets.find(target => target.path === pagePath)?.representation.comments === "keep";
         const pageWindows = cursorPage.windows
           .filter((entry) => entry.path === pagePath)
           .map((entry) => entry.window);
@@ -16993,6 +17015,30 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             return typeof ov?.["range"] === "string" || rangeContentFullMarker || handleTable.get(hId)?.symbol === undefined;
           });
 
+        // A bounded batch that deliberately resends must owe all its windows,
+        // including targets deferred before the producer visits them. Stage
+        // that existing policy once so the tail publishes a parent cursor,
+        // rather than a fresh slice that can collapse into an old receipt.
+        if (!handlesBatchAnswersHeld && defaultResponseByteCeiling !== undefined) {
+          const stagedWindows: Array<{path: string; content: string; range: string}> = [];
+          for (const [index, id] of requested.entries()) {
+            const entry = handleTable.get(id), override = handleOverrides?.[index];
+            if (!entry?.path || entry.workspaceRoot !== workspace || splitArchiveVirtualPath(entry.path)
+              || typeof override?.["symbol"] === "string"
+              || (override?.["range"] === undefined && !rangeContentFullMarker && entry.symbol !== undefined)) break;
+            const verdict = await servedTextForRoute(entry.path, workspace);
+            if (verdict === null || verdict.kind === "undecodable") break;
+            const range = typeof override?.["range"] === "string" ? override["range"]
+              : entry.range ?? `1-${Math.max(1, countLines(verdict.text))}`;
+            if (parseWindows([range]).length === 0) break;
+            stagedWindows.push({path: entry.path, content: verdict.text, range});
+          }
+          if (stagedWindows.length === requested.length) {
+            for (const target of stagedWindows) stageWindowReadRequest(workspace, target.path, target.content,
+              target.range, keepComments || rangeContentFullMarker, true);
+          }
+        }
+
         for (let hIdx = 0; hIdx < requested.length; hIdx++) {
           const hId = requested[hIdx]!;
           if (handlesBatchCapHit) {
@@ -17685,13 +17731,11 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // served only in part comes here and is served whole, as the pack
       // served it, and one served in full gets a short already-served entry
       // (`file-downgraded`, `code_unchanged`) instead of its bytes. The
-      // whole request must also fit ONE response (`windowedBatchBytes`
-      // <= BATCH_SINGLE_RESPONSE_MAX_BYTES and the call's own ceiling) with
-      // no caller budget: this loop has no continuation chain, and the
-      // task_pack route's chain carries the guarantees the ranged-batch specs
-      // pin (no torn read across hops when a file changes mid-chain, no line
-      // outside the requested ranges under a budget, the budget sweep's
-      // refusals). Everything that needs a chain keeps that route.
+      // window bound must fit BATCH_SINGLE_RESPONSE_MAX_BYTES, with no caller
+      // budget. A tighter host ceiling does not change a read into a task:
+      // emit stages the original read request and pages the unserved windows
+      // under that ceiling, with its existing source-bound cursors. Larger
+      // windows and explicit caller budgets retain the task_pack route.
       //
       // 2026-10-19 (v016 decision 6t-3): that one response is the reply's own
       // 32 KiB ceiling, checked against a bound on the reply rather than the
@@ -17718,10 +17762,8 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         && args["maxBytes"] === undefined && args["maxTokens"] === undefined && args["taskEpoch"] !== "new"
         ? await windowedBatchBytes(workspace, pathsBatchEntries, rangeContentFullMarker)
         : undefined;
-      const pathsBatchCallCeiling = resolveCallerByteCeiling(undefined, undefined, defaultResponseByteCeiling);
       const pathsBatchIsWindowed = pathsBatchWindowBytes !== undefined
-        && pathsBatchWindowBytes <= BATCH_SINGLE_RESPONSE_MAX_BYTES
-        && (pathsBatchCallCeiling === undefined || pathsBatchWindowBytes <= pathsBatchCallCeiling);
+        && pathsBatchWindowBytes <= BATCH_SINGLE_RESPONSE_MAX_BYTES;
       if (
         pathsBatchModeEligible
         && pathsBatchEntries.length > 1
@@ -19849,14 +19891,9 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             const bounds = parseLedgerRangeSpec(window);
             return bounds !== undefined && bounds[0] <= coverageEnd && bounds[1] >= coverageStart;
           }) === true;
-          const heldBytes = heldWindows.reduce((sum, [start, end]) =>
-            sum + Buffer.byteLength(sliceLinesToText(content, start, end), "utf8"), 0);
-          // The existing difference projector is shared with full/symbol reads.
-          // Use it by default only when saved source outweighs extra prior
-          // entries; never construct/book a discarded speculative projection.
-          const worthDifference = heldBytes > 512 + 140 * heldWindows.length;
+          // Widening a window must identify held lines even when the overlap
+          // is small. Otherwise the response silently resends prior source.
           if (heldWindows.length > 0 && hasUnservedWindow
-            && (sliceCoverageVerdict?.kind === "partial" || worthDifference)
             && sliceData.remaining_ranges === undefined) {
             const difference = buildLedgerDifferenceFullPayload({
               workspace,

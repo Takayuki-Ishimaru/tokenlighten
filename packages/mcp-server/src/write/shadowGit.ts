@@ -39,6 +39,7 @@ import { spawnSync, spawn, type SpawnSyncReturns } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
+import { ensureRuntimeDirectory } from "@tokenlighten/skeleton-engine";
 
 // ---------------------------------------------------------------------------
 // State
@@ -289,6 +290,7 @@ export function ensureInit(workspace: string): boolean {
 
   // Ensure the checkpoints directory exists.
   try {
+    ensureRuntimeDirectory(workspace);
     fs.mkdirSync(gitDirParent, { recursive: true });
   } catch {
     return false;

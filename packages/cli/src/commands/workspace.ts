@@ -38,6 +38,7 @@ import type {
 // DESIGN-v0.15 §8.2 (R7 Part B): value imports (not type-only) for the CLI's
 // own --tool-surface validation.
 import { TOOL_SURFACE_VALUES, isToolSurface } from "@tokenlighten/types";
+import { ensureRuntimeDirectory } from "@tokenlighten/skeleton-engine";
 import {
   getNestedKey,
   readConfig,
@@ -55,7 +56,7 @@ import {
 import { configFilePath } from "../paths.js";
 import { wantsHelp } from "../util/helpFlag.js";
 import { resolveMcpBin } from "./mcp.js";
-import { installCopilotSessionHook } from "../copilotSessionHooks.js";
+import { COPILOT_SESSION_CONFIG, COPILOT_SESSION_RUNNER, installCopilotSessionHook } from "../copilotSessionHooks.js";
 
 const CLIENTS = new Set<TokenLightenSetupClient>([
   "vscode",
@@ -1186,9 +1187,45 @@ export async function setupWorkspace(options: {
     : options.clients && options.clients.length > 0
       ? [...new Set(options.clients)]
       : ["vscode", "codex", "claude-code"] satisfies TokenLightenSetupClient[];
+  const codexConfigCreated = clients.includes("codex") && !existsSync(join(root, ".codex", "config.toml"));
+  const copilotSettingsCreated = clients.includes("vscode") && !existsSync(join(root, ".vscode", "settings.json"));
+  const targetIds = clients.includes("vscode")
+    ? ["claude", "copilot", "copilot-agent"]
+    : ["claude", "copilot"];
+  const setupOutputCandidates = new Set<string>([
+    join(root, ".tokenlighten", ".gitignore"),
+    ...(clients.length > 0 ? [join(root, "AGENTS.md")] : []),
+    ...(clients.includes("vscode") ? [copilotGuideRecordPath(root), join(root, ".vscode", "settings.json")] : []),
+    ...(clients.includes("vscode") ? [join(root, ".vscode", "mcp.json")] : []),
+    ...(clients.includes("claude-code") ? [join(root, ".mcp.json")] : []),
+    ...(clients.includes("codex") ? [join(root, ".codex", "config.toml")] : []),
+    ...(clients.includes("vscode") && options.copilotSessionContext !== "keep"
+      ? [join(root, COPILOT_SESSION_CONFIG), join(root, COPILOT_SESSION_RUNNER)]
+      : []),
+    ...targetIds.flatMap((id) => {
+      const file = STUB_TARGET_BY_ID[id]?.file;
+      return file ? [join(root, file)] : [];
+    }),
+  ]);
+  const absentSetupOutputs = [...setupOutputCandidates].filter((file) => !existsSync(file));
+  let managedCodexStartupGrace = false;
+  if (clients.includes("codex")) {
+    const codexConfig = join(root, ".codex", "config.toml");
+    try {
+      const before = existsSync(codexConfig) ? readConfig(codexConfig) : {};
+      managedCodexStartupGrace = !Object.prototype.hasOwnProperty.call(before, "mcp_optional_startup_grace_ms");
+    } catch {
+      // Malformed user configuration is handled by configureCodex's normal
+      // refusal path; never claim ownership when the original value is unknown.
+    }
+  }
   for (const client of clients) {
     if (!CLIENTS.has(client)) throw new Error(`Unsupported client: ${client}`);
   }
+  // Keep runtime journals, checkpoint repositories, and cache content out
+  // of the user's source-control view. The helper writes only its managed
+  // ignore file and preserves any existing user-owned content.
+  ensureRuntimeDirectory(root);
   // Resolve every selected client's existing posture before writing any
   // rules/settings, so unreadable or malformed input cannot enable writes.
   const permissions = Object.fromEntries(clients.map(client => [client,
@@ -1306,6 +1343,12 @@ export async function setupWorkspace(options: {
     rulesWritten,
     configFilesWritten,
     warnings: [...rules.drifted.map((item) => `Rule drift: ${item.path}`), ...sessionWarnings],
+    ...(managedCodexStartupGrace ? { managedCodexStartupGrace: true } : {}),
+    ...(codexConfigCreated ? { codexConfigCreated: true } : {}),
+    ...(copilotSettingsCreated ? { copilotSettingsCreated: true } : {}),
+    ...(absentSetupOutputs.some((file) => existsSync(file))
+      ? { createdFiles: absentSetupOutputs.filter((file) => existsSync(file)) }
+      : {}),
     copilotInlineResults,
     // `.code-workspace` files are looked up last, from the FINAL status: a
     // run that gave the settings back (`withdrawCopilotGuide`) ends `manual`.
@@ -1710,12 +1753,25 @@ function recordWorkspaceInInstall(
     const record = readInstallRecord(installHome);
     if (!record) return;
     const files = [...result.rulesWritten, ...result.configFilesWritten];
+    const priorWorkspace = record.workspaces.find((entry) => workspacePathsEqual(entry.root, result.workspaceRoot));
     writeInstallRecord(
       installHome,
       upsertInstallWorkspace(record, {
         root: result.workspaceRoot,
         files,
         guide_block: result.rulesWritten.length > 0,
+        ...(result.managedCodexStartupGrace || priorWorkspace?.managed_codex_startup_grace
+          ? { managed_codex_startup_grace: true }
+          : {}),
+        ...(result.codexConfigCreated || priorWorkspace?.codex_config_created
+          ? { codex_config_created: true }
+          : {}),
+        ...(result.copilotSettingsCreated || priorWorkspace?.copilot_settings_created
+          ? { copilot_settings_created: true }
+          : {}),
+        ...(result.createdFiles?.length || priorWorkspace?.created_files?.length
+          ? { created_files: [...new Set([...(priorWorkspace?.created_files ?? []), ...(result.createdFiles ?? [])])] }
+          : {}),
       }),
     );
   } catch {

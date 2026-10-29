@@ -223,8 +223,8 @@ const EVENT_FIELD_SET_V1 = new Set<string>(EVENT_FIELDS_V1);
 const EVENT_FIELD_SET = new Set<string>(EVENT_FIELDS);
 const USAGE_RESET_FILE = ".usage-reset.ndjson";
 
-// Used only for the legacy MCP-response estimate when a provider log has no
-// model id. Full-session costs use MODEL_PRICES and never guess an unknown model.
+// Retained as legacy reference metadata. These client input rates are not
+// used to report savings; full-session costs use model-specific prices.
 const AUTOMATIC_PRICING: TokenLightenUsageSummary["automaticPricing"] = {
   asOf: "2026-08-10",
   byClient: {
@@ -935,7 +935,10 @@ function sessionEstimate(
     ? unpricedTokens / totalTokensAll
     : null;
   let predictedSavedCostUsd = 0;
-  const costAvailable = hasCounterfactual;
+  // A full-session cost percentage cannot use a partial priced subtotal as
+  // its denominator. Preserve the observed subtotal and unpriced share, but
+  // do not present a full-session counterfactual when any usage is unpriced.
+  const costAvailable = hasCounterfactual && unpricedTokens === 0;
   if (manualPrice !== null) {
     predictedSavedCostUsd = predictedSavedTokens * manualPrice / 1_000_000;
   } else {
@@ -1119,8 +1122,6 @@ export function summarizeUsage(
   let measuredBaselineTokens = 0;
   let measuredResponseBytes = 0;
   let estimatedSavedTokens = 0;
-  let automaticallyEstimatedSavedCostUsd = 0;
-  let automaticallyEstimatedBaselineCostUsd = 0;
   // Pass 1: per-event totals that are NOT part of the paired-baseline ratio.
   // Every event counts individually here, exactly as before task grouping —
   // these are not what the 2026-08-30 fix below changes.
@@ -1168,8 +1169,8 @@ export function summarizeUsage(
   // the SUM of the group's non-null `baselineTokens` values, and one signed
   // `groupBaseline - groupResponse` saving.
   //
-  // ATTRIBUTION NOTE: `savedTokensByClient` (and the automatic-pricing
-  // client rate) credits a contributing group's WHOLE signed saving to the
+  // ATTRIBUTION NOTE: `savedTokensByClient` credits a contributing group's
+  // WHOLE signed saving to the
   // client of the group's FIRST `ok` event. This assumes one task is worked
   // by one client/lane (the same lane=1-agent assumption the AGENTS.md
   // shared-workspace contract documents) — a task whose calls somehow
@@ -1213,12 +1214,6 @@ export function summarizeUsage(
     measuredResponseBytes += groupResponseBytes;
     estimatedSavedTokens += signedSavedTokens;
     savedTokensByClient[client] += signedSavedTokens;
-    const automaticRate =
-      AUTOMATIC_PRICING.byClient[client].costPerMillionTokensUsd;
-    automaticallyEstimatedSavedCostUsd +=
-      signedSavedTokens * automaticRate / 1_000_000;
-    automaticallyEstimatedBaselineCostUsd +=
-      groupBaselineTokens * automaticRate / 1_000_000;
   }
   const price =
     costPerMillionTokensUsd !== undefined
@@ -1231,14 +1226,11 @@ export function summarizeUsage(
     measuredBaselineTokens > 0
       ? estimatedSavedTokens / measuredBaselineTokens * 100
       : null;
-  const estimatedSavedCostUsd =
-    price === null
-      ? automaticallyEstimatedSavedCostUsd
-      : estimatedSavedTokens * price / 1_000_000;
-  const estimatedBaselineCostUsd =
-    price === null
-      ? automaticallyEstimatedBaselineCostUsd
-      : measuredBaselineTokens * price / 1_000_000;
+  // A user-supplied rate produces an illustrative input-token equivalent;
+  // client-based reference prices do not establish actual billing savings.
+  const estimatedSavedCostUsd = price === null ? null : estimatedSavedTokens * price / 1_000_000;
+  const estimatedBaselineCostUsd = price === null ? null : measuredBaselineTokens * price / 1_000_000;
+  const session = sessionEstimate(aiLogs, savedTokensByClient, measuredCallsByClient, price);
   return {
     schemaVersion: 2,
     generatedAt: new Date().toISOString(),
@@ -1257,20 +1249,12 @@ export function summarizeUsage(
     estimatedReductionPercent: estimatedTokenReductionPercent,
     estimatedTokenReductionPercent,
     estimatedBaselineCostUsd,
-    estimatedCostReductionPercent:
-      estimatedBaselineCostUsd > 0
-        ? estimatedSavedCostUsd / estimatedBaselineCostUsd * 100
-        : null,
+    estimatedCostReductionPercent: session.costReductionPercent,
     pricingMode: price === null ? "automatic" : "manual",
     costPerMillionTokensUsd: price,
     automaticPricing: AUTOMATIC_PRICING,
     estimatedSavedCostUsd,
-    sessionEstimate: sessionEstimate(
-      aiLogs,
-      savedTokensByClient,
-      measuredCallsByClient,
-      price,
-    ),
+    sessionEstimate: session,
     byTool,
     byClient,
   };

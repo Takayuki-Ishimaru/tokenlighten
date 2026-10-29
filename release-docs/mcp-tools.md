@@ -141,6 +141,23 @@ tl mcp start --stdio --workspace /path/to/project
 
 For command details, run `tl help`. See [Getting started](getting-started.md) for setup and operational notes.
 
+## v0.16.3 updates
+
+Discovery retains explicitly named files and projects when locating a quoted
+CLI command by its options. A bug report uses working-tree changes as its
+investigation scope only when the request asks to inspect those changes.
+Compound English and Japanese questions retain individual requirements
+through continued discovery.
+
+Python symbol reads prefer a unique implementation over overload declarations
+in the same scope. Forced resends, budgeted batches and explicit comment
+reads retain the required source and continuation. Compact acknowledgements
+of earlier reads preserve valid edit addresses for the current task.
+
+Windows C/C++ compilation commands preserve native include paths and quoting.
+The three tools and canonical top-level request fields are unchanged from
+v0.16.2. Follow returned `next` calls unchanged.
+
 ## v0.16.2 updates
 
 Explanation requests retain conditions, callers, configuration-file details

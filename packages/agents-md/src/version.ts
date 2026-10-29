@@ -13,4 +13,4 @@
 // consumers (injectAll.ts, index.ts) — this file is the source of truth.
 
 /** Current version string. Bump when prose changes materially. */
-export const INSTRUCTIONS_VERSION = "2026-10-22-v128-nocwd";
+export const INSTRUCTIONS_VERSION = "2026-10-28-v129-clarity";

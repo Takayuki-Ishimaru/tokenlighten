@@ -238,11 +238,10 @@ describe("large find result — effective ceiling and exact continuation", () =>
     expect(defaultRun.pages[0]!["limit"], JSON.stringify(defaultRun.pages[0]).slice(0, 300)).toBeDefined();
     expect(vscodeRun.pages[0]!["limit"], JSON.stringify(vscodeRun.pages[0]).slice(0, 300)).toBeDefined();
 
-    // The host-ceiling tier is ACTIVE: vscode's own default ceiling (14336 B)
-    // is tighter than the flat default (16384 B) a client with no known
-    // ceiling gets, so its first page is smaller — never merely equal to a
-    // coincidence of rounding.
-    expect(vscodeRun.firstPageBytes).toBeLessThan(defaultRun.firstPageBytes);
+    // A tighter ceiling cannot enlarge the page. Atomic footholds can produce
+    // equal pages when neither ceiling admits another whole set of snippets.
+    expect(vscodeRun.firstPageBytes).toBeLessThanOrEqual(defaultRun.firstPageBytes);
+    expect(vscodeRun.firstPageBytes).toBeLessThanOrEqual(14336);
     // Sanity bounds: wide, but nowhere near wireBudget.ts's independent
     // generic backstop (131072 B) for the WHOLE wire envelope — this proves
     // paging is genuinely happening, not that the cap silently stopped

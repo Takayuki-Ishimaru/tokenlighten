@@ -655,7 +655,7 @@ describe("libarchive Node worker path (Windows worker-path fix)", () => {
       resolveFromRequire: () => {
         throw new Error("Cannot find module 'libarchive.js/dist/worker-bundle-node.mjs'");
       },
-      moduleUrl: "file:///Users/ishim/app/0.14.2/node_modules/@tokenlighten/mcp-server/dist/bin.js",
+      moduleUrl: new URL("../../dist/bin.js", import.meta.url).href,
       exists: (p: string) => {
         checkedPaths.push(p);
         return p.endsWith("worker-bundle-node.mjs");

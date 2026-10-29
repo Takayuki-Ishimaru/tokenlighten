@@ -91,9 +91,8 @@ export function runLegacyStdio(
   process.stderr.write(`[tl-mcp] workspace root: ${activeRoot}\n`);
 
   const rl = readline.createInterface({ input });
-  // Loaded now, while the launch directory exists: tsx cannot load a module
-  // it has not cached yet once the process's cwd is gone, and a pooled server's
-  // cwd is the previous test's workspace, deleted, until the reset moves it.
+  // Load while the launch directory exists: POSIX pool callers can delete the
+  // previous cwd before reset. Windows pool launches use a stable physical cwd.
   const sessionReset = process.env.TL_TEST_SESSION_RESET === "1"
     ? import("../../testing/sessionReset.js")
     : undefined;
@@ -207,7 +206,7 @@ export function runLegacyStdio(
         hostActivationWatch?.stop();
         hostActivationWatch = undefined;
         const { resetServerSessionForTests } = await sessionReset;
-        const result = resetServerSessionForTests(req.params);
+        const result = await resetServerSessionForTests(req.params);
         output.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
       }).catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);

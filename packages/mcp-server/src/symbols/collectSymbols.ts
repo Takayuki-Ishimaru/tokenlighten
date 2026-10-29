@@ -523,3 +523,31 @@ export async function collectSymbols(
 ): Promise<CollectedSymbol[]> {
   return (await collectSymbolsChecked(text, language, paths)).symbols;
 }
+
+/** Keep every Python declaration while putting implementations before overload
+ * stubs of the same name and enclosing scope. Other declarations retain their
+ * original slots, so consumers can still traverse the complete inventory. */
+export function preferPythonImplementations(symbols: readonly CollectedSymbol[], text: string): CollectedSymbol[] {
+  const lines = text.split(/\r\n|\r|\n/);
+  const stub = (s: CollectedSymbol): boolean => {
+    for (let i = s.startLine - 1; i < s.endLine; i++) {
+      const line = lines[i] ?? "";
+      if (/^\s*(?:async\s+)?def\s+/.test(line)) break;
+      if (/^\s*@(?:typing\.|t\.)?overload\b/.test(line)) return true;
+    }
+    return false;
+  };
+  const groups = new Map<string, number[]>();
+  symbols.forEach((s, i) => {
+    const key = `${s.enclosingSymbol?.startLine ?? 0}:${s.name}`;
+    const indices = groups.get(key) ?? [];
+    indices.push(i);
+    groups.set(key, indices);
+  });
+  const out = [...symbols];
+  for (const indices of groups.values()) {
+    const ordered = indices.map((i) => symbols[i]!).sort((a, b) => Number(stub(a)) - Number(stub(b)));
+    indices.forEach((i, j) => { out[i] = ordered[j]!; });
+  }
+  return out;
+}

@@ -83,7 +83,8 @@ const PORTABLE: Surface = SURFACES_WITH_KEYWORD[0]!;
  * The VS Code / Copilot CLI minimal surfaces cut the item `oneOf` since the
  * Copilot retest r4 and cut the new `anyOf` with it. "Byte-identical" is
  * pinned by length and sha256 of `JSON.stringify(tools/list)` as measured on
- * the built server BEFORE the keyword was added (2026-10-22); re-pin these
+ * the built server BEFORE the keyword was added (2026-10-22), updated for
+ * B9's explicit object types (2026-10-28): +64 / +256 / +64 bytes. Re-pin these
  * together with leanSchemaAllClients.spec.ts's byte sizes on an intentional
  * change to those surfaces, never to absorb the keyword.
  */
@@ -91,17 +92,17 @@ const LEAN_SURFACES: ReadonlyArray<Surface & { bytes: number; sha256: string }> 
   {
     label: "VS Code + TL_TURN_ECONOMY=1 (minimal tier)", client: "Visual Studio Code", copilotAjv: true,
     env: { ...HOST_DEFAULTS, TL_PORTABLE_TOOLS: "0", TL_TURN_ECONOMY: "1" },
-    bytes: 2642, sha256: "e0aacdfeae8b5e4ffa67ee4077be1e03c7560d1ae3c1ca17d7340da06fd6cdc1",
+    bytes: 2706, sha256: "a9b675858b7c10695fae3f5f29e0a87cb2f06ea13bac70c2f332eac8b1eff8e7",
   },
   {
     label: "VS Code + TL_TURN_ECONOMY=1, TL_MINIMAL_TOOLS=0 (r4 tier)", client: "Visual Studio Code", copilotAjv: true,
     env: { ...HOST_DEFAULTS, TL_PORTABLE_TOOLS: "0", TL_TURN_ECONOMY: "1", TL_MINIMAL_TOOLS: "0" },
-    bytes: 6118, sha256: "288c29ecff05e53ad462e910543049fadf1f047fbb757b401c5596c3296ec6b1",
+    bytes: 6374, sha256: "82fdd6590b9f681082a6429834f57a4f19a925c8fd541681a4112ef6c3105681",
   },
   {
     label: "Copilot CLI minimal (TL_LEAN_CALLS=1, TL_MINIMAL_TOOLS=1)", client: "copilot-cli", copilotAjv: true,
     env: { ...HOST_DEFAULTS, TL_PORTABLE_TOOLS: "0", TL_LEAN_CALLS: "1", TL_MINIMAL_TOOLS: "1" },
-    bytes: 2334, sha256: "4e47ab208fb9346f8a24ac04870c1568eed2c5c3a3ccb76a67d477e86281d3d9",
+    bytes: 2398, sha256: "4483608265d58729f99410c48858ca318c889f6fc89ad24649c983679486c535",
   },
 ];
 
@@ -348,15 +349,16 @@ describe("what Copilot Chat tells the model for the r17 one-item call (Ajv error
   });
 });
 
-describe.each(LEAN_SURFACES)("the VS Code and Copilot CLI minimal surfaces are unchanged -- $label", (surface) => {
-  it.each([undefined, "0"])("carries neither edits.items.anyOf nor edits.items.oneOf, byte-identical to the advertisement before the keyword (TL_LEAN_SCHEMA=%s)", (leanSchema) => {
+describe.each(LEAN_SURFACES)("the VS Code and Copilot CLI surfaces retain their address-keyword policy -- $label", (surface) => {
+  it.each([undefined, "0"])("carries neither edits.items.anyOf nor edits.items.oneOf, with B9 object declarations pinned (TL_LEAN_SCHEMA=%s)", (leanSchema) => {
     const tools = advertise({ client: surface.client, env: { ...surface.env, TL_LEAN_SCHEMA: leanSchema } });
     const items = itemSchema(tools);
     expect(items).not.toHaveProperty("anyOf");
     expect(items).not.toHaveProperty("oneOf");
     expect(JSON.stringify(editTool(tools))).not.toMatch(/"(?:anyOf|oneOf)"/);
     expect(Buffer.byteLength(JSON.stringify(tools), "utf8"), `${surface.label} bytes`).toBe(surface.bytes);
-    expect(createHash("sha256").update(JSON.stringify(tools)).digest("hex"), `${surface.label} sha256`).toBe(surface.sha256);
+    const digest = createHash("sha256").update(JSON.stringify(tools)).digest("hex");
+    expect(digest, `${surface.label} sha256 ${digest}`).toBe(surface.sha256);
   });
 
   it("still validates every control (these surfaces carry no address keyword; dispatch, not the schema, refuses an address-less item)", () => {
@@ -401,10 +403,11 @@ describe("Codex schema lowering of the portable tl_edit_file", () => {
     expect(codexTypelessCompositionNodes(branchNested, "root")).toEqual(["root.properties.edits.items.oneOf[0]"]);
   });
 
-  it("adds no type-less composition node: the item node is the only one (it carried oneOf and no type before the keyword), and each anyOf child is a bare required object that Codex types", () => {
+  it("adds no type-less composition node: the item explicitly declares object and Codex types the bare required children", () => {
     const tool = editTool(advertise(PORTABLE));
-    expect(codexTypelessCompositionNodes(tool.inputSchema, "inputSchema")).toEqual(["inputSchema.properties.edits.items"]);
+    expect(codexTypelessCompositionNodes(tool.inputSchema, "inputSchema")).toEqual([]);
     const items = itemSchema([tool]);
+    expect(items["type"]).toBe("object");
     expect(items["anyOf"]).toEqual([{ required: ["path"] }, { required: ["handle"] }, { required: ["intent"] }]);
     for (const child of items["anyOf"] as Array<Record<string, unknown>>) expect(Object.keys(child)).toEqual(["required"]);
   });

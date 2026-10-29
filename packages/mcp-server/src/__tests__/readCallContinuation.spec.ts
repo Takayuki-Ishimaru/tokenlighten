@@ -108,8 +108,10 @@ describe("immutable read-call continuation store", () => {
   });
 
   it("bounds lifetime by the parent and rejects expiry", () => {
-    const start = Date.now(), s = setup();
-    const now = vi.spyOn(Date, "now").mockReturnValue(start + TASK_HANDLE_TTL_MS - 3000);
+    const start = Date.now();
+    const now = vi.spyOn(Date, "now").mockReturnValue(start);
+    const s = setup();
+    now.mockReturnValue(start + TASK_HANDLE_TTL_MS - 3000);
     const cursor = mint(s), record = resolve(s, cursor);
     expect(record.kind).toBe("read-call");
     if (record.kind !== "read-call") throw new Error("missing plan");

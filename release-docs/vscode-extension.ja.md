@@ -6,7 +6,7 @@ TokenLightenのVS Code拡張機能は、CLI、MCPサーバー、パーサー、�
 
 ## ビルドせずにインストールする
 
-v0.16.2のGitHub Releaseから**[tokenlighten-vscode-extension-0.16.2.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.16.2/tokenlighten-vscode-extension-0.16.2.vsix)**をダウンロードしてください。同じVSIXをWindows、macOS、Linuxで使用できます。
+v0.16.3のGitHub Releaseから**[tokenlighten-vscode-extension-0.16.3.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.16.3/tokenlighten-vscode-extension-0.16.3.vsix)**をダウンロードしてください。同じVSIXをWindows、macOS、Linuxで使用できます。
 
 1. **拡張機能**を開きます。
 2. **VSIXからのインストール…**を選びます。
@@ -14,7 +14,7 @@ v0.16.2のGitHub Releaseから**[tokenlighten-vscode-extension-0.16.2.vsix](http
 4. 求められた場合はVS Codeを再読み込みします。
 
 ~~~bash
-code --install-extension tokenlighten-vscode-extension-0.16.2.vsix
+code --install-extension tokenlighten-vscode-extension-0.16.3.vsix
 ~~~
 
 ソースからVSIXを作成する場合はNode.js 22以降を使用してください:
@@ -54,7 +54,7 @@ VS Codeのセットアップは、新しいローカルAgentチャット向け�
 既存のフック構成を維持できます。無効化またはnative切替時には、TokenLightenが
 管理するCopilotガイドも無効になります。
 
-v0.16.2へアップグレードした後は、**このワークスペースをセットアップ**を
+v0.16.3へアップグレードした後は、**このワークスペースをセットアップ**を
 再実行し、新しいエージェントセッションを開始するかMCPクライアントを再接続
 してください。管理ガイド、Copilot設定、接頭辞付きツール名を更新できます。
 応答をインラインに保持する設定とCLIの変更回避オプションは、
@@ -67,7 +67,7 @@ v0.16.2へアップグレードした後は、**このワークスペースを�
 
 ## アンインストール
 
-**TokenLighten: このマシンからTokenLightenをアンインストール**（コマンド`tokenlighten.uninstallMachine`）を実行すると、マシンインストール（ステージ済みランタイム、ホストID）とTokenLighten管理のホスト登録（Claude Code、Codex）が削除されます。ご自身や他のツールが書いた登録は変更されず、その旨が報告されます。このマシンインストールがセットアップしたワークスペースでは、TokenLightenが管理するガイドブロックと、`.vscode/mcp.json`・`.mcp.json`・`.codex/config.toml`内の管理対象`tokenlighten`エントリも削除されます（編集したMCPファイルの隣に`.tl-backup`のコピーを残します）。ご自身の記述や他のサーバーのエントリには触れません。Windowsでは、実行中のAIホストが使用しているランタイムファイルは、そのホストを閉じた後に削除されます。VSIXを削除してもマシンインストールは削除されません。先にこのコマンド、または[はじめに](getting-started.md#uninstall)に記載の絶対パス形式の`tl install --uninstall`（`<home>/bin`は`PATH`に追加されないため、そのままの`tl install --uninstall`では実行できません）を実行してください。
+**TokenLighten: このマシンからTokenLightenをアンインストール**（コマンド`tokenlighten.uninstallMachine`）を実行すると、マシンインストール（ステージ済みランタイム、ホストID）とTokenLighten管理のホスト登録（Claude Code、Codex）が削除されます。ご自身や他のツールが書いた登録は変更されず、その旨が報告されます。このマシンインストールがセットアップしたワークスペースでは、TokenLightenが管理するガイドブロックと、`.vscode/mcp.json`・`.mcp.json`・`.codex/config.toml`内の管理対象`tokenlighten`エントリも削除され、利用者の設定を保存した既存のバックアップは保持されます。セットアップ時に作成したと記録されている設定ファイルやガイドファイルが空になった場合は、削除のためだけに作成したバックアップとともに整理します。ご自身の記述や他のサーバーのエントリは保持します。Windowsでは、実行中のAIホストが使用しているランタイムファイルは、そのホストを閉じた後に削除されます。VSIXを削除してもマシンインストールは削除されません。先にこのコマンド、または[はじめに](getting-started.md#uninstall)に記載の絶対パス形式の`tl install --uninstall`（`<home>/bin`は`PATH`に追加されないため、そのままの`tl install --uninstall`では実行できません）を実行してください。
 
 ## ステータスバーと診断
 
@@ -107,4 +107,4 @@ TokenLightenのステータスバーをクリックすると、診断、有効�
 | `tokenlighten.copilotGuide` | `standalone` | Copilotガイドの形式：短い自己完結型、共通AGENTS.md、または既存構成の維持。 |
 | `tokenlighten.guideProfile` | `compact` | セットアップ時に書き込む共通ガイド: `compact`／`medium`／`full`。どちらのツールサーフェスでも明示設定を優先します。 |
 
-デスクトップアプリケーションは公開v0.16.2リリースに含まれません。
+デスクトップアプリケーションは公開v0.16.3リリースに含まれません。

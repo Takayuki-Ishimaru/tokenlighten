@@ -32,6 +32,8 @@ export interface SearchInput {
   /** Zero-based page offset into the complete ranked result list. */
   offset?: number;
   includeScores?: boolean;
+  /** Internal discovery can retain fuzzy candidates even when an exact name exists. */
+  includeFuzzy?: boolean;
 }
 
 export interface RankedLocation {
@@ -315,6 +317,14 @@ export function searchSymbols(
     }
   }
 
+  // An exact identifier request is an inventory of its declarations.  Keep
+  // all of them, including same-name methods in the same file, and do not
+  // mix in weaker token or path matches. Substring searches remain fuzzy.
+  const exactResults = hasQuery && input.includeFuzzy !== true
+    ? results.filter((r) => r.symbol.toLowerCase() === queryLower)
+    : [];
+  if (exactResults.length > 0) results.splice(0, results.length, ...exactResults);
+
   // Sort: score descending, then path bytes ascending, then line ascending.
   results.sort((a, b) => {
     const scoreDiff = b._score - a._score;
@@ -327,21 +337,20 @@ export function searchSymbols(
   // Deduplicate: keep only the best-scoring symbol per file so that more distinct
   // files appear within the top-k results. Without this, a file with many matching
   // symbols can occupy all k slots. Fix A: skipped entirely within an explicit
-  // hard path scope — there the caller wants that path's OWN symbol
-  // inventory (a listing, or every in-scope match), not one representative
+  // hard path scope or when exact names exist — there the caller wants the symbol
+  // inventory (a listing, or every exact match), not one representative
   // symbol per file (a single-file scope would otherwise collapse to just 1
   // result no matter how many symbols that file has).
   const seenFiles = new Set<string>();
   const deduped: ScoredLocation[] = [];
   for (const r of results) {
-    if (hasPathScope || !seenFiles.has(r.path)) {
+    if (hasPathScope || exactResults.length > 0 || !seenFiles.has(r.path)) {
       seenFiles.add(r.path);
       deduped.push(r);
     }
   }
 
-  // total reflects the number of distinct files matched (after dedup), which
-  // is the most useful count for callers deciding whether to broaden their query.
+  // total counts the returned inventory after any file-level deduplication.
   const total = deduped.length;
   const truncated = offset + limit < total;
   const sliced = deduped.slice(offset, offset + limit);

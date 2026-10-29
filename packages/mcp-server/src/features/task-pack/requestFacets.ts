@@ -423,8 +423,12 @@ const VALUE_PERCENTAGE_RATE_RE = /\bwhat(?:'s|\s+is)\s+the\b(?:\s+\w+){0,3}?\s+(
 // 2026-10-10: 数を教えて counts only as its own word — not the tail of 関数 /
 // 引数 / 変数 (「retry 関数を教えて」 asks for the function, and minted a value
 // facet whose emptiness was then disclosed).
-const VALUE_BARE_JA_RE =
-  /デバウンス(?:時間|間隔)?|監視(?:対象)?(?:の)?言語|表示言語|既定値|既定|デフォルト値|デフォルト|初期値|設定値|上限|下限|最大値|最大|最小値|最小|しきい値|閾値|回数|件数|秒数|いくつ|値|ステータスコード|設定されている|設定されてる|いくら|割り当てられている|割り当てられてる|(?<![関引変])数を教えて|率/;
+// These parameter nouns imply a value question but still name its subject.
+// Unlike "default value", "watched languages" must survive topic extraction.
+const VALUE_SUBJECT_JA_RE = /デバウンス(?:時間|間隔)?|監視(?:対象)?(?:の)?言語|表示言語/;
+const VALUE_DESCRIPTOR_JA_RE =
+  /既定値|既定|デフォルト値|デフォルト|初期値|設定値|上限|下限|最大値|最大|最小値|最小|しきい値|閾値|回数|件数|秒数|いくつ|値|ステータスコード|設定されている|設定されてる|いくら|割り当てられている|割り当てられてる|(?<![関引変])数を教えて|率/;
+const VALUE_BARE_JA_RE = new RegExp(`${VALUE_SUBJECT_JA_RE.source}|${VALUE_DESCRIPTOR_JA_RE.source}`);
 // WP-C (2026-09-29, eval-0929 §8, orchestrator chip adopted from WP-B): a
 // relative clause "AがBする<value-shaped noun>" ("the <noun> that A does B
 // to/with") asks about that noun as A's own value/parameter -- the JA
@@ -1438,7 +1442,7 @@ const FACET_DESCRIPTOR_EN_RES: readonly RegExp[] = [
   anchoredWhole(FLOW_PHRASE_EN_RE),
 ];
 const FACET_DESCRIPTOR_JA_RES: readonly RegExp[] = [
-  anchoredWhole(VALUE_BARE_JA_RE),
+  anchoredWhole(VALUE_DESCRIPTOR_JA_RE),
   anchoredWhole(CONDITION_JA_RE),
   anchoredWhole(CALLERS_JA_RE),
   anchoredWhole(FLOW_JA_RE),

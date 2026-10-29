@@ -10,7 +10,7 @@
  * - score/reasons are omitted unless includeScores=true.
  * - Default limit 20, hard cap 50.
  * - P1.2: full JSON response capped at MAX_RESPONSE_BYTES (2048).
- * - role is omitted unless cheaply derivable; annotates at most the top 5
+ * - role is omitted for methods and unless cheaply derivable; annotates at most the top 5
  *   (post-dedup) locations, counted against MAX_RESPONSE_BYTES — shares
  *   derivation with explore action=find via findText.ts's
  *   deriveFileRole/applyRoles. See findText.ts's "Role annotations" section
@@ -82,6 +82,8 @@ export interface SearchSymbolsInput {
   path?: string;
   limit?: number;
   includeScores?: boolean;
+  /** Internal discovery may retain fuzzy results alongside exact names. */
+  includeFuzzy?: true;
   /**
    * Records of the RANKED list to skip before serving this page (0-based).
    * `total` stays the true pre-cap count of the whole ranking, so a caller
@@ -103,7 +105,8 @@ export interface SymbolLocation {
   score?: number;
   reasons?: string[];
   /**
-   * One-line "primary symbol + purpose" for this file (see findText.ts's
+   * One-line "primary symbol + purpose" for this file, omitted for methods
+   * because a file role does not identify their owner (see findText.ts's
    * "Role annotations" section for full rationale). Shares derivation with
    * explore action=find via findText.ts's deriveFileRole/applyRoles — same
    * top-5-files cap, same cheap bounded-read derivation, same
@@ -503,6 +506,7 @@ export async function searchSymbols(
     lang: input.lang,
     path: input.path,
     includeScores: input.includeScores,
+    includeFuzzy: input.includeFuzzy,
   };
 
   // Public cursors page the same filtered universe they count. Internal
@@ -601,7 +605,12 @@ export async function searchSymbols(
     (p) => deriveFileRole(workspace, p),
     (locs) => ({ locations: locs, truncated: finalTruncated, total: rankedTotal }),
     MAX_RESPONSE_BYTES,
-  );
+  ).map((loc) => {
+    // File roles describe the file, not the method's enclosing class.
+    if (loc.kind !== "method") return loc;
+    const { role: _role, ...withoutRole } = loc;
+    return withoutRole;
+  });
 
   // 8) symbol_coverage — computed from the FINAL served page (post byte-cap/
   //    role trimming), so the counts always match what actually shipped —

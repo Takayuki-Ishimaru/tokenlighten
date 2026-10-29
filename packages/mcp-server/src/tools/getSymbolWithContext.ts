@@ -16,7 +16,7 @@ import { languageForPathWithContent } from "../util/languages.js";
 import { treeSitterSkeleton, treeSitterSupports } from "../skeleton/treeSitter.js";
 import type { TreeSitterPaths } from "../skeleton/types.js";
 import { compressFormat } from "../util/formatCompress.js";
-import { collectSymbols, type CollectedSymbol } from "../symbols/collectSymbols.js";
+import { collectSymbols, collectSymbolsChecked, type CollectedSymbol } from "../symbols/collectSymbols.js";
 import { renderSymbolSkeleton } from "../symbols/renderSymbolSkeleton.js";
 import { commentNote, isTokenlightenSentinelLine } from "../util/sentinelComment.js";
 import { escapeRegExp, MAX_REGEX_QUERY_CHARS } from "../features/search/find/findText.js";
@@ -340,9 +340,32 @@ async function findSymbolWithTreeSitter(
   symbolName: string,
   lang: string,
   treeSitterPaths?: TreeSitterPaths,
+  inventory?: CollectedSymbol[],
 ): Promise<FoundSymbol | undefined> {
   if (!treeSitterSupports(lang)) return undefined;
-  const symbols = await collectSymbols(text, lang, treeSitterPaths ?? {});
+  const symbols = inventory ?? await collectSymbols(text, lang, treeSitterPaths ?? {});
+  if (lang === "python") {
+    const parts = symbolName.split(".");
+    const name = parts.at(-1)!;
+    const owner = parts.length === 2 ? parts[0] : undefined;
+    if (parts.length > 2) return undefined;
+    const matches = symbols.filter((s) => s.name === name &&
+      (owner === undefined || s.enclosingSymbol?.name === owner));
+    // Only collapse explicit overload declarations when an implementation in
+    // the same scope exists. Distinct classes must never share a body.
+    const scopes = new Set(matches.map((s) => s.enclosingSymbol?.startLine ?? 0));
+    if (scopes.size > 1) return undefined;
+    const lines = splitLines(text);
+    const implementations = matches.filter((s) => {
+      for (let i = s.startLine - 1; i < s.endLine; i++) {
+        const line = lines[i] ?? "";
+        if (/^\s*(?:async\s+)?def\s+/.test(line)) break;
+        if (/^\s*@(?:typing\.|t\.)?overload\b/.test(line)) return false;
+      }
+      return true;
+    });
+    return implementations.length === 1 ? foundFromCollected(implementations[0]!) : undefined;
+  }
   const match = symbols.find((s) => s.name === symbolName);
   return match ? foundFromCollected(match) : undefined;
 }
@@ -808,7 +831,9 @@ async function buildNotFoundRecovery(
   if (symbols.length === 0) return { candidates: [] };
 
   const candidates = rankCandidates(
-    symbols.map((s) => s.name),
+    symbols.map((s) => language === "python" && s.enclosingSymbol
+      ? `${s.enclosingSymbol.name}.${s.name}`
+      : s.name),
     symbolName,
     NOT_FOUND_CANDIDATES_CAP,
   );
@@ -879,12 +904,20 @@ export async function getSymbolWithContext(
   const lines = splitLines(fileContent);
 
   // Find the symbol.
-  const found =
-    language !== "unknown"
-      ? (await findSymbolWithTreeSitter(fileContent, symbol, language, opts.treeSitterPaths))
-        ?? findSymbolRegex(fileContent, symbol, language)
-        ?? await findUniqueQualifiedSuffix(fileContent, symbol, language, opts.treeSitterPaths)
-      : undefined;
+  let found: FoundSymbol | undefined;
+  if (language === "python" && treeSitterSupports(language)) {
+    const parsed = await collectSymbolsChecked(fileContent, language, opts.treeSitterPaths ?? {});
+    found = parsed.parserAvailable
+      ? await findSymbolWithTreeSitter(fileContent, symbol, language, opts.treeSitterPaths, parsed.symbols)
+      : splitLines(fileContent).filter((line) => {
+          const match = FUNC_PATTERNS.python!.exec(line);
+          return match?.[1] === symbol;
+        }).length === 1 ? findSymbolRegex(fileContent, symbol, language) : undefined;
+  } else if (language !== "unknown") {
+    found = (await findSymbolWithTreeSitter(fileContent, symbol, language, opts.treeSitterPaths))
+      ?? findSymbolRegex(fileContent, symbol, language)
+      ?? await findUniqueQualifiedSuffix(fileContent, symbol, language, opts.treeSitterPaths);
+  }
 
   if (!found) {
     // Fold recovery into the miss: candidates + skeleton in the SAME

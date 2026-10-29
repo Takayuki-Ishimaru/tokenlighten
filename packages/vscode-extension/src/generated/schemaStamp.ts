@@ -8,4 +8,4 @@
 // code that caused it; src/__tests__/schemaStamp.spec.ts fails CI if this
 // committed value ever drifts from what the current source would produce —
 // see packages/mcp-server/src/util/schemaStamp.ts for the full rationale.
-export const TOKENLIGHTEN_SCHEMA_STAMP = "ee9594eae6da8e33";
+export const TOKENLIGHTEN_SCHEMA_STAMP = "6caca978ad90c9f0";

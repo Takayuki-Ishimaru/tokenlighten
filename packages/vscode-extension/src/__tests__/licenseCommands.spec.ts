@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { E5_MIT_NOTICE, MULTILINGUAL_E5_MODEL } from "@tokenlighten/types";
 import type { SpawnResult } from "../cli.js";
+import * as path from "node:path";
 
 const {
   mockReadFile, mockSpawnTl, mockCreatePanel, mockRegisterCommand, mockExecuteCommand,
@@ -143,7 +144,10 @@ describe("license and engine command registration", () => {
     mockReadFile.mockRejectedValueOnce(new Error("missing")).mockResolvedValueOnce(notices);
     register();
     await registered.get("tokenlighten.licenses.show")!();
-    expect(mockReadFile.mock.calls.map(([file]) => file)).toEqual(["/test-extension/THIRD_PARTY_NOTICES.md", "/test-extension/dist/THIRD_PARTY_NOTICES.md"]);
+    expect(mockReadFile.mock.calls.map(([file]) => file)).toEqual([
+      path.join("/test-extension", "THIRD_PARTY_NOTICES.md"),
+      path.join("/test-extension", "dist", "THIRD_PARTY_NOTICES.md"),
+    ]);
     expect(panels[0]!.webview.html).toContain("tiny-package");
     state.language = "ja";
     mockReadFile.mockRejectedValue(new Error("missing"));

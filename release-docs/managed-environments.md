@@ -78,8 +78,9 @@ connections on its own.
 
 ## Usage log
 
-The install records local usage to `<home>/usage.log`. It never leaves the
-machine and is not transmitted anywhere by TokenLighten. Set
+Usage is recorded in daily `usage-YYYY-MM-DD.ndjson` files in TokenLighten's
+local usage-log directory. Setup reports the current file path; `tl logs path`
+shows the directory. These records are not transmitted by TokenLighten. Set
 `TOKENLIGHTEN_USAGE_LOG=off` in the host's environment to turn off local
 usage recording. The installer's `--read-only` flag controls workspace
 editing separately and does not disable usage recording.

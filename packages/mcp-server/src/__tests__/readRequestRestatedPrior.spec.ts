@@ -30,7 +30,7 @@ import * as path from "node:path";
 import { callTool } from "../server.js";
 import { fitStagedReadToBudget, applyReadRequestContinuation } from "../protocol/readRequestContinuation.js";
 import { openReadRequest, type StagedReadRequest } from "../state/readRequestStore.js";
-import { beginServeCall, recordServedRange, settleServedCallBookings } from "../state/session.js";
+import { beginServeCall, recordServedRange, settleServedCallBookings, servedRangeUnheldLines } from "../state/session.js";
 import { resetStateStoresForTests } from "../state/stateStore.js";
 import { resetAll } from "../util/session.js";
 import { handleTable } from "../util/handles.js";
@@ -100,6 +100,38 @@ const FRESH_88_94 = { handle: "h1", path: REL, range: "88-94", body: bodyOf(88, 
 const PRIOR_95_100 = { handle: "h1", path: REL, range: "95-100", prior: "task_pack 95-140 (call #1)" };
 const claim = { budgetDeclared: true, shed: false } as const;
 const measure = (payload: Record<string, unknown>): number => Buffer.byteLength(JSON.stringify(payload), "utf8");
+
+describe("settling one representation preserves recovery of unserved comment bytes", () => {
+  it.each(["elide", "keep"] as const)("a completed %s request owns only its own representation's next", comments => {
+    const ws = freshWs(`comments-${comments}`);
+    recordServedRange(ws, REL, SHA, 1, 40, TOTAL, {mode: "task_pack", range: "1-40", call: beginServeCall(ws)});
+    settleServedCallBookings({unattributed: false,
+      windows: comments === "elide" ? [{path: REL, start: 1, end: 9}, {path: REL, start: 21, end: 40}] : [{path: REL, start: 1, end: 40}],
+      elidedWindows: comments === "elide" ? [{path: REL, start: 10, end: 20}] : [],
+    }, ws);
+    expect(servedRangeUnheldLines(ws, REL, SHA, 10, 20, TOTAL)).toEqual(comments === "elide" ? [[10, 20]] : []);
+    const staged = openReadRequest({workspaceRoot: ws, forceServeOrigin: false,
+      originalInput: {targets: [{path: REL, range: "10-20"}]}, echo: {cwd: ws},
+      targets: [{path: REL, sha: SHA, totalLines: TOTAL,
+        representation: {content: "auto", comments}, requested: [{start: 10, end: 20}]}],
+    })!;
+    const next = {tool: "tl_read_file", arguments: {targets: [{handle: "h1", ranges: ["10-20"]}], select: {comments: "keep"}}};
+    const payload = {v: 1, kind: "read.receipt", receipt: {receipt: "code-unchanged", handle: "h1", sha: SHA, next}};
+    const previews: Array<Record<string, unknown>> = [];
+    const fit = fitStagedReadToBudget({payload, staged, claim, limit: 20000, stateless: true,
+      measure: preview => {previews.push(preview); return measure(preview);}});
+    expect(fit.ok).toBe(true);
+    expect(previews.length).toBeGreaterThan(0);
+    for (const preview of previews) expect((preview["receipt"] as Record<string, unknown>)["next"]).toEqual(comments === "elide" ? next : undefined);
+    const settled = applyReadRequestContinuation(payload, staged, claim);
+    expect((settled["receipt"] as Record<string, unknown>)["next"]).toEqual(comments === "elide" ? next : undefined);
+    expect(staged.state.targets[0]!.remaining).toEqual([]);
+    expect(servedRangeUnheldLines(ws, REL, SHA, 10, 20, TOTAL)).toEqual(comments === "elide" ? [[10, 20]] : []);
+    // Preserving an existing recovery never manufactures one for a bare receipt.
+    const bare = {...payload, receipt: {receipt: "code-unchanged", handle: "h1", sha: SHA}};
+    expect((applyReadRequestContinuation(bare, staged, claim)["receipt"] as Record<string, unknown>)["next"]).toBeUndefined();
+  });
+});
 
 describe("a window the response restates as `prior` leaves D (settle tail)", () => {
   it("fresh 88-94 + prior 95-100 for Q = 88-100: nothing is owed, so no cursor and no `remaining`", () => {

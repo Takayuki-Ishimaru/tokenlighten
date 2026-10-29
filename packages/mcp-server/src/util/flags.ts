@@ -23,6 +23,14 @@
  * ---------------------------------------------------------------------------
  * D10 — env-flag disposition for the protocol v1 freeze (2026-08-14)
  *
+ * Test harness: TL_TEST_SESSION_RESET enables the private session-reset RPC.
+ * Only with that gate, TL_TEST_SESSION_CWD supplies a logical launch cwd while
+ * the pooled process stays in a stable physical directory on Windows. These
+ * are operational test controls; normal launches ignore the logical cwd and
+ * expose no reset RPC or changed tool-response shape.
+ * Host budget: MAX_MCP_OUTPUT_TOKENS lowers Claude's output ceiling; it does
+ * not select a protocol version, schema, or response representation.
+ *
  * 2026-09-14 addendum (USER ruling, DESIGN-v0.14-plan.md §10 residual 12):
  * TL_FRONTIER_STRICT_WRITES — D10(B) out-of-contract, default OFF. Strict
  * mode for an edit outside the task's certified frontier: refuses with

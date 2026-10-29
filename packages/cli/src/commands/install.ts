@@ -28,6 +28,7 @@ import { createInterface } from "node:readline/promises";
 import { basename, dirname, join, resolve as resolvePathAbs } from "node:path";
 import { fileURLToPath } from "node:url";
 import { removeAll } from "@tokenlighten/agents-md";
+import { usageLogDirectory } from "@tokenlighten/usage";
 import type {
   CopilotGuideReport,
   CopilotInlineResultsReport,
@@ -1116,8 +1117,9 @@ export interface InstallReport {
   warnings: string[];
 }
 
-function usageLogPath(installHome: string): string {
-  return join(installHome, "usage.log");
+function usageLogPath(_installHome: string): string {
+  const day = new Date().toISOString().slice(0, 10);
+  return join(usageLogDirectory(), `usage-${day}.ndjson`);
 }
 
 // Review B7: nothing puts `<home>/bin` on PATH (by design — R2), so a bare
@@ -1170,6 +1172,7 @@ function writeReportHuman(report: InstallReport, write: (s: string) => void): vo
     }
   }
   write(`  usage log: ${report.usageLogPath}\n`);
+  write(`  shell: add ${join(report.installHome, "bin")} to PATH, or define a tl alias for its launcher.\n`);
   write(`  uninstall: ${report.uninstallCommand}\n`);
   for (const warning of report.warnings) write(`warning: ${warning}\n`);
 }
@@ -1240,6 +1243,9 @@ async function performUse(args: ParsedInstallArgs): Promise<InstallOutcome> {
     }
     targetEntry = candidateEntry;
   }
+  if (args.dryRun) {
+    return { exitCode: 0, message: `Would switch to version ${version} (${targetEntry}).` };
+  }
   writeTlJsShim(installHome, targetEntry);
   const updated: InstallRecord = { ...record, version };
   writeInstallRecord(installHome, updated);
@@ -1260,10 +1266,13 @@ async function performPrune(args: ParsedInstallArgs): Promise<InstallOutcome> {
   if (existsSync(appRoot)) {
     for (const entry of readdirSync(appRoot, { withFileTypes: true })) {
       if (!entry.isDirectory() || entry.name === record.version) continue;
-      rmSync(join(appRoot, entry.name), { recursive: true, force: true });
       removed.push(entry.name);
     }
   }
+  if (args.dryRun) {
+    return { exitCode: 0, message: `Would prune ${removed.length} version(s): ${removed.join(", ") || "(none)"}` };
+  }
+  for (const version of removed) rmSync(join(appRoot, version), { recursive: true, force: true });
   if (removed.length > 0 && record.apps) {
     writeInstallRecord(installHome, {
       ...record,
@@ -1279,7 +1288,7 @@ async function performPrune(args: ParsedInstallArgs): Promise<InstallOutcome> {
 // one recorded workspace root. Foreign (non-TokenLighten) entries in those
 // files are left in place and surfaced as a warning, matching
 // `removeManagedEntry`'s own ownership rule.
-function removeWorkspaceMcpEntries(root: string): { removed: string[]; warnings: string[] } {
+function removeWorkspaceMcpEntries(root: string, workspace: InstallWorkspaceEntry): { removed: string[]; warnings: string[] } {
   const removed: string[] = [];
   const warnings: string[] = [];
 
@@ -1289,9 +1298,42 @@ function removeWorkspaceMcpEntries(root: string): { removed: string[]; warnings:
   ];
   for (const target of jsonTargets) {
     if (!existsSync(target.file)) continue;
+    const setupCreatedFile = workspace.created_files?.includes(target.file) ?? false;
+    const backup = `${target.file}.tl-backup`;
+    const backupExisted = existsSync(backup);
+    let originalBytes: Buffer | undefined;
+    try {
+      if (lstatSync(target.file).isFile()) originalBytes = readFileSync(target.file);
+    } catch { /* removal below reports malformed/unreadable targets */ }
     const outcome = removeManagedEntry({ file: target.file, rootKey: target.rootKey, name: "tokenlighten" });
     if (outcome.ok) {
-      if (outcome.action === "removed") removed.push(target.file);
+      if (outcome.action === "removed") {
+        removed.push(target.file);
+        // removeManagedEntry keeps a pre-setup backup for existing user
+        // files. If it had to create a backup solely for this removal, remove
+        // that exact copy; it contains the managed entry we're uninstalling.
+        if (setupCreatedFile && !backupExisted && originalBytes !== undefined) {
+          try {
+            if (lstatSync(backup).isFile() && readFileSync(backup).equals(originalBytes)) unlinkSync(backup);
+          } catch { /* preserve anything whose ownership cannot be proven */ }
+        }
+        // A configuration file created by setup has no pre-setup backup.
+        // Once its managed entry is gone, remove only an otherwise-empty
+        // document; retain any user keys added since setup.
+        if (setupCreatedFile) {
+          try {
+            const parsed: unknown = JSON.parse(readFileSync(target.file, "utf8"));
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              const doc = parsed as Record<string, unknown>;
+              const rootValue = doc[target.rootKey];
+              const rootEmpty = rootValue && typeof rootValue === "object" && !Array.isArray(rootValue)
+                && Object.keys(rootValue as Record<string, unknown>).length === 0;
+              if (rootEmpty) delete doc[target.rootKey];
+              if (Object.keys(doc).length === 0 && lstatSync(target.file).isFile()) unlinkSync(target.file);
+            }
+          } catch { /* keep malformed, replaced, or user-edited files */ }
+        }
+      }
     } else {
       warnings.push(`${target.file}: ${outcome.detail}`);
     }
@@ -1308,6 +1350,18 @@ function removeWorkspaceMcpEntries(root: string): { removed: string[]; warnings:
       const entry = mcpServers && typeof mcpServers === "object" && !Array.isArray(mcpServers)
         ? (mcpServers as Record<string, unknown>)["tokenlighten"]
         : undefined;
+      const entryEnv = entry && typeof entry === "object" && !Array.isArray(entry)
+        ? (entry as Record<string, unknown>)["env"]
+        : undefined;
+      const hadManagedCodexContent = (workspace.managed_codex_startup_grace
+        && doc["mcp_optional_startup_grace_ms"] === 0)
+        || Boolean(entryEnv && typeof entryEnv === "object" && !Array.isArray(entryEnv)
+          && (entryEnv as Record<string, unknown>)["TOKENLIGHTEN_MANAGED"] === "1");
+      if (workspace.managed_codex_startup_grace && doc["mcp_optional_startup_grace_ms"] === 0) {
+        delete doc["mcp_optional_startup_grace_ms"];
+        writeConfig(codexTarget, doc);
+        removed.push(codexTarget);
+      }
       if (entry && typeof entry === "object" && !Array.isArray(entry)) {
         const env = (entry as Record<string, unknown>)["env"];
         const managed = Boolean(env)
@@ -1316,11 +1370,16 @@ function removeWorkspaceMcpEntries(root: string): { removed: string[]; warnings:
           && (env as Record<string, unknown>)["TOKENLIGHTEN_MANAGED"] === "1";
         if (managed) {
           delete (mcpServers as Record<string, unknown>)["tokenlighten"];
+          if (Object.keys(mcpServers as Record<string, unknown>).length === 0) delete doc["mcp_servers"];
           writeConfig(codexTarget, doc);
           removed.push(codexTarget);
         } else {
           warnings.push(`${codexTarget}: a non-managed 'tokenlighten' entry exists under 'mcp_servers'; left in place`);
         }
+      }
+      if (workspace.codex_config_created && hadManagedCodexContent) {
+        const after = readConfig(codexTarget);
+        if (Object.keys(after).length === 0 && lstatSync(codexTarget).isFile()) unlinkSync(codexTarget);
       }
     } catch (error) {
       warnings.push(`${codexTarget}: ${error instanceof Error ? error.message : String(error)}`);
@@ -1422,6 +1481,13 @@ async function performUninstall(
     };
   }
 
+  if (args.dryRun) {
+    return {
+      exitCode: 0,
+      message: `Would uninstall TokenLighten from ${installHome}, unregister its managed hosts, and clean its recorded workspaces.`,
+    };
+  }
+
   // --- Hosts: unregister only what we own (review B3) ---------------------
   // `setClientProfile(..., "native", ...)` used to fail closed and skip
   // `unregisterClients` entirely the moment ANY client was foreign, then
@@ -1467,21 +1533,58 @@ async function performUninstall(
       workspaceWarnings.push(`recorded workspace no longer exists and was skipped: ${workspace.root}`);
       continue;
     }
+    const knownGuideFiles = new Set([
+      "AGENTS.md", "CLAUDE.md", "copilot-instructions.md",
+      ".github/copilot-instructions.md", ".github/agents/tokenlighten-explore.agent.md",
+    ]);
+    const createdManagedGuideFiles = new Set<string>();
+    for (const file of workspace.created_files ?? []) {
+      const relativePath = file.slice(workspace.root.length).replaceAll("\\", "/").replace(/^\//, "");
+      if (!knownGuideFiles.has(relativePath)) continue;
+      try {
+        if (/<!--\s*tokenlighten:[^>]+:start\s*-->/.test(readFileSync(file, "utf8"))) createdManagedGuideFiles.add(file);
+      } catch { /* missing, replaced, or unreadable files are not ours to clean */ }
+    }
     const removedGuide = await removeAll({ repoRoot: workspace.root });
     workspaceWarnings.push(
       ...removedGuide.errors.map((item) => `${workspace.root}: ${item.path}: ${item.reason}`),
     );
-    const mcpEntries = removeWorkspaceMcpEntries(workspace.root);
+    const mcpEntries = removeWorkspaceMcpEntries(workspace.root, workspace);
     workspaceWarnings.push(...mcpEntries.warnings);
+    if (workspace.guide_block) {
+      for (const file of createdManagedGuideFiles) {
+        try {
+          if (lstatSync(file).isFile() && readFileSync(file, "utf8").trim() === "") unlinkSync(file);
+        } catch { /* preserve a replacement or a file that cannot be proven empty */ }
+      }
+    }
     // Uninstall symmetry for the Copilot inline-results setting: only ever
     // removes the key, and only when its value is exactly what setup wrote
     // (see removeCopilotThresholdIfManaged's own doc comment for why the
     // file itself is never deleted). Best-effort and silent, like the
     // legacy-forwarder removal below.
+    let hadManagedCopilotThreshold = false;
+    if (workspace.copilot_settings_created) {
+      try {
+        const settings = JSON.parse(readFileSync(join(workspace.root, ".vscode", "settings.json"), "utf8")) as Record<string, unknown>;
+        hadManagedCopilotThreshold = settings[COPILOT_SETTINGS_KEY] === COPILOT_RAISED_THRESHOLD_BYTES;
+      } catch { /* a replacement or malformed file is not ours to clean */ }
+    }
     removeCopilotThresholdIfManaged(workspace.root);
     // ...and for the Copilot guide's attachment settings: only those
     // TokenLighten's own record names, only while still `false`.
     removeCopilotGuideSettingsIfManaged(workspace.root);
+    if (workspace.copilot_settings_created) {
+      const settingsFile = join(workspace.root, ".vscode", "settings.json");
+      try {
+        if (lstatSync(settingsFile).isFile()) {
+          const parsed: unknown = JSON.parse(readFileSync(settingsFile, "utf8"));
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)
+            && hadManagedCopilotThreshold
+            && Object.keys(parsed as Record<string, unknown>).length === 0) unlinkSync(settingsFile);
+        }
+      } catch { /* preserve a replacement, malformed file, or user-added setting */ }
+    }
     workspaceWarnings.push(...removeCopilotSessionHook(workspace.root).warnings);
   }
 
@@ -1539,7 +1642,7 @@ async function performInstall(
   if (refusesAsRoot(args, deps)) {
     return {
       exitCode: 1,
-      message: "Refusing to install while running as root/uid 0 (it would land in the administrator's profile). Pass --allow-root to override.",
+      message: "Refusing to install while running as root/uid 0 (it would land in the administrator's profile). For an intentional root devcontainer or CI setup, pass --allow-root.",
     };
   }
 
@@ -1760,10 +1863,44 @@ async function performInstall(
       copilotInlineResults: plan.copilotInlineResultsMode,
       copilotGuide: plan.copilotGuideRequest,
     });
+    const previousWorkspace = record.workspaces.find((priorWorkspace) =>
+      workspacePathsEqual(priorWorkspace.root, setupResult.workspaceRoot));
+    const reportedWorkspaceFiles = new Set([
+      ...setupResult.rulesWritten,
+      ...setupResult.configFilesWritten,
+      ...(setupResult.copilotInlineResults?.status === "raised" && setupResult.copilotInlineResults.settingsFile
+        ? [setupResult.copilotInlineResults.settingsFile]
+        : []),
+      ...(setupResult.copilotGuide?.settingsWritten && setupResult.copilotGuide.settingsWritten.length > 0
+        && setupResult.copilotGuide.settingsFile
+        ? [setupResult.copilotGuide.settingsFile]
+        : []),
+      ...(existsSync(join(root, ".tokenlighten", "copilot-guide.json"))
+        ? [join(root, ".tokenlighten", "copilot-guide.json")]
+        : []),
+      ...(existsSync(join(root, ".tokenlighten", ".gitignore"))
+        ? [join(root, ".tokenlighten", ".gitignore")]
+        : []),
+    ]);
     const entry: InstallWorkspaceEntry = {
       root: setupResult.workspaceRoot,
-      files: [...setupResult.rulesWritten, ...setupResult.configFilesWritten],
+      files: [...reportedWorkspaceFiles],
       guide_block: setupResult.rulesWritten.length > 0,
+      ...(setupResult.managedCodexStartupGrace
+        || previousWorkspace?.managed_codex_startup_grace
+        ? { managed_codex_startup_grace: true }
+        : {}),
+      ...(setupResult.codexConfigCreated
+        || previousWorkspace?.codex_config_created
+        ? { codex_config_created: true }
+        : {}),
+      ...(setupResult.copilotSettingsCreated
+        || previousWorkspace?.copilot_settings_created
+        ? { copilot_settings_created: true }
+        : {}),
+      ...((previousWorkspace?.created_files?.length || setupResult.createdFiles?.length)
+        ? { created_files: [...new Set([...(previousWorkspace?.created_files ?? []), ...(setupResult.createdFiles ?? [])])] }
+        : {}),
     };
     record = writeInstallRecordSafely(plan.installHome, upsertInstallWorkspace(record, entry));
     workspaceReports.push({
@@ -1924,6 +2061,15 @@ export async function runInstall(argv: string[], injectedDeps: InstallDeps = {})
     return;
   }
   const deps = resolvedDeps(injectedDeps);
+
+  // --use, --prune, and --uninstall change persistent state. Keep them
+  // non-interactive only when the caller explicitly opted in, just like the
+  // install path. A dry run is always permitted and never reaches mutation.
+  if (!args.dryRun && (args.use || args.prune || args.uninstall) && !args.yes && !deps.isTTY) {
+    process.stderr.write("tl install: this operation changes files or host configuration; pass --yes in a non-interactive shell.\n");
+    process.exitCode = 1;
+    return;
+  }
 
   let outcome: InstallOutcome;
   if (args.use) {
