@@ -17026,6 +17026,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             if (!entry?.path || entry.workspaceRoot !== workspace || splitArchiveVirtualPath(entry.path)
               || typeof override?.["symbol"] === "string"
               || (override?.["range"] === undefined && !rangeContentFullMarker && entry.symbol !== undefined)) break;
+            // served-bytes: readServedText
             const verdict = await servedTextForRoute(entry.path, workspace);
             if (verdict === null || verdict.kind === "undecodable") break;
             const range = typeof override?.["range"] === "string" ? override["range"]
