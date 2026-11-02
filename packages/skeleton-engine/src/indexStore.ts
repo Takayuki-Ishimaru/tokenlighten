@@ -333,6 +333,32 @@ export function invalidateCachedWorkspaceFiles(root: string, relPaths?: string[]
   });
 }
 
+/**
+ * Clean consistency scans per caller scope (`consistencyScanScope`, e.g. one
+ * MCP request): scope -> rootKey -> `<invalidation epoch>\0<stat fingerprint>`
+ * of the workspace state a scan in that scope found nothing to drop in.
+ */
+const cleanConsistencyScans = new WeakMap<object, Map<string, string>>();
+
+function cleanScanKey(rootKey: string, statFingerprint: string): string {
+  return `${manifestMemoEpoch.get(rootKey) ?? 0}\u0000${statFingerprint}`;
+}
+
+function scannedCleanInScope(scope: object | undefined, rootKey: string, statFingerprint: string): boolean {
+  return scope !== undefined && cleanConsistencyScans.get(scope)?.get(rootKey) === cleanScanKey(rootKey, statFingerprint);
+}
+
+/** No record when an invalidation landed since `epochAtStart`: what was scanned may predate it. */
+function recordCleanScan(scope: object | undefined, rootKey: string, statFingerprint: string, epochAtStart: number): void {
+  if (scope === undefined || (manifestMemoEpoch.get(rootKey) ?? 0) !== epochAtStart) return;
+  let roots = cleanConsistencyScans.get(scope);
+  if (roots === undefined) {
+    roots = new Map();
+    cleanConsistencyScans.set(scope, roots);
+  }
+  roots.set(rootKey, cleanScanKey(rootKey, statFingerprint));
+}
+
 function statFingerprintOf(
   files: readonly { path: string; sizeBytes: number; mtimeMs: number }[],
 ): string {
@@ -813,6 +839,16 @@ export async function loadOrBuildSourceIndex(
     graphIndexMode?: "auto" | "on" | "off";
     /** Perf (item D) — threaded straight through to writeGraphIfStale's WriteGraphIfStaleOptions.graphIndexMaxBytes; see that option's own doc comment. */
     graphIndexMaxBytes?: number;
+    /**
+     * The caller's scope for the opportunistic consistency scan (one MCP
+     * request, say). The scan re-reads and re-hashes up to 200 indexed files;
+     * within one scope, a workspace whose invalidation epoch and stat
+     * fingerprint are unchanged since a scan in that scope found nothing to
+     * drop is not scanned again (one request looked symbols up 40 times and
+     * re-read the whole workspace each time). A new scope scans again.
+     * Absent: every call scans.
+     */
+    consistencyScanScope?: object;
   },
 ): Promise<{
   manifest: SourceIndexManifestV1;
@@ -878,14 +914,18 @@ export async function loadOrBuildSourceIndex(
       manifestMemo.set(rootKey, memoEntry);
 
       const shortcutWarnings: string[] = [];
-      const shortcutManifest = await runOpportunisticConsistencyScan(
-        root,
-        memoEntry.manifest,
-        opts,
-        rootKey,
-        epochAtStart,
-        shortcutWarnings,
-      );
+      const scope = opts.consistencyScanScope;
+      const shortcutManifest = scannedCleanInScope(scope, rootKey, statFingerprint)
+        ? memoEntry.manifest
+        : await runOpportunisticConsistencyScan(
+            root,
+            memoEntry.manifest,
+            opts,
+            rootKey,
+            epochAtStart,
+            shortcutWarnings,
+          );
+      if (shortcutManifest === memoEntry.manifest) recordCleanScan(scope, rootKey, statFingerprint, epochAtStart);
       return {
         manifest: shortcutManifest,
         warnings: shortcutWarnings,
@@ -1280,6 +1320,7 @@ export async function loadOrBuildSourceIndex(
   const finalManifest = opts.noCache
     ? manifest
     : await runOpportunisticConsistencyScan(root, manifest, opts, rootKey, epochAtStart, warnings);
+  if (!opts.noCache && finalManifest === manifest) recordCleanScan(opts.consistencyScanScope, rootKey, statFingerprint, epochAtStart);
 
   return { manifest: finalManifest, warnings, reused, reparsed, cacheRebuildReasons };
 }

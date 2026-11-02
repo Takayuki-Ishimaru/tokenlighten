@@ -1,0 +1,9 @@
+{
+  "package": "js-tiktoken@1.0.21",
+  "sha": "4c8b748e07992c00386f3180af5c574b27b65139",
+  "url": "https://raw.githubusercontent.com/dqbd/tiktoken/4c8b748e07992c00386f3180af5c574b27b65139/LICENSE",
+  "bytes": 1078,
+  "sha256": "418cb499b436128d653d79941333a5437b7be2ea9213dcc2f04d15d5d2c51d86",
+  "npm": "https://registry.npmjs.org/js-tiktoken/1.0.21",
+  "note": "The npm package omits its license text. This is the upstream LICENSE at the npm release gitHead."
+}

@@ -10,6 +10,7 @@
   "command.copilotGuide.applyToWorkspaceFile": "TokenLighten: Copilotガイドをワークスペースファイルに適用",
   "view.controlCenter": "ワークスペース",
   "config.enabled": "このワークスペースでTokenLightenを有効にします。",
+  "config.hostTokenCounter.modelFamily": "任意設定です。トークン選択が有効なときに、応答の形式選択に使う countTokens のモデルファミリー(例: gpt-5)を指定します。指定すると、応答本文がそのモデルの計数 API に渡ります。既定の空欄では何も起動しません。",
   "config.language": "TokenLighten拡張機能全体の表示言語です。",
   "config.language.auto": "自動（VS Codeの表示言語を使用）",
   "config.language.en": "英語",

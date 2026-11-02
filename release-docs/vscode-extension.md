@@ -6,7 +6,7 @@ The TokenLighten VS Code extension bundles the CLI, MCP server, parsers, and req
 
 ## Install without building
 
-Download **[tokenlighten-vscode-extension-0.16.3.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.16.3/tokenlighten-vscode-extension-0.16.3.vsix)** from the v0.16.3 GitHub Release. The same VSIX works on Windows, macOS, and Linux.
+Download **[tokenlighten-vscode-extension-0.16.4.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.16.4/tokenlighten-vscode-extension-0.16.4.vsix)** from the v0.16.4 GitHub Release. The same VSIX works on Windows, macOS, and Linux.
 
 1. Open **Extensions**.
 2. Select **Install from VSIX…**.
@@ -14,7 +14,7 @@ Download **[tokenlighten-vscode-extension-0.16.3.vsix](https://github.com/Takayu
 4. Reload VS Code if prompted.
 
 ~~~bash
-code --install-extension tokenlighten-vscode-extension-0.16.3.vsix
+code --install-extension tokenlighten-vscode-extension-0.16.4.vsix
 ~~~
 
 To package the VSIX from source, use Node.js 22 or later:
@@ -59,7 +59,7 @@ permissions. Use `tl workspace setup --clients vscode --copilot-session-context 
 to leave the hook configuration unchanged. Disable/native controls turn off
 TokenLighten's managed Copilot guidance too.
 
-After upgrading to v0.16.3, re-run **Set up this workspace**, then start a
+After upgrading to v0.16.4, re-run **Set up this workspace**, then start a
 new agent session or reconnect the MCP client. This refreshes the managed
 guides, Copilot configuration, and prefixed tool names. See
 [Refresh an existing workspace](getting-started.md#refresh-an-existing-workspace-after-upgrading)
@@ -111,5 +111,6 @@ Open **TokenLighten: Manage Local Analysis Engines** from the Command Palette to
 | `tokenlighten.toolSurface` | `full` | Advertised MCP tool surface: `full` (every capability) or `code` (code/plain-text/config only, a smaller tool schema). Changing this requires reconnecting. |
 | `tokenlighten.copilotGuide` | `standalone` | Copilot guide mode: short self-contained instructions, shared AGENTS.md instructions, or keep existing configuration. |
 | `tokenlighten.guideProfile` | `compact` | Shared guide size written during setup: `compact`, `medium`, or `full`. An explicit value takes precedence on both tool surfaces. |
+| `tokenlighten.hostTokenCounter.modelFamily` | empty | Optional model family for reply token counting. Candidate reply text reaches the selected provider's counting API when reply selection is enabled; see [MCP settings](mcp-tools.md#optional-reply-and-table-settings) and [privacy](privacy-security-support.md). |
 
-The desktop application is not included in the public v0.16.3 release.
+The desktop application is not included in the public v0.16.4 release.

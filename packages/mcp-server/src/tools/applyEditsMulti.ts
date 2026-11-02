@@ -927,9 +927,14 @@ export async function applyEditsMulti(
 
     const editResult = applySingleEdit(currentText, edit.search, edit.replace);
     if (!editResult.ok) {
+      // The unique-match precondition reports zero matches under its own code;
+      // say so in the detail rather than a bare "not found" beside that code.
+      const zeroMatchesUnderUnique = edit.uniqueMatch && editResult.code === "not-found";
       return {
         ok: false,
-        error: editResult.error ?? "edit validation failed",
+        error: zeroMatchesUnderUnique
+          ? "unique-match precondition failed: the search string has no match in the file (exactly one is required)"
+          : editResult.error ?? "edit validation failed",
         code: edit.uniqueMatch ? "search-not-unique" : editResult.code ?? "edit-error",
         ...(editResult.hint ? { hint: editResult.hint } : {}),
         ...(editResult.code === "not-found"

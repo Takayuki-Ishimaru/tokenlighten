@@ -12,6 +12,7 @@ import {
   loadOrBuildSourceIndex,
   loadManifest,
   resetManifestMemoForTest,
+  invalidateCachedWorkspaceFiles,
 } from "../indexStore.js";
 import type { SourceIndexManifestV1, IndexedFileV1 } from "../indexStore.js";
 import { runConsistencyScan, consistencyScanEnabledFromEnv } from "../consistencyScan.js";
@@ -270,5 +271,56 @@ describe("consistencyScan — opportunistic wiring inside loadOrBuildSourceIndex
     // The very next ordinary call re-adds it, now genuinely fresh.
     const recovered = await loadOrBuildSourceIndex(tmpDir, { commit: "c", ignoreHash: "h" });
     expect(recovered.manifest.files["src/a.ts"]!.symbols[0]!.signature).toContain("return 9");
+  });
+});
+
+describe("consistencyScan — consistencyScanScope (one scan per caller scope)", () => {
+  it("scans once per scope: a later call in the same scope skips the scan, and a new scope scans again", async () => {
+    const filePath = join(tmpDir, "src", "a.ts");
+    const pinnedMtimeSec = wholeSecondMtime();
+    await fs.writeFile(filePath, "export function hello() { return 1; }\n", "utf8");
+    await fs.utimes(filePath, pinnedMtimeSec, pinnedMtimeSec);
+    const request = {};
+    await loadOrBuildSourceIndex(tmpDir, { commit: "c", ignoreHash: "h", consistencyScanScope: request });
+
+    // The same dropped-invalidation swap the default test above catches.
+    await writeSameStatWithoutInvalidate(filePath, "export function hello() { return 9; }\n", pinnedMtimeSec);
+
+    // Same scope, unchanged stat: the scan that found the workspace clean is not repeated.
+    const sameScope = await loadOrBuildSourceIndex(tmpDir, { commit: "c", ignoreHash: "h", consistencyScanScope: request });
+    expect(sameScope.warnings.some((w) => w.includes("consistency scan"))).toBe(false);
+    expect(sameScope.manifest.files["src/a.ts"]).toBeDefined();
+
+    // The next scope scans and catches it, as an unscoped call does.
+    const nextScope = await loadOrBuildSourceIndex(tmpDir, { commit: "c", ignoreHash: "h", consistencyScanScope: {} });
+    expect(nextScope.warnings.some((w) => w.includes("consistency scan dropped"))).toBe(true);
+    expect(nextScope.manifest.files["src/a.ts"]).toBeUndefined();
+  });
+
+  it("still sees a change that moves the stat within the same scope", async () => {
+    const filePath = join(tmpDir, "src", "a.ts");
+    await fs.writeFile(filePath, "export function hello() { return 1; }\n", "utf8");
+    const request = {};
+    await loadOrBuildSourceIndex(tmpDir, { commit: "c", ignoreHash: "h", consistencyScanScope: request });
+
+    await fs.writeFile(filePath, "export function hello() { return 12345; }\n", "utf8");
+    const later = Date.now() / 1000 + 5;
+    await fs.utimes(filePath, later, later);
+    const result = await loadOrBuildSourceIndex(tmpDir, { commit: "c", ignoreHash: "h", consistencyScanScope: request });
+    expect(result.manifest.files["src/a.ts"]!.symbols[0]!.signature).toContain("return 12345");
+  });
+
+  it("scans again in the same scope after an invalidation", async () => {
+    const filePath = join(tmpDir, "src", "a.ts");
+    const pinnedMtimeSec = wholeSecondMtime();
+    await fs.writeFile(filePath, "export function hello() { return 1; }\n", "utf8");
+    await fs.utimes(filePath, pinnedMtimeSec, pinnedMtimeSec);
+    const request = {};
+    await loadOrBuildSourceIndex(tmpDir, { commit: "c", ignoreHash: "h", consistencyScanScope: request });
+    await writeSameStatWithoutInvalidate(filePath, "export function hello() { return 9; }\n", pinnedMtimeSec);
+    invalidateCachedWorkspaceFiles(tmpDir, ["src/a.ts"]);
+
+    const result = await loadOrBuildSourceIndex(tmpDir, { commit: "c", ignoreHash: "h", consistencyScanScope: request });
+    expect(result.manifest.files["src/a.ts"]!.symbols[0]!.signature).toContain("return 9");
   });
 });

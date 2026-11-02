@@ -58,6 +58,47 @@ export const CONTINUATION_TYPICAL_BYTES = 800;
 /** Hard serialized-plan cap (§5.4) — the trim ladder enforces this. */
 export const CONTINUATION_HARD_CAP_BYTES = 1200;
 
+// ---------------------------------------------------------------------------
+// Per-TASK exploration budget (2026-10-29 first-hop field report).
+//
+// Every cap above and in the emitters bounds ONE response (`capForResult`,
+// MAX_TASK_PACK_BYTES = 22 KiB, CONTINUATION_HARD_CAP_BYTES). Nothing bounded
+// the TASK: each hop re-granted `max_additional_tl_calls: 1`, so a follower that
+// runs `next` verbatim could walk a document one page per call without limit.
+// Measured locally on 14 gold questions, following `next` for up to 10 hops
+// cost 433 KB in total (about 31 KB per question) for 21% recall, and two cases
+// reached 11 calls / ~140 KB each; the express question "How does res.redirect
+// work?" spent 10 hops / 129 KB paging a 3,928-line History.md to its end and
+// never served res.redirect.
+//
+// These two numbers only decide which `next` is PROPOSED (low-value document
+// pages stop being offered once either is reached, see `docZoomAllowed` in
+// canonicalDecision.ts). They never withhold a served body, which is why they
+// carry no TL_* flag: `task.force_serve` and an explicit request stay open.
+// ---------------------------------------------------------------------------
+
+/**
+ * Follow-up calls a task may spend before document zooms stop being proposed.
+ * Six is below the 10-hop runs that produced the runaway cases (11 calls) and
+ * above what an ordinary question needs: the first pack answers most of them,
+ * and a bounded repair (one candidate re-pack, one request-item batch, one
+ * uncovered-identifier find) is two to four calls.
+ */
+export const TASK_EXPLORATION_MAX_HOPS = 6;
+
+/**
+ * Cumulative response bytes a task may spend before document zooms stop being
+ * proposed. 40 KiB is about 1.8 first packs (MAX_TASK_PACK_BYTES = 22 KiB): it
+ * sits above the measured 31 KB mean per question, so a normal question is
+ * never throttled, and 3.5x below the ~140 KB the two runaway cases reached.
+ */
+export const TASK_EXPLORATION_MAX_BYTES = 40 * 1024;
+
+/** Has a task that has spent `hops` follow-up calls and `bytes` response bytes used up its exploration budget? */
+export function explorationBudgetExhausted(hops: number, bytes: number): boolean {
+  return hops >= TASK_EXPLORATION_MAX_HOPS || bytes >= TASK_EXPLORATION_MAX_BYTES;
+}
+
 /** Max calls per stage (§5.1). */
 export const MAX_STAGE_CALLS = 3;
 

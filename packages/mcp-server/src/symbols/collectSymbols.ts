@@ -1,4 +1,9 @@
-import { withTreeSitterRoot, type TreeSitterNode } from "../skeleton/treeSitter.js";
+import {
+  JS_ACCESSOR_DEFINER_RE,
+  JS_FUNCTION_VALUE_TYPES,
+  withTreeSitterRoot,
+  type TreeSitterNode,
+} from "../skeleton/treeSitter.js";
 import type { TreeSitterPaths } from "../skeleton/types.js";
 
 export type CollectedSymbolKind =
@@ -101,6 +106,13 @@ const TYPE_ALIAS_TYPES = new Set(["type_alias_declaration", "type_spec", "type_i
 const ENUM_TYPES = new Set(["enum_declaration", "enum_item"]);
 const VARIABLE_DECL_TYPES = new Set(["lexical_declaration", "variable_declaration"]);
 const VARIABLE_DECLARATOR_TYPES = new Set(["variable_declarator"]);
+// JS/TS values defined by assignment. CommonJS code defines most of its API
+// this way (`res.redirect = function redirect(url) {}`, `exports.x = () => {}`,
+// `Foo.prototype.bar = function () {}`); without these the walk descended into
+// the function body and listed its locals (`var req = this.req`) instead.
+const FUNCTION_VALUE_TYPES = JS_FUNCTION_VALUE_TYPES;
+const CLASS_VALUE_TYPES = new Set(["class"]);
+const ACCESSOR_DEFINER_RE = JS_ACCESSOR_DEFINER_RE;
 const WRAPPER_TYPES = new Set(["export_statement", "decorated_definition"]);
 const BODY_TYPES = new Set([
   "block",
@@ -365,6 +377,53 @@ function symbolKindForContainer(node: TreeSitterNode): CollectedSymbolKind {
   return "class";
 }
 
+/** `res.redirect`, `exports.send`, `Foo.prototype.bar`, `app` — a dotted
+ * chain of plain names. Computed members (`app[method]`) have no stable name. */
+function dottedName(node: TreeSitterNode, text: string): string | undefined {
+  if (node.type === "identifier" || node.type === "this" || node.type === "property_identifier") {
+    return fieldText(node, text);
+  }
+  if (node.type !== "member_expression") return undefined;
+  const object = node.childForFieldName("object");
+  const property = node.childForFieldName("property");
+  if (!object || !property || property.type !== "property_identifier") return undefined;
+  const owner = dottedName(object, text);
+  const leaf = fieldText(property, text);
+  return owner && leaf ? `${owner}.${leaf}` : undefined;
+}
+
+function stringLiteralValue(node: TreeSitterNode, text: string): string | undefined {
+  if (node.type !== "string") return undefined;
+  const raw = fieldText(node, text);
+  const match = raw?.match(/^(['"])([A-Za-z_$][\w$]*)\1$/);
+  return match?.[2];
+}
+
+/** The name an assignment gives its function or class value. `module.exports =
+ * function createApplication() {}` is found by the function's own name. */
+function assignedValueName(left: TreeSitterNode, value: TreeSitterNode, text: string): string | undefined {
+  const target = dottedName(left, text);
+  if (!target || target === "this" || target.startsWith("this.")) return undefined;
+  if (target === "module.exports" || target === "exports") {
+    return fieldText(value.childForFieldName("name"), text) ?? target;
+  }
+  return target;
+}
+
+/** `defineGetter(req, 'protocol', function protocol() {})` → `req.protocol`. */
+function accessorDefinition(call: TreeSitterNode, text: string): { name: string; value: TreeSitterNode } | undefined {
+  const callee = call.childForFieldName("function");
+  const calleeName = callee ? dottedName(callee, text) : undefined;
+  if (!calleeName || !ACCESSOR_DEFINER_RE.test(calleeName)) return undefined;
+  const args = call.childForFieldName("arguments");
+  const values = args ? namedChildren(args) : [];
+  const owner = values[0] ? dottedName(values[0], text) : undefined;
+  const property = values[1] ? stringLiteralValue(values[1], text) : undefined;
+  const value = values[2];
+  if (!owner || !property || !value || !FUNCTION_VALUE_TYPES.has(value.type)) return undefined;
+  return { name: `${owner}.${property}`, value };
+}
+
 function visitNode(
   node: TreeSitterNode,
   text: string,
@@ -439,6 +498,31 @@ function visitNode(
       ));
     }
     return;
+  } else if (node.type === "expression_statement") {
+    const expression = namedChildren(node)[0];
+    const left = expression?.type === "assignment_expression" ? expression.childForFieldName("left") : null;
+    const value = expression?.type === "assignment_expression" ? expression.childForFieldName("right") : null;
+    const assignedName = left && value && (FUNCTION_VALUE_TYPES.has(value.type) || CLASS_VALUE_TYPES.has(value.type))
+      ? assignedValueName(left, value, text)
+      : undefined;
+    if (assignedName && value) {
+      if (FUNCTION_VALUE_TYPES.has(value.type)) {
+        out.push(makeSymbol(assignedName, "function", value, rangeNode, text, lines, lineStarts, context.enclosingSymbol));
+        return;
+      }
+      const symbol = makeSymbol(assignedName, "class", value, rangeNode, text, lines, lineStarts, context.enclosingSymbol);
+      out.push(symbol);
+      const classContext = { name: symbol.name, startLine: symbol.startLine, endLine: symbol.endLine, signatureStartLine: symbol.signatureStartLine };
+      for (const child of namedChildren(value)) {
+        visitNode(child, text, lines, lineStarts, out, { enclosingSymbol: classContext });
+      }
+      return;
+    }
+    const accessor = expression?.type === "call_expression" ? accessorDefinition(expression, text) : undefined;
+    if (accessor) {
+      out.push(makeSymbol(accessor.name, "function", accessor.value, rangeNode, text, lines, lineStarts, context.enclosingSymbol));
+      return;
+    }
   }
 
   for (const child of namedChildren(node)) {

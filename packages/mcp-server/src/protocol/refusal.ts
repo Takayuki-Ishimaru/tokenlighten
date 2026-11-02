@@ -334,7 +334,7 @@ const REFUSAL_CODES: ReadonlySet<string> = new Set<RefusalCode>([
   "intent-requires-handle",
   // ReadLimitCode
   "symbol-cap-reached", "cap-exceeded", "budget-below-minimum", "legacy-input",
-  "cursor-stale", "cursor-invalid",
+  "cursor-stale", "cursor-invalid", "snapshot-unavailable",
   "per-task-cap-reached", "per-path-cap-reached",
   "candidate-pack-full-repeat", "tiny-task-cap-reached", "allowfull-task-cap-reached",
   "artifact-full-downgraded", "not-tiny", "broad-overview-query",

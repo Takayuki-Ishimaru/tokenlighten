@@ -97,7 +97,6 @@
  * caller's own `limit` withheld it (`truncation_reason` says which).
  */
 
-import * as fs from "fs";
 // PI-09 (v0.10 alpha.2): the paging cursor is now a purpose=continuation
 // signed handle. Same field, same opacity — see encodeReferencesCursor.
 import { looksLikeStateHandle } from "../state/handleCodec.js";
@@ -106,6 +105,7 @@ import type { LangKey, WalkOmissions } from "./walkRepo.js";
 import { walkCodeFiles, createWalkOmissions, anyWalkOmission, TEXT_SCAN_MAX_FILE_SIZE_BYTES } from "./walkRepo.js";
 import { escapeRegExp, trimMatchText, buildOmittedExtra, createScanCoverage, findScopeBoundaryRefusal } from "../features/search/find/findText.js";
 import { decodeTextBuffer } from "../util/textDecode.js";
+import { readFileForRequest } from "../util/requestFileCache.js";
 import { collectLexicalSegments, segmentKindAt } from "./lexicalRanges.js";
 import {
   computeMemberSweep,
@@ -1040,7 +1040,7 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
   for (const f of files) {
     let raw: string;
     try {
-      const buf = fs.readFileSync(f.absPath);
+      const buf = readFileForRequest(f.absPath);
       const decoded = decodeTextBuffer(buf);
       if (decoded === null) {
         // Walked and opened, but the bytes could not be verified as text —

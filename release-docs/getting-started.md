@@ -30,7 +30,7 @@ TokenLighten runs locally and provides an MCP server for coding agents.
 - detects the AI-agent hosts already on this machine (Claude Code, Codex, Gemini CLI, Copilot CLI) and prints the plan — what will be written, and where — then asks for one yes/no confirmation (a non-interactive shell needs `--yes`);
 - stages the bundle and the bundled Node.js runtime under a per-machine install directory, and writes the stable launcher every host will spawn (`<home>/bin/node` plus `<home>/bin/tl.js`); this identity does not change between versions, so re-running to upgrade never needs host entries to be rewritten;
 - registers each detected host, one vendor command or config file per host;
-- sets up each given workspace the same way `tl workspace setup` does today: `.vscode/mcp.json` (for GitHub Copilot Chat), `.mcp.json` (Claude Code), `.codex/config.toml` (Codex), and the TokenLighten guide blocks in `AGENTS.md`/`CLAUDE.md`;
+- sets up each given workspace the same way `tl workspace setup` does today: `.vscode/mcp.json` (for GitHub Copilot Chat), `.mcp.json` (Claude Code), `.codex/config.toml` (Codex), and the TokenLighten guide blocks in `AGENTS.md`/`CLAUDE.md`. The MCP entries name this machine's launcher by its absolute path, so they are per-machine: if you commit these files, each teammate runs `tl workspace setup` in their own checkout (it rewrites only the managed `tokenlighten` entry), or keep the files out of version control;
 - verifies the result with `tl doctor` and a real MCP `initialize`/`tools/list` handshake before reporting success.
 
 First workspace setup defaults to write-enabled (`--allow-write`); pass `--read-only` to opt out. CLI refresh preserves existing per-client write permissions unless explicitly overridden.
@@ -87,7 +87,7 @@ files or changing host registrations. For example:
 
 ## Install the VS Code extension without building
 
-Users can download **[tokenlighten-vscode-extension-0.16.3.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.16.3/tokenlighten-vscode-extension-0.16.3.vsix)** from the v0.16.3 GitHub Release and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
+Users can download **[tokenlighten-vscode-extension-0.16.4.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.16.4/tokenlighten-vscode-extension-0.16.4.vsix)** from the v0.16.4 GitHub Release and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
 
 Open a trusted project folder, open the TokenLighten view, and choose **Set up this workspace**. This runs the same machine install described above (`tl install --from-extension --clients none`), using VS Code's own Node.js runtime instead of a bundled one: it stages the extension's bundled CLI as the machine install and sets up the current workspace, all in one operation — it does not register other hosts on the machine (Claude Code, Codex); do that separately with `tl clients activate`, or with an archive's `tl-setup`. Remove it with **TokenLighten: Uninstall TokenLighten from This Machine** from the command palette, or the absolute `tl install --uninstall` invocation described in [Uninstall](#uninstall) below.
 
@@ -256,4 +256,4 @@ Run `tl help` for the complete CLI reference. If you do not want TokenLighten ac
 - Deploying to a fleet or a policy-managed machine? See [Managed environments](managed-environments.md).
 - Review the [Privacy, security, and support](privacy-security-support.md) notes before enabling write access.
 - Configure optional [Local analysis engines](local-analysis.md), including model download and language servers.
-- Read the [v0.16.3 release notes](github-release-v0.16.3.md) for the current changes, compatibility, and known limitations.
+- Read the [v0.16.4 release notes](github-release-v0.16.4.md) for the current changes, compatibility, and known limitations.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderPortableCodeBlock, renderCompactBlock } from "./render.js";
+import { renderPortableCodeBlock } from "./render.js";
 import { parseSentinelBlock } from "./sentinel.js";
 describe("portable code bootstrap", () => {
   it("covers read, write, continuation and fail-closed routing without client/model names", () => {
@@ -8,7 +8,8 @@ describe("portable code bootstrap", () => {
     // v116: the continuation line also forbids re-opening the task (bench 6t-2 T13 rep0).
     expect(guide).not.toContain("Continue returned task.id as task.handle");
     expect(guide).not.toMatch(/Copilot|Codex|Claude|GPT|Qwen/);
-    expect(Buffer.byteLength(guide)).toBeLessThan(Buffer.byteLength(renderCompactBlock()) * .8);
+    // It carries the edit rules a compact guide leaves to the reply's edit_rules.
+    expect(Buffer.byteLength(guide)).toBeLessThan(2800);
     expect(parseSentinelBlock(guide).block).toBeDefined();
   });
   it("hashes content independently of version", () => {

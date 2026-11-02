@@ -8,6 +8,7 @@ export const COPILOT_SESSION_RECORD = ".tokenlighten/copilot-session-owned.json"
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { createDirectoryMode, createFileMode, existingFileMode, keepExistingFileMode, type FileVisibility } from "./fileMode.js";
 
 const PATHS = [COPILOT_SESSION_CONFIG, COPILOT_SESSION_RUNNER] as const;
 const LOCK = ".tokenlighten/copilot-session.lock";
@@ -72,10 +73,16 @@ function lock(root: string): () => void {
 /** New files publish without replacement; refresh requires the owned snapshot. */
 function publish(root: string, path: string, body: string, before: Snapshot | undefined): void {
   safe(root, path);
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  // The hook config under .github/ is committed and read by the team: process
+  // default mode. Everything under .tokenlighten/ (runner, ownership record)
+  // is per-user runtime state in a git-ignored directory: 0600.
+  const visibility: FileVisibility = relative(root, path).split(sep)[0] === ".tokenlighten" ? "private" : "shared";
+  mkdirSync(dirname(path), { recursive: true, mode: createDirectoryMode(visibility) });
   const temporary = join(dirname(path), `.tl-tmp-${randomBytes(16).toString("hex")}`);
-  const fd = openSync(temporary, "wx", 0o600);
+  const previousMode = before ? existingFileMode(path) : undefined;
+  const fd = openSync(temporary, "wx", createFileMode(visibility));
   try { writeFileSync(fd, body); } finally { closeSync(fd); }
+  keepExistingFileMode(temporary, previousMode);
   const owned = snapshot(root, temporary)!;
   try {
     unchanged(root, path, before);

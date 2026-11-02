@@ -14,6 +14,19 @@ export type TokenLightenClient =
 
 export type TokenLightenTool = "tl_read_file" | "tl_search_files" | "tl_edit_file";
 
+/**
+ * How a per-call baseline was measured. Both are ESTIMATES of what a native
+ * (non-TL) agent read of the same files would have returned, not billed cost.
+ *
+ * - `"file-bytes"`: every measured path was a whole-file read, so the baseline
+ *   is the file's byte size (counted once per path per lane).
+ * - `"range-bytes"` (v0.16.4): at least one measured path was a ranged, symbol
+ *   or handle-slice read, so its baseline is the bytes of the requested line
+ *   range / served symbol window a native ranged read would return, not the
+ *   whole file. A ranged read therefore records about zero savings.
+ */
+export type TokenLightenBaselineMethod = "file-bytes" | "range-bytes";
+
 export interface TokenLightenUsageEvent {
   /**
    * 1: the original closed field set (no `taskRef`). 2 (2026-08-30, v0.13):
@@ -40,7 +53,7 @@ export interface TokenLightenUsageEvent {
   baselineTokens: number | null;
   /** Signed baseline minus TL response tokens; negative means TL added tokens. */
   estimatedSavedTokens: number | null;
-  baselineMethod: "file-bytes" | null;
+  baselineMethod: TokenLightenBaselineMethod | null;
   writeEnabled: boolean;
   /**
    * schemaVersion:2 only — absent on a schemaVersion:1 line. An OPAQUE
@@ -139,6 +152,18 @@ export interface TokenLightenUsageSummary {
   measuredBaselineBytes: number;
   /** Method used for the response/baseline token estimate. */
   method: "file-bytes";
+  /**
+   * What the per-call baselines are: an estimate of what native reads of the
+   * same files/ranges would have returned, not billed cost. Added after the
+   * v0.16.3 field report (a whole-file baseline credited ranged reads); always
+   * set by `summarizeUsage`, optional only so older producers still type-check.
+   */
+  baselineBasis?: "native-read-estimate";
+  /**
+   * Successful baseline-bearing calls by how their baseline was measured
+   * (see `TokenLightenBaselineMethod`). Sums to `measuredBaselineCalls`.
+   */
+  measuredBaselineCallsByMethod?: Record<TokenLightenBaselineMethod, number>;
   measurementUnavailableReason?: "recorder-off" | "log-dir-unavailable" | "scope-mismatch";
   /** Net signed savings after subtracting calls where TL added tokens. */
   estimatedSavedTokens: number;

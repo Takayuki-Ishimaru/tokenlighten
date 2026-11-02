@@ -357,11 +357,24 @@ describe("G3 — an uncovered identifier nothing declares is recovered by a rang
     expect((next?.arguments as { query?: string }).query).toBe(query);
   });
 
-  it("recall: a DECLARED identifier keeps the symbol lookup", () => {
+  // 2026-10-29 (first-hop field report, anchorFirst.ts): this used to keep the symbol lookup
+  // (`tl_search_files action=symbols`) — a name search, whose hits are the very call sites the
+  // obligation exists to see past. An identifier the request names and the workspace DECLARES is
+  // read at its declaration's own span, query-bearing; only a name with no known declaration keeps
+  // a lookup.
+  it("a DECLARED identifier is read at its declaration's own span, not looked up by name", () => {
     const ws = workspaceWithEnvKey();
-    const contract = buildTaskExecutionContract(answerResult(), "answer", "Explain how declaredButUnserved works.", undefined, ws);
+    const query = "Explain how declaredButUnserved works.";
+    const contract = buildTaskExecutionContract(answerResult(), "answer", query, undefined, ws);
     const next = contract.next_call;
-    expect(next?.tool).toBe("tl_search_files");
-    expect((next?.arguments as { action?: string }).action).toBe("symbols");
+    expect(next?.tool).toBe("tl_read_file");
+    const args = next?.arguments as { targets?: Array<{ path: string; range?: string }>; query?: string };
+    expect(args.query).toBe(query);
+    expect(args.targets).toHaveLength(1);
+    expect(args.targets![0]!.path).toBe("src/settings.ts");
+    const declaration = fs.readFileSync(path.join(ws, "src/settings.ts"), "utf8").split("\n").findIndex((l) => l.startsWith("export function declaredButUnserved")) + 1;
+    const [start, end] = args.targets![0]!.range!.split("-").map(Number);
+    expect(start).toBe(declaration);
+    expect(end!).toBeGreaterThanOrEqual(declaration + 2);
   });
 });

@@ -277,6 +277,25 @@ export function verifyChecksum(archivePath, shasumsPath, expectedFilename) {
 }
 
 /**
+ * The `tar` this host runs. On Windows the first `tar` on PATH can be Git for
+ * Windows' GNU tar (`/usr/bin/tar` under Git Bash), which reads `C:\…` as a
+ * remote `host:path` ("Cannot connect to C: resolve failed"); the bsdtar
+ * Windows ships in System32 takes drive paths and reads `.zip`. Other hosts use
+ * PATH's `tar`.
+ */
+export function systemTar(hostPlatform = process.platform, env = process.env) {
+  if (hostPlatform !== "win32") return "tar";
+  const root = env.SystemRoot ?? env.SYSTEMROOT ?? env.windir;
+  const bsdtar = root ? join(root, "System32", "tar.exe") : undefined;
+  return bsdtar !== undefined && existsSync(bsdtar) ? bsdtar : "tar";
+}
+
+/** `spawnSync`, with the logical command `tar` run as {@link systemTar}. */
+export function spawnTool(command, args, options) {
+  return spawnSync(command === "tar" ? systemTar() : command, args, options);
+}
+
+/**
  * Extracts just the node binary + LICENSE member out of a downloaded Node.js
  * distribution archive. `.tar.gz`/`.tar.xz` (macOS/Linux) always go through
  * the system `tar`. The win-x64 archive is a `.zip`, which only bsdtar (not
@@ -293,7 +312,7 @@ export function extractNodeRuntime({ archivePath, platform, nodeVersion, extract
   const tmpDir = mkdtempSync(join(tmpdir(), "tl-node-extract-"));
   try {
     const isZip = archivePath.endsWith(".zip");
-    const tarResult = spawnSync("tar", ["-xf", archivePath, "-C", tmpDir, memberBin, memberLicense], { encoding: "utf8" });
+    const tarResult = spawnTool("tar", ["-xf", archivePath, "-C", tmpDir, memberBin, memberLicense], { encoding: "utf8" });
     const tarOk = !tarResult.error && tarResult.status === 0;
     if (!tarOk) {
       if (!isZip) {
@@ -446,7 +465,7 @@ function sha256File(pathname) {
  * simulate an unavailable/failing `zip` binary without touching PATH or
  * running a real archiver.
  */
-export function packArchive({ outRoot, dirName, platform, noZip = false, spawnFn = spawnSync, hostPlatform = process.platform }) {
+export function packArchive({ outRoot, dirName, platform, noZip = false, spawnFn = spawnTool, hostPlatform = process.platform }) {
   const tgzPath = join(outRoot, `${dirName}.tgz`);
   rmSync(tgzPath, { force: true });
   // macOS copyfile metadata becomes visible AppleDouble files on Linux/Windows.

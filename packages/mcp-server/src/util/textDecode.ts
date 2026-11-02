@@ -25,7 +25,7 @@
  * renameSymbol.ts) and findReferences.ts the same day.
  */
 
-import { readFileSync as nodeReadFileSync } from "node:fs";
+import { readFileForRequest } from "./requestFileCache.js";
 
 /** Bytes sniffed, with no recognized BOM, before trusting a plain UTF-8 decode. */
 export const UNDECODABLE_PROBE_BYTES = 4096;
@@ -456,7 +456,7 @@ export function readServedText(input: Buffer | string): ServedTextVerdict {
   let buf: Buffer;
   if (typeof input === "string") {
     try {
-      buf = nodeReadFileSync(input);
+      buf = readFileForRequest(input);
     } catch {
       return undecodableServedText("unreadable");
     }

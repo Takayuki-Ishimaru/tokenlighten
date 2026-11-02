@@ -6,7 +6,7 @@ TokenLighten exposes exactly three MCP tools over stdio JSON-RPC:
 |---|---|
 | `tl_read_file` | First stop for code, documentation, configuration, logs, supported Office files, and archives. It can locate an unknown target, return focused content, or continue a task. |
 | `tl_search_files` | Find text or symbols, enumerate references, inspect diffs, and inventory a workspace with `.gitignore`-aware coverage. |
-| `tl_edit_file` | Apply bounded text or supported artifact edits after a read has established writable context. |
+| `tl_edit_file` | Apply bounded text or supported artifact edits, subject to write permission and task context. Path-based text edits do not require an earlier read. |
 
 Since v0.15.0 the tool names have the `tl_` prefix to distinguish them from
 built-in editor tools. Custom clients must refresh `tools/list` and use these
@@ -27,6 +27,12 @@ Legacy v0.12/v0.13 fields such as `mode`, `paths`, `handles`, bare `maxBytes`/`m
 
 ## Tool surface
 
+Since v0.16.4, Claude Code, Copilot CLI and Codex CLI receive a smaller
+advertised schema containing commonly used fields. Other supported canonical
+fields remain accepted and validated by the server. Set `TL_PORTABLE_SLIM=0`
+to restore the previous advertisement. This does not change the chosen
+`full` or `code` surface or grant capabilities excluded from it.
+
 The server advertises one of two tool surfaces, chosen once at startup:
 
 - **`full`** (default) — every capability above, including Office documents (`.docx`/`.xlsx`/`.pptx`/`.pdf`), zip archive members, and password-protected artifacts via `credentialRef`/`credentials`.
@@ -36,7 +42,7 @@ Choose `code` for a workspace that is exclusively source code, text, documentati
 
 Since v0.15.0 the schema every client receives is lean: `tools/list` no longer carries each tool's top-level `oneOf`/`anyOf` (the mutually exclusive request shapes) or the `task` dependency rule (`task.expected_state_version` only together with a `task.handle`). The server enforces both on every call and refuses a violation exactly as before, so only the size of the advertised definition changes; the VS Code setup keeps its own, leaner definition. Set `TL_LEAN_SCHEMA=0` on the server to advertise the complete pre-v0.15.0 schema.
 
-Claude Code, GitHub Copilot CLI and Codex CLI receive compact portable tool descriptions by default. Claude Code and Codex CLI also receive line-numbered answer content; for Copilot CLI, an answer body that is an exact contiguous source slice is sent without line-number prefixes (its line range is given with it), and other answer bodies stay numbered. `TL_PORTABLE_TOOLS` and `TL_ANSWER_LINE_GUTTER` explicitly override these defaults. VS Code receives a smaller client-specific definition of commonly used fields.
+Claude Code, GitHub Copilot CLI and Codex CLI receive compact portable tool descriptions by default. Claude Code and Codex CLI also receive line-numbered answer content; for Copilot CLI, an answer body that is an exact contiguous source slice is sent without line-number prefixes (its line range is given with it), and other answer bodies stay numbered. `TL_PORTABLE_TOOLS` and `TL_ANSWER_LINE_GUTTER` explicitly override these defaults. `TL_PORTABLE_SLIM=0` restores the larger portable schema, which lists rarely needed fields that are accepted either way. VS Code receives a smaller client-specific definition of commonly used fields.
 Portable edit/search definitions omit the read-only `task.epoch`,
 `task.force_serve` and `task.pull` controls. The server still accepts returned
 recovery and continuation calls, with argument validation enforced by the
@@ -89,6 +95,45 @@ complete `next` call to obtain any remaining evidence.
 
 `range`, `ranges` and `symbol` select what to read; `content:"full"` only asks for that selection unelided (doc comments kept), across every continuation, and never widens it to the whole file. Without a selection, `content:"full"` reads the whole file.
 
+## CSV lookups
+
+Since v0.16.4, a supported read-only task query naming a CSV file can receive
+matching rows and a whole-table match count in its first
+reply. The lookup reads named CSV files up to 25 MB. It supports explicit
+values and certain count and multi-column questions; unsupported or ambiguous
+questions continue discovery. `TL_CSV_LOOKUP=0` restores the preview-and-search
+workflow. This first-reply lookup is separate from the optional CSV/TSV query
+window below. `section.lookup` identifies matches; when the full table is
+already inline, its `row_numbers` refer to those table rows without repeating
+them in `lookup.rows`.
+
+A table too large for an ordinary task pack is previewed with a short sample.
+`range` describes only the rows included, and `total_rows` describes the table.
+Follow `next` to retrieve the other rows. `TL_CSV_SAMPLE=0` restores the longer
+head preview. A sample or sparse view is not evidence that an unshown row is
+absent.
+
+## Optional reply and table settings
+
+These server environment settings are off by default. Restart or reconnect
+after changing them. They preserve the supported tool names and request
+fields; follow the returned continuation instead of reconstructing it.
+
+| Setting | Behavior and requirements |
+|---|---|
+| `TL_ARTIFACT_QUERY_WINDOW=1` | A CSV/TSV task pack can show rows relevant to the query rather than the file head. Its continuation reaches the other rows. Other formats keep their existing read path. |
+| `TL_READ_SNAPSHOT=1` | Retains the bytes used by a CSV/TSV query window so later ranges of that revision remain exact if the file changes. The reply discloses that change. Requires the query-window feature. |
+| `TL_SPARSE_SELECT=1` | Lets a CSV/TSV query window show separate runs of rows, labelled as a partial view. Requires `TL_ARTIFACT_QUERY_WINDOW=1` and `TL_READ_SNAPSHOT=1`. |
+| `TL_WIRE_DEDUP=1` | Enables an additional reply encoding that folds exact repeated lines and rows when eligible. It does not remove distinct source content. |
+| `TL_WIRE_STABLE=1` | Serializes reply object keys in a stable order. |
+| `TL_WIRE_TOKEN_SELECT=1` | Uses token counts when selecting eligible reply encodings. Also requires `TOKENLIGHTEN_RESPONSE_FORMAT=auto`, `TL_WIRE_BREAKEVEN=1` and a usable token counter. Set `TL_WIRE_TOKENIZER=o200k_base` or `cl100k_base` for a local counter. These are encoding names, not model identities. Failures fall back to byte selection. |
+
+In VS Code, `tokenlighten.hostTokenCounter.modelFamily` can instead enable
+the selected model's counting API. It is empty by default and also requires
+the reply-selection settings above. Candidate reply text reaches that model
+provider's counting API; its data handling depends on the provider. See
+[Privacy, security, and support](privacy-security-support.md).
+
 ## Local analysis engines
 
 Optional typed symbol resolution and local multilingual semantic search
@@ -103,7 +148,7 @@ A manually started server is read-only unless passed `--allow-write`;
 generated settings by default; use `tl workspace setup --read-only` to
 generate read-only settings.
 
-Edits are checked against previously served context and can be batched across independent concerns. The result distinguishes applied, rolled-back, and state-unknown outcomes. A successful create receipt proves the exact submitted content, and a successful bounded edit carries hashes and ranges for the resulting slice.
+A path-based edit does not need an earlier read: its `search` is matched against the file as it is on disk now (`precondition:"unique-match"` requires exactly one match), and a handle-based edit is matched inside the range that handle served. Edits can be batched across independent concerns. The result distinguishes applied, rolled-back, and state-unknown outcomes. A successful create receipt proves the exact submitted content, and a successful bounded edit carries hashes and ranges for the resulting slice.
 
 A successful edit can carry, for each edited file, the post-edit window `applied[].after`: the verbatim text now on disk for the changed lines plus three lines of context on each side (at most 6 KiB per hunk and 16 KiB per response; `TL_EFF_SLIM_EDIT=0` widens it to about 20 lines, extended to the enclosing symbol when it fits), as `range` and `body`, with `remaining` naming any post-edit span that was not shown. Those lines count as served in the session: a later read of them returns a `read.receipt` that names the edit instead of resending them, and a later edit may use them. Under a host or caller byte ceiling the windows are shortened from their tail first, so they never push the response past the ceiling and a hunk can fall outside its window; `remaining` names every unshown span. `edit.rolled_back` and `edit.state_unknown` never carry `after`.
 

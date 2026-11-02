@@ -373,6 +373,7 @@ function classifyStateHandlePurpose(purpose: StateHandlePurpose): string {
     case "read-request":
       return "one tl_read_file fetch request's original scope and remainder";
     case "search-request":
+    case "snapshot":
       return "one tl_search_files fetch request's match snapshot and remainder";
     default: {
       const exhaustive: never = purpose;

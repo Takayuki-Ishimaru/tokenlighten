@@ -533,6 +533,12 @@ export type ArtifactContent =
       range: string;
       columns: string[];
       rows: unknown[][];
+      /** A3/B2b: present when these rows were chosen by query relevance. `limit.next` then returns the rest of the table. */
+      selected_by?: "query" | "sparse";
+      /** B2b: which positions `rows` came from, in order, when they are not contiguous. A partial view: `range` then lists the runs and `file_range` is absent. */
+      row_spans?: Array<{ range: string; file_range: string; rows: number }>;
+      /** B2b: whole table, rows looked at, rows shown. */
+      counts?: { total: number; scanned: number; shown: number };
       total_rows: number;
       total_columns: number;
       dialect: { delimiter: string; header: boolean };

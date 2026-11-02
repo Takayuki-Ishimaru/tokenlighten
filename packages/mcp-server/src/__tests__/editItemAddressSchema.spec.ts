@@ -292,6 +292,11 @@ describe.each(SURFACES_WITH_KEYWORD)("edits[] item address keyword -- $label", (
   it("advertises edits.items.anyOf as [{required:[path]},{required:[handle]},{required:[intent]}], a sibling of the six-branch oneOf and inside no branch", () => {
     const items = itemSchema(advertise(surface));
     expect(items["anyOf"]).toEqual([{ required: ["path"] }, { required: ["handle"] }, { required: ["intent"] }]);
+    // The portable default leaves the shape branches out (TL_PORTABLE_SLIM); the address stays.
+    if (surface.label.startsWith("portable:")) {
+      expect(items["oneOf"]).toBeUndefined();
+      return;
+    }
     expect(items["oneOf"]).toHaveLength(6);
     for (const branch of items["oneOf"] as Array<Record<string, unknown>>) expect(branch, JSON.stringify(branch)).not.toHaveProperty("anyOf");
     expect((items["oneOf"] as Array<Record<string, unknown>>)[0]).toEqual({ required: ["search", "replace"] });

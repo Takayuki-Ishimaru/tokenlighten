@@ -175,6 +175,20 @@ describe("mergeAutofollowReplies: every byte the follow-up served reaches the cl
     expect(restated["answer_resolution"]).toEqual({ requested_identifier: "Other" });
   });
 
+  it("a task-pack follow-up keeps the epoch-repeat advisory the discover pack took for this call, and no other line of its advisory (replay corpus v016t5)", async () => {
+    const { mergeAutofollowReplies } = await import("../server.js");
+    const { EPOCH_REPEAT_ADVISORY } = await import("../state/session.js");
+    const first = discover({ advisory: `the discover pack's own note; ${EPOCH_REPEAT_ADVISORY}` });
+    const second = { v: 1, kind: "read.task_pack", evidence: [], decision: { kind: "act.answer" } };
+    expect(mergeAutofollowReplies(first, second)!["advisory"]).toBe(EPOCH_REPEAT_ADVISORY);
+    const own = mergeAutofollowReplies(first, { ...second, advisory: "the follow-up's note" })!;
+    expect(own["advisory"]).toBe(`the follow-up's note; ${EPOCH_REPEAT_ADVISORY}`);
+    // Stated once, however many packs of the chain carried it.
+    expect(mergeAutofollowReplies(first, { ...second, advisory: EPOCH_REPEAT_ADVISORY })!["advisory"]).toBe(EPOCH_REPEAT_ADVISORY);
+    // A discover pack without it adds nothing.
+    expect(mergeAutofollowReplies(discover({ advisory: "the discover pack's own note" }), second)!["advisory"]).toBeUndefined();
+  });
+
   it("a task-pack follow-up of a discover pack without gaps adds none", async () => {
     const { mergeAutofollowReplies } = await import("../server.js");
     const first = discover();

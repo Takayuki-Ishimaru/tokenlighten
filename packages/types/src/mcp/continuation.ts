@@ -86,6 +86,20 @@ export interface ReadRequestTargetState {
    * `comments:"keep"` and when nothing is elided.
    */
   elided?: LineWindow[];
+  /**
+   * A3 (2026-10-30). Present when this target is a text artifact served as table
+   * rows rather than as lines. `requested`/`remaining` stay FILE line coordinates
+   * (the union of whole data rows' physical spans, so a header or blank line is
+   * never owed), `sha` is the hash of the file's BYTES, the key the csv ledger
+   * books under, and a page is served through the artifact route.
+   */
+  artifact?: { kind: "csv" | "tsv" };
+  /**
+   * B1 (2026-10-30). The handle of a snapshot of exactly this `sha`. When the source
+   * moves under a cursor, later pages come from it, and each says the source moved.
+   * Absent: the cursor refuses, as it always has.
+   */
+  snapshot?: { handle: string };
 }
 
 /**

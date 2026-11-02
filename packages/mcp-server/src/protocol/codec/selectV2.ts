@@ -51,16 +51,20 @@
 import type { Kind } from "@tokenlighten/types";
 import type { CodecCandidate } from "./policy.js";
 import { classifyShape, countUniformArrayRows, type ShapeClass } from "./shape.js";
-import { resolveBreakevenThresholds } from "./breakeven.js";
+import { resolveBreakevenThresholds, resolveTokenBreakevenThresholds, type BreakevenThresholds } from "./breakeven.js";
 import { isCodecAllowedForClient, type ClientProfile } from "./clientProfile.js";
 import type { TokenCounter } from "./tokenCounter.js";
 import { hashSemanticPayload, type EncodingCache } from "./encodingCache.js";
 import type { CodecPayload } from "./types.js";
+import { tlDedup1Codec } from "./tlDedup1.js";
 import { tlRaw1Codec } from "./tlRaw1.js";
 
 /** `read.text` is the ONLY v2 widening target -- deviation E-3. Everything else outside the default allowlist stays fully json under v2 too. */
 const V2_WIDENED_KIND: Kind = "read.text";
-const V2_WIDENED_CODEC_ID = `${tlRaw1Codec.id}/${tlRaw1Codec.version}`;
+const V2_WIDENED_CODEC_IDS: readonly string[] = [
+  `${tlRaw1Codec.id}/${tlRaw1Codec.version}`,
+  `${tlDedup1Codec.id}/${tlDedup1Codec.version}`,
+];
 
 /**
  * True when `kind` may be considered for v2 selection PURELY BECAUSE OF the
@@ -71,7 +75,7 @@ const V2_WIDENED_CODEC_ID = `${tlRaw1Codec.id}/${tlRaw1Codec.version}`;
  */
 export function isEligibleKindV2(kind: Kind, profile: ClientProfile): boolean {
   if (kind !== V2_WIDENED_KIND) return false;
-  return isCodecAllowedForClient(profile, V2_WIDENED_CODEC_ID);
+  return V2_WIDENED_CODEC_IDS.some((id) => isCodecAllowedForClient(profile, id));
 }
 
 /**
@@ -88,9 +92,10 @@ export function restrictCandidatesForWidenedKind(
   profile: ClientProfile,
 ): readonly CodecCandidate[] {
   if (kind !== V2_WIDENED_KIND) return candidates;
-  return candidates.filter(
-    (c) => `${c.codec.id}/${c.codec.version}` === V2_WIDENED_CODEC_ID && isCodecAllowedForClient(profile, V2_WIDENED_CODEC_ID),
-  );
+  return candidates.filter((c) => {
+    const id = `${c.codec.id}/${c.codec.version}`;
+    return V2_WIDENED_CODEC_IDS.includes(id) && isCodecAllowedForClient(profile, id);
+  });
 }
 
 export type FallbackReasonV2 =
@@ -99,7 +104,8 @@ export type FallbackReasonV2 =
   | "byte-floor"
   | "host-budget-overshoot"
   | "negative-gain"
-  | "breakeven-not-cleared";
+  | "breakeven-not-cleared"
+  | "no-token-policy";
 
 export interface SelectionResultV2 {
   readonly text: string;
@@ -110,6 +116,9 @@ export interface SelectionResultV2 {
   readonly clientProfileId: string;
   readonly shapeClass: ShapeClass;
   readonly cacheHit: boolean;
+  /** The counter's units for the exact JSON text and for the chosen text; absent when nothing was measured. A2's trace reports these, so the claim and the bytes it describes come from one comparison. */
+  readonly jsonUnits?: number;
+  readonly chosenUnits?: number;
 }
 
 export interface SelectForWireV2Params {
@@ -146,40 +155,38 @@ export function selectForWireV2(params: SelectForWireV2Params): SelectionResultV
     return { text: jsonText, codecId: "json", fallbackReason: "no-candidates", cacheHit: false, ...base };
   }
 
-  const jsonUnits = counter.count(jsonText);
+  // A token counter's thresholds are its own (breakeven.ts); with no policy for
+  // this encoding there is nothing to decide with, so nothing is measured.
+  const thresholds = thresholdsFor(counter, clientProfile.id, kind, shapeClass);
+  if (thresholds === undefined) {
+    return { text: jsonText, codecId: "json", fallbackReason: "no-token-policy", cacheHit: false, ...base };
+  }
+
   const payloadHash = safeHash(payload);
+  // Only a real tokenizer's JSON count is worth caching: `byteCounter`'s is one
+  // byteLength, and fixture counters' counts assert how often they are called.
+  const jsonUnits = counter.unit === "tokens"
+    ? measureCandidateUnits(counter, cache, payloadHash, "json", "1", jsonText, jsonBytes).units
+    : counter.count(jsonText);
 
   // Stage 1: measure every byte-floor-clearing candidate, then order by
   // measured gain descending (ascending units, since jsonUnits is fixed).
   const measured: Measured[] = [];
   for (const candidate of candidates) {
     if (candidate.bytes >= jsonBytes) continue; // byte hard floor -- never measured, never a candidate at all
-    const cacheKey = payloadHash === undefined
-      ? undefined
-      : { payloadHash, codecId: candidate.codec.id, codecVersion: candidate.codec.version, tokenizerId: counter.id };
-    const cached = cacheKey === undefined ? undefined : cache.get(cacheKey);
-    if (cached !== undefined && cached.text === candidate.text) {
-      measured.push({ candidate, units: cached.units, cacheHit: true });
-      continue;
-    }
-    const units = counter.count(candidate.text);
-    if (cacheKey !== undefined) cache.set(cacheKey, { text: candidate.text, bytes: candidate.bytes, units });
-    measured.push({ candidate, units, cacheHit: false });
+    const units = measureCandidateUnits(
+      counter, cache, payloadHash, candidate.codec.id, candidate.codec.version, candidate.text, candidate.bytes,
+    );
+    measured.push({ candidate, units: units.units, cacheHit: units.cacheHit });
   }
   if (measured.length === 0) {
-    return { text: jsonText, codecId: "json", fallbackReason: "byte-floor", cacheHit: false, ...base };
+    return { text: jsonText, codecId: "json", fallbackReason: "byte-floor", cacheHit: false, jsonUnits, ...base };
   }
   measured.sort((a, b) => a.units - b.units);
 
   // Stage 2: walk in gain order; a gate failure tries the NEXT-best-gain
   // candidate instead of falling straight to json.
   const rows = countUniformArrayRows(payload);
-  const thresholds = resolveBreakevenThresholds({
-    clientProfileId: clientProfile.id,
-    tokenizerId: counter.id,
-    kind,
-    shapeClass,
-  });
   let lastReason: FallbackReasonV2 = "negative-gain";
 
   for (const m of measured) {
@@ -187,7 +194,8 @@ export function selectForWireV2(params: SelectForWireV2Params): SelectionResultV
     if (absoluteGain <= 0) { lastReason = "negative-gain"; continue; }
     if (m.candidate.bytes > limit) { lastReason = "host-budget-overshoot"; continue; }
     const relativeGain = jsonUnits > 0 ? absoluteGain / jsonUnits : 0;
-    const clears = rows >= thresholds.minRows
+    // The row floor is a tabular codec's assumption. A log body folds with no rows at all.
+    const clears = (rows >= thresholds.minRows || m.candidate.codec.id === tlDedup1Codec.id)
       && absoluteGain >= thresholds.minAbsoluteGainUnits
       && relativeGain >= thresholds.minRelativeGain;
     if (!clears) { lastReason = "breakeven-not-cleared"; continue; }
@@ -197,14 +205,55 @@ export function selectForWireV2(params: SelectForWireV2Params): SelectionResultV
       codecId: `${m.candidate.codec.id}/${m.candidate.codec.version}`,
       fallbackReason: "none",
       cacheHit: m.cacheHit,
+      jsonUnits,
+      chosenUnits: m.units,
       ...base,
     };
   }
 
-  return { text: jsonText, codecId: "json", fallbackReason: lastReason, cacheHit: false, ...base };
+  return { text: jsonText, codecId: "json", fallbackReason: lastReason, cacheHit: false, jsonUnits, ...base };
 }
 
-function safeHash(payload: CodecPayload): string | undefined {
+function thresholdsFor(
+  counter: TokenCounter,
+  clientProfileId: string,
+  kind: Kind,
+  shapeClass: ShapeClass,
+): BreakevenThresholds | undefined {
+  if (counter.unit !== "tokens") {
+    return resolveBreakevenThresholds({ clientProfileId, tokenizerId: counter.id, kind, shapeClass });
+  }
+  // `encoding` is declared by the real and host counters, not by the interface.
+  const encoding = (counter as TokenCounter & { readonly encoding?: string }).encoding;
+  return encoding === undefined ? undefined : resolveTokenBreakevenThresholds(encoding, { clientProfileId, kind, shapeClass });
+}
+
+/**
+ * One cache-backed measurement of `text`. A hit is only trusted when its text
+ * is identical to the one in hand (encodingCache.ts's "any doubt => miss").
+ * `payloadHash` undefined means uncacheable, never a guess.
+ */
+export function measureCandidateUnits(
+  counter: TokenCounter,
+  cache: EncodingCache,
+  payloadHash: string | undefined,
+  codecId: string,
+  codecVersion: string,
+  text: string,
+  bytes: number,
+): { units: number; cacheHit: boolean } {
+  const cacheKey = payloadHash === undefined
+    ? undefined
+    : { payloadHash, codecId, codecVersion, tokenizerId: counter.id };
+  const cached = cacheKey === undefined ? undefined : cache.get(cacheKey);
+  if (cached !== undefined && cached.text === text) return { units: cached.units, cacheHit: true };
+  const units = counter.count(text);
+  if (cacheKey !== undefined) cache.set(cacheKey, { text, bytes, units });
+  return { units, cacheHit: false };
+}
+
+/** Exported for tokenShadow.ts, which measures the same way selection does. */
+export function safeHash(payload: CodecPayload): string | undefined {
   try {
     return hashSemanticPayload(payload);
   } catch {

@@ -14,8 +14,7 @@ describe("explicit read-only code guide", () => {
     const readonly = renderReadOnlyCodeBlock("test-version");
     expect(readonly).toContain("test-version-read-only-code");
     expect(readonly).toBe(renderReadOnlyCodeBlock("test-version"));
-    // v119-v128 compact wording: "Single edit: prepared `handle/search/replace` …" (was "Known single edit").
-    expect(ordinary).toContain("Single edit:");
+    expect(ordinary).toContain("First lookup:");
     expect(ordinary).not.toContain("read-only-code");
     expect(renderBlock(undefined, "en", undefined, "compact", "code")).toBe(ordinary);
   });

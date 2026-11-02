@@ -278,6 +278,7 @@ export type {
 export type {
   TokenLightenClient,
   TokenLightenTool,
+  TokenLightenBaselineMethod,
   TokenLightenUsageEvent,
   TokenLightenAutomaticPrice,
   TokenLightenSessionModelUsage,

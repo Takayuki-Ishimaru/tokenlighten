@@ -1,6 +1,6 @@
 {
   "name": "@tokenlighten/mcp-server",
-  "version": "0.16.3",
+  "version": "0.16.4",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
   "main": "dist/index.js",
@@ -49,6 +49,7 @@
     "@tokenlighten/usage": "*",
     "@zip.js/zip.js": "^2.8.34",
     "exceljs": "^4.4.0",
+    "js-tiktoken": "^1.0.21",
     "jszip": "^3.10.1",
     "libarchive.js": "^2.0.2",
     "mammoth": "^1.8.0",

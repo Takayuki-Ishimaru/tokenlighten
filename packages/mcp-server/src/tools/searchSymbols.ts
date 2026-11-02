@@ -50,6 +50,7 @@ import type { McpLang } from "@tokenlighten/types";
 import { isSourceOnlyExcludedPath } from "./walkRepo.js";
 import { applyRoles, deriveFileRole } from "../features/search/find/findText.js";
 import { graphIndexMode } from "../util/flags.js";
+import { currentRequestSignal } from "../util/requestCancellation.js";
 import { GRAPH_INDEX_MAX_BYTES } from "../graph/index.js";
 import {
   collectSymbolsChecked,
@@ -485,10 +486,16 @@ export async function searchSymbols(
   // writeGraphIfStale's WriteGraphIfStaleOptions.graphIndexMode doc
   // comment. skeleton-engine itself reads no environment; this is the one
   // seam that resolves TL_GRAPH_INDEX and passes the decision down.
+  // The request's own signal scopes the index's consistency scan: one tool call
+  // looks symbols up dozens of times, and each lookup re-read every indexed file
+  // (2026-10-30: 5,451 reads in one T03 first call). The first lookup of a
+  // request still scans; the next request scans again.
+  const requestScope = currentRequestSignal();
   const { manifest } = await loadOrBuildSourceIndex(workspace, {
     ignoreHash: "",
     graphIndexMode: graphIndexMode(),
     graphIndexMaxBytes: GRAPH_INDEX_MAX_BYTES,
+    ...(requestScope !== undefined ? { consistencyScanScope: requestScope } : {}),
   });
 
   // 2) Build fileScores from manifest symbol counts (Phase C proxy).

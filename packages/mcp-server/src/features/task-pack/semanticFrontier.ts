@@ -174,7 +174,8 @@ function contractEvidenceAddresses(result: TaskPackResult): Set<string> {
 
 function hasExplicitSurfaceAnchor(surface: TaskPackSurface, query: string): boolean {
   const why = surface.why ?? "";
-  if (/(?:caller-supplied|explicit|literal-first|filename-match|query-identifier)/u.test(why)) return true;
+  // `request-anchor-definition` / `request-literal`: the declaration (or exact text) of an anchor the request names.
+  if (/(?:caller-supplied|explicit|literal-first|filename-match|query-identifier|request-anchor|request-literal)/u.test(why)) return true;
   if (surface.path !== "" && query.includes(surface.path)) return true;
   return surface.symbol !== undefined && new RegExp(`(?:^|[^A-Za-z0-9_$])${surface.symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:$|[^A-Za-z0-9_$])`, "u").test(query);
 }

@@ -24,7 +24,7 @@
 import * as fs from "fs";
 import * as path from "path";
 
-import { laneScopedKey } from "./laneKey.js";
+import { LANE_KEY_MARKER, laneScopedKey } from "./laneKey.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -110,6 +110,13 @@ interface SessionMetaState {
   awaitingInput?: AwaitingInputLatch;
   /** W5: the open functional-validation obligation, if any. */
   functionalValidation?: FunctionalValidationObligation;
+  /**
+   * 2026-10-29: this task epoch's exploration spend — read/search responses
+   * emitted so far and their bytes (`recordTaskExploration`). Lives in `meta`
+   * because that is the one store that is both lane-scoped and reset by every
+   * epoch flip (`task.epoch:"new"` and the token-overlap heuristic alike).
+   */
+  exploration?: { calls: number; bytes: number };
   /** D3 (2026-08-01): locate calls this session already executed — query → candidate handles. */
   executedLocates?: Map<string, string[]>;
   /**
@@ -322,6 +329,53 @@ export function recordServedBytes(input: {
 export function servedBytesLedgerSnapshot(workspaceRoot: string, epoch?: string, lane?: string): ServedBytesLedgerEntry[] {
   const key = `${workspaceRoot}\u0000${epoch ?? "default"}\u0000${lane ?? "default"}`;
   return [...(_servedBytes.get(key)?.values() ?? [])].map((entry) => ({ ...entry }));
+}
+
+// ---------------------------------------------------------------------------
+// Per-task exploration spend (2026-10-29, first-hop field report)
+//
+// WHY NOT DERIVED FROM `_servedBytes` / `_executedNextFingerprints`. Both look
+// like the right source and neither scopes a TASK:
+//  - `_servedBytes` is keyed by the literal `task.epoch` the caller sent, which
+//    is `"new"` on hop 0 and absent on every `next` that follows (the
+//    continuation carries `task.handle`, not an epoch), so one task's bytes land
+//    under two keys and a LATER task shares the second one. It is also fed by
+//    edit dispatches only (emit.ts's `noteEmission` reads `context.workspace`,
+//    which no read/search call sets).
+//  - `_executedNextFingerprints` is partitioned by task binding for calls that
+//    restate a handle and by lane for the rest, deduplicates repeated call
+//    shapes, and the in-flight call pre-records itself at dispatch, so a count
+//    is off by one depending on where it is read.
+// `WorkspacePackLog.meta` is lane-scoped (`laneScopedKey`) and is reset by every
+// epoch flip (`task.epoch:"new"` via `clearServedSurfaces`, the query-token
+// heuristic via `recordServedSurfaces`), which is exactly "this task's spend".
+// ---------------------------------------------------------------------------
+
+/**
+ * Record one emitted read/search response against the active task epoch.
+ * Called from the emission choke point (protocol/emit.ts `noteEmission`), after
+ * the response is final, so the count never includes the call being built.
+ */
+export function recordTaskExploration(workspaceRoot: string, bytes: number): void {
+  if (workspaceRoot === "" || !Number.isFinite(bytes) || bytes < 0) return;
+  const meta = _getLog(workspaceRoot).meta;
+  const spend = meta.exploration ?? (meta.exploration = { calls: 0, bytes: 0 });
+  spend.calls += 1;
+  spend.bytes += Math.round(bytes);
+}
+
+/**
+ * What the active task epoch has spent so far: `hops` = read/search responses
+ * already emitted (so, for the response being built, the follow-up calls
+ * executed up to and including the one it answers; 0 on the epoch's first call)
+ * and `bytes` = their wire bytes. `lane` defaults to the ambient session lane
+ * (`laneScopedKey`); pass it only from outside the call's async context.
+ */
+export function taskExplorationSpend(workspaceRoot: string, lane?: string): { hops: number; bytes: number } {
+  const explicitLane = typeof lane === "string" && lane.trim() !== "" && lane.trim() !== DEFAULT_CONTRACT_LANE;
+  const key = explicitLane ? workspaceRoot + LANE_KEY_MARKER + lane!.trim() : _logKey(workspaceRoot);
+  const spend = _logs.get(key)?.meta.exploration;
+  return spend === undefined ? { hops: 0, bytes: 0 } : { hops: spend.calls, bytes: spend.bytes };
 }
 
 // ---------------------------------------------------------------------------

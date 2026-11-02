@@ -84,8 +84,10 @@ export class EncodingCache {
   private readonly store = new Map<string, CachedMeasurement>();
   private hits = 0;
   private misses = 0;
+  private retainedChars = 0;
 
-  constructor(private readonly maxEntries: number) {
+  /** `maxRetainedChars` also bounds the text held across all entries: 256 entries of a 128 KB body is not a small cache. An entry alone above it is never stored. */
+  constructor(private readonly maxEntries: number, private readonly maxRetainedChars: number = Number.POSITIVE_INFINITY) {
     if (!Number.isInteger(maxEntries) || maxEntries <= 0) {
       throw new Error(`EncodingCache: maxEntries must be a positive integer, got ${String(maxEntries)}`);
     }
@@ -108,16 +110,21 @@ export class EncodingCache {
 
   set(key: EncodingCacheKey, value: CachedMeasurement): void {
     const k = keyString(key);
+    const previous = this.store.get(k);
+    if (previous !== undefined) this.retainedChars -= previous.text.length;
     this.store.delete(k); // re-setting an existing key must also bump recency
+    if (value.text.length > this.maxRetainedChars) return;
     this.store.set(k, value);
+    this.retainedChars += value.text.length;
     this.evictIfNeeded();
   }
 
   private evictIfNeeded(): void {
-    while (this.store.size > this.maxEntries) {
-      const oldest = this.store.keys().next();
+    while (this.store.size > this.maxEntries || this.retainedChars > this.maxRetainedChars) {
+      const oldest = this.store.entries().next();
       if (oldest.done === true) break; // unreachable (size > maxEntries >= 1 implies non-empty); kept for totality
-      this.store.delete(oldest.value);
+      this.store.delete(oldest.value[0]);
+      this.retainedChars -= oldest.value[1].text.length;
     }
   }
 
@@ -128,6 +135,7 @@ export class EncodingCache {
   /** Test/diagnostic only -- clears every entry AND resets the hit/miss counters. */
   clear(): void {
     this.store.clear();
+    this.retainedChars = 0;
     this.hits = 0;
     this.misses = 0;
   }

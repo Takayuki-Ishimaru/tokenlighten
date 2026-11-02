@@ -205,6 +205,23 @@ function replaceableNext(value: unknown): boolean {
  */
 function shippedWindowsByPath(payload: ShedPayload): Map<string, LineWindow[]> | undefined {
   if (payload["kind"] === "refusal") return new Map<string, LineWindow[]>();
+  // A3: a csv table's delivery is its rows' physical span, `file_range`, the same
+  // coordinate the ledger books and `servedWindowsOf` corroborates. Rows the
+  // ladder or a fallback removed credit nothing: no rows or no `file_range` is an
+  // EMPTY map, not `undefined` -- that means "a receipt" below, and would credit
+  // the whole planned page.
+  if (payload["kind"] === "read.artifact") {
+    const content = payload["content"];
+    const path = payload["path"];
+    if (!isRecord(content) || content["form"] !== "csv" || typeof path !== "string") return undefined;
+    if (!Array.isArray(content["rows"]) || content["rows"].length === 0) return new Map<string, LineWindow[]>();
+    // B2b: a sparse view ships several runs, each with its own span.
+    const spans = Array.isArray(content["row_spans"])
+      ? content["row_spans"].flatMap((span) => (isRecord(span) ? [parseWindow(span["file_range"])] : []))
+      : [parseWindow(content["file_range"])];
+    const windows = spans.filter((window): window is LineWindow => window !== undefined);
+    return new Map<string, LineWindow[]>(windows.length === 0 ? [] : [[path, windows]]);
+  }
   const evidence = payload["evidence"];
   const entries = payload["entries"];
   const rows = Array.isArray(evidence) ? evidence : Array.isArray(entries) ? entries : undefined;
@@ -786,7 +803,12 @@ export function applyReadRequestContinuation(
   // `emit.ts`'s "REFACTOR AT DEFAULT BUDGETS" invariant and the §6.1(b) pins
   // (replay corpus svc1/svc2/tsl1) forbid. R2's defect is the ladder's
   // continuation, and this is the boundary of the fix.
-  if (staged.mode === "open" && !claim.budgetDeclared && !claim.shed) return payload;
+  //
+  // A3: an artifact window is the one open that always owes more than a producer
+  // cap's `next` can say. Its rows are chosen out of order, so "the rest" is not a
+  // single span any producer `next` could name, and only the cursor carries D.
+  const artifactWindow = staged.state.targets.some((target) => target.artifact !== undefined);
+  if (staged.mode === "open" && !claim.budgetDeclared && !claim.shed && !artifactWindow) return payload;
   // R2-R1 (FX1 chip 3 + P0-2): A BUDGET REFUSAL CARRIES ONE EXECUTABLE `next` —
   // THE CALL THAT FITS. A plain cursor on a refusal (what this tail installed
   // before) re-runs the very page that just did not fit at the very budget
@@ -885,6 +907,11 @@ function remainderCall(
   staged: StagedReadRequest,
   remaining: ReadonlyMap<string, readonly LineWindow[]>,
 ): ToolCall | undefined {
+  // A3: D is in file lines, which a plain read would serve as raw text rather than
+  // rows. The artifact request restated reaches the same rows through its own route.
+  if (staged.state.targets.some((target) => target.artifact !== undefined)) {
+    return canonicalToolCall("tl_read_file", { ...staged.state.original_input, ...echoedIdentity(staged) }) as ToolCall;
+  }
   const targets: Array<Record<string, unknown>> = [];
   let keepComments = false;
   for (const target of staged.state.targets) {
@@ -1011,6 +1038,13 @@ const READ_PROSE_KEYS: readonly string[] = ["note", "focus", "hint", "headings_n
 
 /** The payload without its cheapest prose member, or `undefined` when none is left. A NUL-strip disclosure is never prose. */
 function peelReadProse(payload: ShedPayload): ShedPayload | undefined {
+  // A3: a csv read's only prose is inside its content. `selected_by` and the
+  // continuation still say the view is partial once it is gone.
+  const content = payload["content"];
+  if (isRecord(content) && content["form"] === "csv" && content["note"] !== undefined) {
+    const { note: _note, ...rest } = content;
+    return { ...payload, content: rest };
+  }
   for (const key of READ_PROSE_KEYS) {
     if (payload[key] === undefined || carriesStripDisclosure(payload[key])) continue;
     const peeled: ShedPayload = { ...payload };
@@ -1242,7 +1276,10 @@ export function fitStagedReadToBudget(input: {
   const { staged, claim, limit, measure } = input;
   let candidate = input.payload;
   if (candidate["kind"] === "refusal") return { ok: true, payload: candidate, shrunk: false };
-  if (staged.mode === "open" && !claim.budgetDeclared && !claim.shed) return { ok: true, payload: candidate, shrunk: false };
+  // A3: the same exception as the tail's. An artifact window's opening response
+  // always carries the cursor, so it is always sized with it.
+  const artifactWindow = staged.state.targets.some((target) => target.artifact !== undefined);
+  if (staged.mode === "open" && !claim.budgetDeclared && !claim.shed && !artifactWindow) return { ok: true, payload: candidate, shrunk: false };
   const cursor = mintReadCursor(staged);
   if (cursor === undefined && input.stateless !== true) return { ok: true, payload: candidate, shrunk: false };
   const call = cursor !== undefined

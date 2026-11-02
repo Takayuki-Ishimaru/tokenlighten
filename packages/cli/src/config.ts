@@ -12,6 +12,13 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { dirname } from "path";
 import { parse, stringify } from "smol-toml";
 import { makeTmpPath, retryRename } from "./atomicWrite.js";
+import {
+  createDirectoryMode,
+  createFileMode,
+  existingFileMode,
+  keepExistingFileMode,
+  type FileVisibility,
+} from "./fileMode.js";
 
 export type TomlValue =
   | string
@@ -65,16 +72,27 @@ export function readConfig(filePath: string): TomlDocument {
 /**
  * Write a TOML document to a file atomically (tmp → rename).
  * Creates parent directories if needed.
+ *
+ * `visibility` (see fileMode.ts) defaults to "private" (0600 file, 0700
+ * directory): the user-level registry and host configs are per-user state. A
+ * project-shared file (`.codex/config.toml`) passes "shared" and gets the
+ * process default mode instead. Replacing an existing file keeps its mode.
  */
-export function writeConfig(filePath: string, doc: TomlDocument): void {
+export function writeConfig(
+  filePath: string,
+  doc: TomlDocument,
+  visibility: FileVisibility = "private",
+): void {
   const dir = dirname(filePath);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  mkdirSync(dir, { recursive: true, mode: createDirectoryMode(visibility) });
 
   const serialized = stringify(doc as Record<string, unknown>);
   // tmp lives in same directory as target — avoids EXDEV on Linux tmpfs mounts
   const tmpPath = makeTmpPath(filePath);
+  const previousMode = existingFileMode(filePath);
 
-  writeFileSync(tmpPath, serialized, { encoding: "utf-8", mode: 0o600 });
+  writeFileSync(tmpPath, serialized, { encoding: "utf-8", mode: createFileMode(visibility) });
+  keepExistingFileMode(tmpPath, previousMode);
   // Atomic rename with EBUSY retry (Windows file-lock); EROFS bubbles immediately.
   retryRename(tmpPath, filePath);
 }

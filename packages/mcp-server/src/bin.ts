@@ -29,12 +29,15 @@
 //                   written into generated MCP client config) — see
 //                   util/schemaStamp.ts for why this exists.
 
+//
+// A server started directly (`node dist/bin.js`, the `tl-mcp` bin) restarts itself
+// once with --liftoff-only; see util/wasmBaselineLaunch.ts. The server's modules are
+// imported after that decision, so the process that only waits stays small.
+
 import { fileURLToPath } from "node:url";
 import * as path from "node:path";
 
-import { computedConfigSha256 } from "./util/trace.js";
-import { computeSchemaStamp } from "./util/schemaStamp.js";
-import { run, stampedToolSurfaces } from "./server.js";
+import { relaunchWithWasmBaseline } from "./util/wasmBaselineLaunch.js";
 
 /** Exported for unit testing without spawning the CLI or the MCP server. */
 export function printConfigDigestRequested(argv: readonly string[]): boolean {
@@ -55,19 +58,28 @@ export function printSchemaStampRequested(argv: readonly string[]): boolean {
 const IS_MAIN = typeof process.argv[1] === "string"
   && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
-if (IS_MAIN) {
+// No top-level await: the VS Code extension bundles this file as CommonJS.
+async function main(): Promise<void> {
   if (printConfigDigestRequested(process.argv.slice(2))) {
+    const { computedConfigSha256 } = await import("./util/trace.js");
     process.stdout.write(`${computedConfigSha256()}\n`);
     process.exit(0);
   } else if (printSchemaStampRequested(process.argv.slice(2))) {
+    const { computeSchemaStamp } = await import("./util/schemaStamp.js");
+    const { stampedToolSurfaces } = await import("./server.js");
     process.stdout.write(`${computeSchemaStamp(stampedToolSurfaces())}\n`);
     process.exit(0);
-  } else {
-    run().catch((err: unknown) => {
-      process.stderr.write(
-        `[tl-mcp] fatal: ${err instanceof Error ? err.message : String(err)}\n`,
-      );
-      process.exit(1);
-    });
+  } else if (!relaunchWithWasmBaseline(process.argv[1]!, process.argv.slice(2))) {
+    const { run } = await import("./server.js");
+    await run();
   }
+}
+
+if (IS_MAIN) {
+  main().catch((err: unknown) => {
+    process.stderr.write(
+      `[tl-mcp] fatal: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    process.exit(1);
+  });
 }

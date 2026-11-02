@@ -326,6 +326,8 @@ export interface WalkOmissions {
   gitignored: number;
   tokenlighten_ignored: number;
   oversize: number;
+  /** Which files `oversize` counted, once each: a caller has to name one to re-scope at it. */
+  oversize_paths?: string[];
   symlinks: number;
   /** Generic-text probe rejected the file as binary or invalid UTF-8. */
   non_text: number;
@@ -415,7 +417,11 @@ function loadGitignorePatternsCached(workspace: string): string[] {
   const key = path.resolve(workspace);
   const cached = gitignorePatternsCache.get(key);
   if (cached !== undefined) return cached;
-  const patterns = loadWorkspaceGitignorePatterns(key);
+  // The user-authored layer is never lifted, and it wins attribution in
+  // classifyIgnored, so no walk reaches a .gitignore rule below one of its exclusions.
+  const userPatterns = loadTokenlightenIgnorePatterns(key);
+  const userIgnored = userPatterns.length > 0 ? createPatternMatcherSync(userPatterns) : null;
+  const patterns = loadWorkspaceGitignorePatterns(key, (relDir) => userIgnored?.ignores(`${relDir}/`) === true);
   gitignorePatternsCache.set(key, patterns);
   return patterns;
 }
@@ -884,7 +890,7 @@ function walkCodeFilesCore(workspace: string, opts: WalkOptions): FoundFile[] {
         (extraBasenames?.has(base) ?? false) ||
         artifactMatch;
       if (stat.size > sizeCapBytes) {
-        if ((knownMatch || includeGenericText) && om) om.oversize += 1;
+        if ((knownMatch || includeGenericText) && om) noteOversizeFile(om, relPath);
         return out;
       }
       const secretMatch = includeGenericText && looksLikeSecretFile(relPath);
@@ -981,12 +987,24 @@ function requestWalkCacheKey(workspace: string, opts: WalkOptions): string {
   });
 }
 
+function noteOversizeFile(om: WalkOmissions, relPath: string): void {
+  const paths = om.oversize_paths ??= [];
+  if (paths.includes(relPath)) return;
+  paths.push(relPath);
+  om.oversize += 1;
+}
+
+/** Adds `delta`'s oversize files to `target`'s; a second walk over the same tree does not count one twice. */
+export function mergeOversizeOmissions(target: WalkOmissions, delta: WalkOmissions): void {
+  for (const relPath of delta.oversize_paths ?? []) noteOversizeFile(target, relPath);
+}
+
 /** Additive replay: `target`'s pre-existing counts are preserved, `delta`'s are added on top — see WalkRequestCacheEntry's doc comment for why this must never be an overwrite. */
 function addOmissionsInto(target: WalkOmissions, delta: WalkOmissions): void {
   target.ignored += delta.ignored;
   target.gitignored += delta.gitignored;
   target.tokenlighten_ignored += delta.tokenlighten_ignored;
-  target.oversize += delta.oversize;
+  mergeOversizeOmissions(target, delta);
   target.symlinks += delta.symlinks;
   target.non_text += delta.non_text;
   target.secrets += delta.secrets;
@@ -1126,7 +1144,7 @@ function walkDir(
       let size: number;
       try { size = fs.statSync(absPath).size; } catch { continue; }
       if (size > sizeCapBytes) {
-        if ((knownMatch || includeGenericText) && om) om.oversize += 1;
+        if ((knownMatch || includeGenericText) && om) noteOversizeFile(om, relPath);
         continue;
       }
       const secretMatch = includeGenericText && looksLikeSecretFile(relPath);

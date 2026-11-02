@@ -14,6 +14,7 @@ import { homedir, platform, release } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import JSZip from "jszip";
 import type {
+  TokenLightenBaselineMethod,
   TokenLightenClient,
   TokenLightenPrivacyReport,
   TokenLightenSessionModelUsage,
@@ -365,7 +366,12 @@ export interface UsageObservation {
   durationMs: number;
   responseBytes: number;
   baselineTokens?: number | null;
-  baselineMethod?: "file-bytes" | null;
+  /**
+   * How `baselineTokens` was measured: `"file-bytes"` for whole-file reads,
+   * `"range-bytes"` when any measured read was a ranged/symbol/handle slice
+   * (see `TokenLightenBaselineMethod`). Defaults to `"file-bytes"`.
+   */
+  baselineMethod?: TokenLightenBaselineMethod | null;
   writeEnabled: boolean;
   /**
    * V13: the dispatch-resolved task-correlation ref (server.ts's
@@ -549,7 +555,11 @@ function isUsageEvent(value: unknown): value is TokenLightenUsageEvent {
     && typeof event.estimatedResponseTokens === "number"
     && (event.baselineTokens === null || typeof event.baselineTokens === "number")
     && (event.estimatedSavedTokens === null || typeof event.estimatedSavedTokens === "number")
-    && (event.baselineMethod === null || event.baselineMethod === "file-bytes")
+    && (
+      event.baselineMethod === null
+      || event.baselineMethod === "file-bytes"
+      || event.baselineMethod === "range-bytes"
+    )
     && typeof event.writeEnabled === "boolean"
     // schemaVersion:1 lines have no `taskRef` key at all (excluded by the
     // closed field-set check above); schemaVersion:2 lines always carry it,
@@ -1118,6 +1128,12 @@ export function summarizeUsage(
   let successfulCalls = 0;
   let estimatedResponseTokens = 0;
   let measuredBaselineCalls = 0;
+  // A baseline-bearing event without a recorded method predates `range-bytes`
+  // and was always a whole-file measurement.
+  const measuredBaselineCallsByMethod: Record<TokenLightenBaselineMethod, number> = {
+    "file-bytes": 0,
+    "range-bytes": 0,
+  };
   let measuredResponseTokens = 0;
   let measuredBaselineTokens = 0;
   let measuredResponseBytes = 0;
@@ -1132,6 +1148,7 @@ export function summarizeUsage(
     estimatedResponseTokens += event.estimatedResponseTokens;
     if (event.outcome === "ok" && event.baselineTokens !== null) {
       measuredBaselineCalls++;
+      measuredBaselineCallsByMethod[event.baselineMethod ?? "file-bytes"]++;
       measuredCallsByClient[event.client]++;
     }
   }
@@ -1245,6 +1262,10 @@ export function summarizeUsage(
     measuredResponseBytes,
     measuredBaselineBytes: measuredBaselineTokens * 4,
     method: "file-bytes",
+    // The baseline is what native reads of the same files/ranges would have
+    // returned: an estimate, never billed cost.
+    baselineBasis: "native-read-estimate",
+    measuredBaselineCallsByMethod,
     estimatedSavedTokens,
     estimatedReductionPercent: estimatedTokenReductionPercent,
     estimatedTokenReductionPercent,

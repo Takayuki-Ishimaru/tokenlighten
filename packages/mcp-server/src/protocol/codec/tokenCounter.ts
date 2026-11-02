@@ -13,21 +13,12 @@
 // -- see selectV2.ts's header for why that matters for the default-cell
 // non-inferiority acceptance row.
 //
-// WHY NO REAL TOKENIZER SHIPS HERE. `js-tiktoken` (root devDependency,
-// consumed today only by bench/workflows/lib/token_measurement.mjs) is
-// present in this repo, but it is adjudicated devDependency-only and never
-// reachable from a runtime `import` (see
-// __tests__/helpers/wireSweepRandom.ts's header, and this workstream's own
-// final report for the full precedent trail: TL-PROTOCOL-V1-PHASE3A-
-// CLAUDE.md F-12, TL-P3A-MERGE-VERIFICATION-PACK-2026-08-14.md WB.14-16).
-// `packages/mcp-server/package.json` does not declare it even as a
-// devDependency today, and adding that declaration is a shared-manifest
-// decision outside this workstream's owned `protocol/codec/` scope -- so
-// this module ships ONLY the interface and the byte counter; a real
-// tokenizer (or, today, a deterministic fake standing in for one) is
-// injected by the CALLER. See __tests__/wireCodecV2Selection.spec.ts's
-// `fakeTokenCounter` for the test-side proof that a counter whose ordering
-// diverges from byte length actually drives selection.
+// A REAL TOKENIZER LIVES NEXT DOOR. This module ships only the interface and
+// the byte counter. tokenizerResolver.ts provides the opt-in js-tiktoken
+// counter (a runtime dependency of this package since 2026-10-30, lazily loaded
+// and only when TL_WIRE_TOKENIZER asks for it); __tests__/wireCodecV2Selection.
+// spec.ts's fixed counters prove that a counter whose ordering diverges from
+// byte length drives selection.
 // ---------------------------------------------------------------------------
 
 import { measureResponseBytes } from "../budget/measure.js";
@@ -36,6 +27,13 @@ import { measureResponseBytes } from "../budget/measure.js";
 export interface TokenCounter {
   /** Stable identifier; becomes the encoding cache's tokenizer-id key component and the per-cell trace's `tokenizer_id`. */
   readonly id: string;
+  /**
+   * What one count means, when the counter declares it. `"tokens"` selects the
+   * token break-even policy (breakeven.ts), which never reuses a byte-denominated
+   * threshold. Undeclared counters (test fixtures) keep the historical
+   * "thresholds are in this counter's own units" reading.
+   */
+  readonly unit?: "bytes" | "tokens";
   /** Deterministic for a given `id` + `text` -- encodingCache.ts's cache-correctness proof depends on this. */
   count(text: string): number;
 }
@@ -43,6 +41,7 @@ export interface TokenCounter {
 /** The default, always-available counter: today's byte comparison, unchanged. */
 export const byteCounter: TokenCounter = {
   id: "bytes",
+  unit: "bytes",
   count(text: string): number {
     return measureResponseBytes(text);
   },

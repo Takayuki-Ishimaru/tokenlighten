@@ -23,6 +23,7 @@ import { STUB_TARGETS } from "./stubs.js";
 import { renderCompactBlock, renderTargetPreamble } from "./render.js";
 import { migrateLegacyTargetPath } from "./migrateLegacyTarget.js";
 import { assertSafeWriteTarget, ensureSafeWriteParent } from "./safeWritePath.js";
+import { SHARED_FILE_MODE, existingFileMode, keepExistingFileMode } from "./fileMode.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -213,7 +214,8 @@ function atomicWrite(repoRoot: string, absPath: string, content: string): void {
   assertSafeWriteTarget(repoRoot, absPath);
   const tmpPath = `${absPath}.tl-tmp-${randomBytes(6).toString("hex")}`;
   try {
-    writeFileSync(tmpPath, content, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    writeFileSync(tmpPath, content, { encoding: "utf8", flag: "wx", mode: SHARED_FILE_MODE });
+    keepExistingFileMode(tmpPath, existingFileMode(absPath));
     ensureSafeWriteParent(repoRoot, absPath, false);
     assertSafeWriteTarget(repoRoot, absPath);
     renameSync(tmpPath, absPath);

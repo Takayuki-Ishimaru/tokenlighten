@@ -119,7 +119,8 @@ export type StoredPurpose =
   | "content"
   | "qref"
   | "read-request"
-  | "search-request";
+  | "search-request"
+  | "snapshot";
 
 export interface StoredRecord {
   key: string;
@@ -829,6 +830,7 @@ const STORED_PURPOSES_BY_KEY = {
   qref: true,
   "read-request": true,
   "search-request": true,
+  snapshot: true,
 } satisfies Record<StoredPurpose, true>;
 const STORED_PURPOSES: readonly StoredPurpose[] = Object.keys(STORED_PURPOSES_BY_KEY) as StoredPurpose[];
 const STORED_PURPOSE_SET: ReadonlySet<string> = new Set<string>(STORED_PURPOSES);

@@ -88,7 +88,10 @@ function hintOf(body: Body): string | undefined {
 
 /** 6t-8 #1: the request's first read, a query and no targets. Returns its task id. */
 async function openRequest(ws: string): Promise<string> {
-  const pack = await call("tl_read_file", { query: "explain how priceOrder applies taxOf", task: EPOCH_NEW, cwd: ws });
+  // The request names `priceOrder` only. Naming `taxOf` too would serve its declaration (src/tax.ts 1-3) in
+  // this very pack (anchor-first: a defined identifier the request names is served), and the later targets-only
+  // reads of src/tax.ts would then be `code-unchanged` receipts instead of the read.text these pins are about.
+  const pack = await call("tl_read_file", { query: "explain how priceOrder computes the total for a region", task: EPOCH_NEW, cwd: ws });
   expect(pack["kind"], JSON.stringify(pack).slice(0, 400)).toBe("read.task_pack");
   expect(String(pack["advisory"] ?? "")).not.toContain(advisories().read);
   const id = (pack["task"] as Body | undefined)?.["id"];

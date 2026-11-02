@@ -157,7 +157,13 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
     beforeAll(async () => {
       ws = fs.realpathSync(shortTmpDir(HOME, `.tl-zoomview-${config}-`));
       buildZoomFixtureWorkspace(ws);
-      server = startDevServer(ws, config);
+      // Anchor-first (2026-10-29) serves the declaration of every function the request names in hop 0, so with it
+      // on the three functions of QUERY are all settled by hop 0 (act.answer) and there is no `remaining` range
+      // left to zoom into. This spec pins what the SERVER does with a zoom made after a pack that left an
+      // identifier open (the epoch-served view), not what a pack leaves open: the fixture's premise — the
+      // readiness probe inlines one window, so the tail function stays for a follow-up — is that of the pack
+      // without anchors, so its servers run with the rollback switch.
+      server = startDevServer(ws, config, { extraEnv: { TL_ANCHOR_FIRST: "0" } });
       await server.initialize();
     }, 60_000);
 
@@ -202,6 +208,9 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       // `task` field at all — exactly the shape held item 4 describes.
       const hop1 = await server.callTool("tl_read_file", { targets: [{ handle, range: ZOOM_RANGE }], cwd: ws, lane });
       expect(hop1.body?.kind).toBe("read.text");
+      // A line the pack already served comes back as a `prior` reference, not again (2026-10-29 duplicate-range
+      // fix; config=vscode serves the declaration line in hop 0): the identifier is in hop 0's or the zoom's
+      // bytes, and the zoom itself serves the body the pack left open.
       expect(
         [...hop0.body.evidence, ...hop1.body.evidence].some((row: { body?: string }) => row.body?.includes(ZOOM_IDENTIFIER)),
         `the initial pack and zoom must carry the identifier: ${JSON.stringify(hop1.body)}`,

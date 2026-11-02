@@ -72,7 +72,8 @@ import {
   type ProtocolCallContext,
 } from "./envelope.js";
 import { buildRefusal } from "./refusal.js";
-import { recordFullServeCompleteness, settleServedCallBookings } from "../state/session.js";
+import { getSession, recordFullServeCompleteness, settleServedCallBookings } from "../state/session.js";
+import type { StagedReadRequest } from "../state/readRequestStore.js";
 import {
   applyReadRequestContinuation,
   demoteActAfterShed,
@@ -87,12 +88,15 @@ import {
   rewindSearchRequestDelivered,
   shrinkSearchPageToFit,
 } from "./searchRequestContinuation.js";
-import { recordServedBytes } from "../util/packServeLog.js";
+import { recordServedBytes, recordTaskExploration, taskExplorationSpend } from "../util/packServeLog.js";
+import { explorationBudgetExhausted } from "../util/continuation.js";
+import { isLowValueDocPath, queryNamesDocPath } from "../util/docPaths.js";
 import { decisionInvariantStrictEnabled } from "../util/flags.js";
 import { applyResponseCodec } from "./codec/pipeline.js";
 import { resolveReadReplyCeiling } from "./codec/clientProfile.js";
 import { ledgerCertificateBindingValid } from "./ledgerCertificateBinding.js";
 import { omitCoveredFrontierIndex } from "./frontierIndexDedup.js";
+import { attachEditRulesOnce } from "./editRules.js";
 import { compactReplyEnvelope, restateObligationsFromEvidence } from "./wireCompaction.js";
 import { groupEvidencePaths } from "./evidencePathGroups.js";
 import { trace, isTraceEnabled } from "../util/trace.js";
@@ -661,7 +665,10 @@ export function emitFinalizedPayload(
     ? requestBudgetBytes(context.readRequest.state.budget)
     : undefined;
   const trimToInherited = inheritedBudgetBytes !== undefined && used <= inheritedBudgetBytes * RESUME_TRIM_SLACK;
-  if (context.readRequest !== undefined && (onWire === "read.text" || onWire === "read.batch")) {
+  // A3: a csv window's rows cannot be narrowed here (a row's lines are only known to
+  // the producer), but it is held to the same order: refused before anything books.
+  const stagedArtifactWindow = onWire === "read.artifact" && context.readRequest?.state.targets.some((target) => target.artifact !== undefined) === true;
+  if (context.readRequest !== undefined && (onWire === "read.text" || onWire === "read.batch" || stagedArtifactWindow)) {
     const fit = fitStagedReadToBudget({
       payload: current,
       staged: context.readRequest,
@@ -778,6 +785,16 @@ export function emitFinalizedPayload(
   });
   if (continued !== current) {
     current = continued;
+    text = wireText(current);
+    used = measureResponseBytes(text);
+  }
+  // 2026-10-29 (first-hop field report): the settle tail of a changelog chain.
+  // Runs AFTER the continuation is minted so it sees the page's real `next`,
+  // and changes nothing but that `next`: the rows (and the `remaining` they
+  // carry) are exactly what the settle booked, so nothing is claimed as served.
+  const withheld = withholdLowValuePageNext(current, context.readRequest, used);
+  if (withheld !== current) {
+    current = withheld;
     text = wireText(current);
     used = measureResponseBytes(text);
   }
@@ -964,6 +981,9 @@ export function emitFinalizedPayload(
     // The call as the dispatch knew it: its arguments and whether the task it continues passed `surfaceRoles`.
     const compacted = compactReplyEnvelope(current, onWire, context);
     if (compacted !== current) { current = compacted; text = JSON.stringify(current); }
+    // An edit reply's `limit` is its calibrated row, so the client's ceiling, which its post-edit windows were cut to, binds here.
+    const ruled = attachEditRulesOnce(current, onWire, context.clientId, context.workspace ?? context.codecTraceWorkspace, Math.min(limit, resolveReadReplyCeiling(context.clientId) ?? limit) - measureResponseBytes(text));
+    if (ruled !== current) { current = ruled; text = JSON.stringify(current); }
     const grouped = groupEvidencePaths(current);
     if (grouped !== current) {
       // `text` may be the ladder's own (already grouped) serialization: the
@@ -1572,6 +1592,18 @@ function noteEmission(
   const args = context.args;
   const epoch = typeof args?.["taskEpoch"] === "string" ? args["taskEpoch"] : undefined;
   const lane = typeof args?.["lane"] === "string" ? args["lane"] : undefined;
+  // 2026-10-29: the active task epoch's exploration spend. A read/search call
+  // never sets `context.workspace` (edit dispatches do), so the served-bytes
+  // ledger below stays blind to them; `readServeWorkspace` is the read-scoped
+  // slot. Separate from that ledger on purpose — see `recordTaskExploration`.
+  const explorationRoot = context.workspace ?? context.readServeWorkspace;
+  if (
+    explorationRoot !== undefined && explorationRoot !== ""
+    && (context.tool === "tl_read_file" || context.tool === "tl_search_files")
+    // A refusal delivered no evidence (a malformed call, a budget floor): it is
+    // not exploration, and a run of them must not spend the task's budget.
+    && kind !== "refusal"
+  ) recordTaskExploration(explorationRoot, budget.used);
   const workspace = context.workspace;
   if (workspace === undefined || workspace === "") return;
   // B-F5 (2026-08-28): named "budget-shed", not "trim" — `trimmed` here is
@@ -1603,6 +1635,71 @@ function noteEmission(
     forceServe: args?.["force_serve"] === true,
   });
   context.servedBytesNovel = ledgerResult.novel;
+}
+
+/**
+ * 2026-10-29 (first-hop field report) — THE PAGE CHAIN OF A CHANGELOG ENDS
+ * WHEN THE TASK'S EXPLORATION BUDGET DOES.
+ *
+ * A pack that no longer proposes a History.md zoom (canonicalDecision.ts's
+ * `docZoomAllowed`) still cannot stop a chain that already started: every page
+ * of a staged read mints the next cursor (`applyReadRequestContinuation`), and
+ * the express run walked 3,928 lines that way, ten hops, 129 KB, without ever
+ * serving res.redirect. When the active task has spent its budget
+ * (`TASK_EXPLORATION_MAX_HOPS` / `_MAX_BYTES`) and every document this request
+ * pages is a changelog / release log / docs page the task's own query does not
+ * name, the continuation is simply not minted: `next` goes, and a `wire`/`records`
+ * `limit` — which REQUIRES a `next` — becomes `capped` ("it exists and this
+ * response could not reach it"), the cause that forbids one. Only a `resume`
+ * page is touched — the call that OPENED the request keeps its first
+ * continuation, so an explicit read of a changelog is never cut off at page one.
+ * Rows, bodies and the `remaining` windows they carry are untouched, so nothing
+ * is claimed as served and an explicit read of a named range is still one call
+ * away.
+ *
+ * Needs a live task query (`session.activeTaskQuery`): with no task there is no
+ * exploration to bound. The spend is read BEFORE this response is recorded
+ * (`noteEmission`), so the page itself is added here, as the pack stamp does.
+ */
+function withholdLowValuePageNext(
+  payload: ShedPayload,
+  staged: StagedReadRequest | undefined,
+  usedBytes: number,
+): ShedPayload {
+  // A `resume` is a page of a chain being followed; an `open` is a request the
+  // caller just made (explicitly or through a pack zoom) and always gets its
+  // first continuation.
+  if (staged === undefined || staged.mode !== "resume" || payload["kind"] === "refusal") return payload;
+  const paths = staged.state.targets.map((target) => target.path);
+  if (paths.length === 0 || !paths.every((candidate) => isLowValueDocPath(candidate))) return payload;
+  const spend = taskExplorationSpend(staged.workspaceRoot);
+  if (!explorationBudgetExhausted(spend.hops, spend.bytes + usedBytes)) return payload;
+  const query = getSession(staged.workspaceRoot).activeTaskQuery?.query;
+  if (query === undefined || query === "" || paths.some((candidate) => queryNamesDocPath(query, candidate))) return payload;
+  const isCall = (value: unknown): boolean =>
+    value !== null && typeof value === "object" && !Array.isArray(value)
+    && (value as Record<string, unknown>)["tool"] === "tl_read_file";
+  const out: ShedPayload = { ...payload };
+  let changed = false;
+  if (isCall(out["next"])) {
+    delete out["next"];
+    changed = true;
+  }
+  const limit = out["limit"];
+  if (limit !== null && typeof limit === "object" && !Array.isArray(limit) && isCall((limit as Record<string, unknown>)["next"])) {
+    const omitted = (limit as Record<string, unknown>)["omitted"];
+    out["limit"] = { cause: "capped", ...(Array.isArray(omitted) && omitted.length > 0 ? { omitted } : {}) };
+    changed = true;
+  }
+  const receipt = out["receipt"];
+  if (receipt !== null && typeof receipt === "object" && !Array.isArray(receipt) && isCall((receipt as Record<string, unknown>)["next"])) {
+    const { next: _withheld, ...rest } = receipt as Record<string, unknown>;
+    out["receipt"] = rest;
+    changed = true;
+  }
+  if (!changed) return payload;
+  trace("exploration_page_withheld", { paths, hops: spend.hops, bytes: spend.bytes + usedBytes }, staged.workspaceRoot);
+  return out;
 }
 
 /**

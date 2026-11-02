@@ -105,7 +105,7 @@ const HANDLE_EPOCH_MS = Date.UTC(2020, 0, 1);
 /**
  * The on-token purpose code. APPEND-ONLY: a code is part of the MAC input via
  * the body, so re-numbering one would invalidate every outstanding token of
- * that purpose. 4/5 are DESIGN-v0.15 R2/R3's fetch-request purposes.
+ * that purpose. 4/5 are DESIGN-v0.15 R2/R3's fetch-request purposes; 6 is B1's snapshot.
  */
 const PURPOSE_CODES: Record<StateHandlePurpose, number> = {
   task: 1,
@@ -113,6 +113,7 @@ const PURPOSE_CODES: Record<StateHandlePurpose, number> = {
   continuation: 3,
   "read-request": 4,
   "search-request": 5,
+  snapshot: 6,
 };
 const PURPOSE_BY_CODE = new Map<number, StateHandlePurpose>(
   STATE_HANDLE_PURPOSES.map((p) => [PURPOSE_CODES[p], p]),

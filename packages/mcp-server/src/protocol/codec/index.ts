@@ -50,6 +50,13 @@ export { applyResponseCodec, resetV2CacheForTest, type ApplyResponseCodecV2Overr
 export { classifyShape, type ShapeClass } from "./shape.js";
 export { byteCounter, type TokenCounter } from "./tokenCounter.js";
 export {
+  ensureWireTokenizerLoaded,
+  resolveWireTokenizer,
+  type RealTokenCounter,
+  type TokenizerResolution,
+} from "./tokenizerResolver.js";
+export { measureTokenShadow, type TokenShadowRecord } from "./tokenShadow.js";
+export {
   resolveClientProfile,
   isCodecAllowedForClient,
   isProfileStale,

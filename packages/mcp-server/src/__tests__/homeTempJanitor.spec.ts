@@ -15,6 +15,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { sweepHomeTempDirs, trackedHomeTempDirs } from "./helpers/homeTempJanitor.setup.js";
+import { sweepStaleHomeFixtures } from "./helpers/homeTempStaleSweep.global.js";
 
 const HOME = os.homedir();
 const outsideHome: string[] = [];
@@ -26,6 +27,34 @@ afterAll(() => {
 function isTracked(dir: string): boolean {
   return trackedHomeTempDirs.has(path.resolve(dir));
 }
+
+describe("sweepStaleHomeFixtures: what a killed worker left", () => {
+  it("removes only old directories named like a fixture", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "tl-stale-sweep-"));
+    outsideHome.push(home);
+    const now = Date.now();
+    const make = (name: string, ageDays: number, file = false): void => {
+      const target = path.join(home, name);
+      if (file) fs.writeFileSync(target, "x");
+      else fs.mkdirSync(target);
+      const when = new Date(now - ageDays * 24 * 60 * 60 * 1000);
+      fs.utimesSync(target, when, when);
+    };
+    make(".tl-go-review-4QvGKT", 8);
+    make(".tl-csv-section-a1B2c3", 30);
+    make(".tl-live-run-Abc123", 6);
+    make(".tl-notes", 30);
+    make(".tl-file-a1B2c3", 30, true);
+    make(".tokenlighten", 30);
+    make("project-a1B2c3", 30);
+    expect(sweepStaleHomeFixtures(home, now).sort()).toEqual([".tl-csv-section-a1B2c3", ".tl-go-review-4QvGKT"]);
+    expect(fs.readdirSync(home).sort()).toEqual([".tl-file-a1B2c3", ".tl-live-run-Abc123", ".tl-notes", ".tokenlighten", "project-a1B2c3"]);
+  });
+
+  it("a home it cannot read removes nothing", () => {
+    expect(sweepStaleHomeFixtures(path.join(os.tmpdir(), "tl-no-such-home"), Date.now())).toEqual([]);
+  });
+});
 
 describe("homeTempJanitor: what gets tracked", () => {
   it("tracks a HOME child created through the namespace import, the named import and fs.promises", async () => {

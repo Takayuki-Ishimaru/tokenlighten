@@ -15,6 +15,8 @@
 //   3. `profile_binding.reason`, when it only explains an inference.
 //   4. `search.tree`'s `scope_report.excluded_by_reason`, when nothing was
 //      excluded and the walk was complete.
+//   5. What a csv lookup's `act.answer` carries beside the rows it answers with
+//      (`compactCsvLookupAnswer`). Only a reply that holds a `lookup` reaches it.
 //
 // A fifth rule, an `obligations[]` entry's `path` / `range` / `role` when the
 // first evidence row of its `handle` carries the same value, is NOT in this set:
@@ -253,8 +255,48 @@ export function resolveObligations(obligations: readonly unknown[], evidence: re
   });
 }
 
+/**
+ * A csv lookup that ended the request: `act.answer` on one sampled table whose
+ * `lookup` holds what it needs. Only then is the rest of the entry paid for and never
+ * read: how to read past the sample (the evidence row's handle still reads any row),
+ * `scanned` (the note says it), and the pack's own bookkeeping about the same section:
+ * `inlined`, and what only a later call of this request would use: the certificate,
+ * `qref` and the whole `task`. The file's name stands once. With rows to show, the sample and its range go too; with none, the sample
+ * is what is left to read the table's shape from. Two members also cost thinking:
+ * solvers stopped to reconcile `row_numbers` with the table's own ids, and
+ * `task.coverage:"partial"`, which only says the sample is short, with a full search.
+ */
+function compactCsvLookupAnswer(payload: Row): Row {
+  const decision = record(payload["decision"]);
+  const plan = record(payload["plan"]);
+  const sections = plan?.["artifact_sections"];
+  if (decision?.["kind"] !== "act.answer" || plan === undefined || !Array.isArray(sections) || sections.length !== 1) return payload;
+  const entry = record(sections[0]);
+  const section = record(entry?.["section"]);
+  const lookup = record(section?.["lookup"]);
+  const rows = lookup?.["rows"];
+  const numbers = lookup?.["row_numbers"];
+  if (entry === undefined || section === undefined || lookup === undefined || !Array.isArray(rows) || section["truncated"] !== true) return payload;
+  if (lookup["counted"] !== true && (!Array.isArray(numbers) || numbers.length !== lookup["total"])) return payload;
+  const { rows: _sample, range: _range, truncated: _truncated, ...unsampled } = section;
+  const table = rows.length > 0 || lookup["counted"] === true ? unsampled : section;
+  const { sheet: _sheet, ...named } = table;
+  const { scanned: _scanned, row_numbers: _numbers, terms: _terms, ...withoutTerms } = lookup;
+  const { scanned: _s, row_numbers: _n, ...withTerms } = lookup;
+  const kept = lookup["all_of"] === undefined ? withTerms : withoutTerms;
+  const { path: _path, handle: _handle, content_completeness: _completeness, remaining_sections: _remaining, ...entryRest } = entry;
+  const { inlined: _inlined, ...planRest } = plan;
+  const { certificate: _certificate, ...decisionRest } = decision;
+  const { qref: _qref, task: _task, profile: _profile, ...rest } = payload;
+  return {
+    ...rest,
+    decision: decisionRest,
+    plan: { ...planRest, artifact_sections: [{ ...entryRest, section: { ...named, lookup: kept } }] },
+  };
+}
+
 function compactTaskPack(payload: Row, call: CompactionCall | undefined): Row {
-  let current = payload;
+  let current = compactCsvLookupAnswer(payload);
   const evidence = payload["evidence"];
   if (Array.isArray(evidence)) {
     const rows = compactEvidence(evidence, !requestPassedSurfaceRoles(call));

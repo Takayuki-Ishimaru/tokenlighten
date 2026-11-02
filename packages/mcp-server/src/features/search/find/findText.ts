@@ -21,9 +21,10 @@
 import * as fs from "fs";
 import * as path from "path";
 import type { FoundFile, LangKey } from "../../../tools/walkRepo.js";
-import { walkCodeFiles, createWalkOmissions, anyWalkOmission, genericTextDiscoveryEnabled, TEXT_SCAN_MAX_FILE_SIZE_BYTES, type WalkOmissions } from "../../../tools/walkRepo.js";
+import { walkCodeFiles, createWalkOmissions, anyWalkOmission, genericTextDiscoveryEnabled, mergeOversizeOmissions, TEXT_SCAN_MAX_FILE_SIZE_BYTES, type WalkOmissions } from "../../../tools/walkRepo.js";
 import { deriveTokenVariants } from "../../../util/impact.js";
 import { decodeTextBuffer } from "../../../util/textDecode.js";
+import { readFileForRequest } from "../../../util/requestFileCache.js";
 import { tokenizeQuery as tokenizeQueryShared } from "../../../util/queryShape.js";
 import { regexSignatureLines } from "../../../skeleton/regexFallback.js";
 import { languageForPath } from "../../../util/languages.js";
@@ -177,6 +178,22 @@ function normalizeFindUniverseScope(raw: string): string {
 }
 
 /**
+ * A scope that names one file: `omitted.oversize` tells a caller to re-scope at a
+ * skipped file, so that has to reach it. Above this it stays omitted, since one
+ * request reads a scanned file whole.
+ */
+const SCOPED_FILE_SCAN_MAX_BYTES = 64 * 1024 * 1024;
+
+function scopedFileScanCap(workspace: string, scope: string): number {
+  if (scope === "") return TEXT_SCAN_MAX_FILE_SIZE_BYTES;
+  try {
+    return fs.statSync(path.join(workspace, scope)).isFile() ? SCOPED_FILE_SCAN_MAX_BYTES : TEXT_SCAN_MAX_FILE_SIZE_BYTES;
+  } catch {
+    return TEXT_SCAN_MAX_FILE_SIZE_BYTES;
+  }
+}
+
+/**
  * Enumerate the primary action=find universe once. Literal-first routing calls
  * this same function so extensions, extensionless basenames, gitignore
  * semantics, and the 8 MiB text-scan ceiling cannot drift independently.
@@ -212,7 +229,7 @@ export function enumerateFindTextUniverse(
       fullRecall: true,
       respectGitignore: true,
       omissions,
-      sizeCapBytes: TEXT_SCAN_MAX_FILE_SIZE_BYTES,
+      sizeCapBytes: scopedFileScanCap(workspace, scope),
     })) {
       byPath.set(file.relPath, file);
     }
@@ -267,10 +284,11 @@ export function widenFindUniverseForAbsence(workspace: string, base: FindTextUni
   for (const file of genericFiles) if (!byPath.has(file.relPath)) byPath.set(file.relPath, file);
   const omissions: WalkOmissions = {
     ...base.omissions,
-    oversize: base.omissions.oversize + genericOmissions.oversize,
+    ...(base.omissions.oversize_paths ? { oversize_paths: [...base.omissions.oversize_paths] } : {}),
     non_text: base.omissions.non_text + genericOmissions.non_text,
     secrets: base.omissions.secrets + genericOmissions.secrets,
   };
+  mergeOversizeOmissions(omissions, genericOmissions);
   return {
     files: [...byPath.values()].sort((left, right) => left.relPath.localeCompare(right.relPath)),
     omissions,
@@ -776,7 +794,7 @@ function readLinesCached(absPath: string, cache: ScanContentCache | undefined): 
   if (hit !== undefined) return hit;
   let buf: Buffer;
   try {
-    buf = fs.readFileSync(absPath);
+    buf = readFileForRequest(absPath);
   } catch {
     cache?.lines.set(absPath, null);
     return null;
@@ -792,6 +810,33 @@ function readLinesCached(absPath: string, cache: ScanContentCache | undefined): 
     cache.bytes += buf.length;
   }
   return lines;
+}
+
+/** Why find will not run this pattern, in the caller's terms; undefined when it will. */
+export function regexNotRunReason(query: string): string | undefined {
+  if (query.length > MAX_REGEX_QUERY_CHARS) return `it is longer than ${MAX_REGEX_QUERY_CHARS} characters`;
+  try {
+    new RegExp(query);
+  } catch (error) {
+    return `it does not compile (${error instanceof Error ? error.message : String(error)})`;
+  }
+  return isSafeRegexQuery(query)
+    ? undefined
+    : "find does not run lookarounds, backreferences, repeated groups or adjacent quantifiers";
+}
+
+/** The hint and fields of a regex call none of whose patterns ran. */
+function regexNotRunExtra(queries: readonly string[], extraHint?: string): Record<string, unknown> {
+  const reasons = [...new Set(queries.map((query) => regexNotRunReason(query)!))].join("; ");
+  return {
+    literal: false,
+    matched_terms: [],
+    regex_not_run: [...queries],
+    hint: composeHint(
+      `regex not run, so nothing was searched and this does not show the pattern is absent: ${reasons}. Retry with a simpler pattern, or a literal token and regex:false`,
+      extraHint,
+    ),
+  };
 }
 
 /**
@@ -1266,6 +1311,12 @@ export interface FindResponse {
    * `omitted`), so the claim's boundary is always visible.
    */
   absence?: FindAbsence;
+  /**
+   * The patterns of a regex call that were never run, because `regexNotRunReason`
+   * refused them. Nothing was searched for these, so their empty result says nothing
+   * about whether they match; `hint` says why.
+   */
+  regex_not_run?: string[];
   /**
    * PI-04 (F-A1-2/F-A1-3 register) — one entry per ORIGINAL `queries[]`
    * term, present only on a multi-term call where at least one term missed
@@ -2216,11 +2267,14 @@ function buildAbsenceExtra(args: {
   return { absence, note: ABSENCE_NOTE };
 }
 
+const MAX_OVERSIZE_PATHS_NAMED = 5;
+
 export function buildOmittedExtra(om: WalkOmissions, coverage?: ScanCoverage): Record<string, unknown> {
   const pruned: Partial<WalkOmissions> & { undecodable?: number } = {};
   for (const key of ["ignored", "gitignored", "tokenlighten_ignored", "oversize", "symlinks", "non_text", "secrets", "unreadable_dirs", "outside_workspace", "source_only_excluded"] as const) {
     if (om[key] > 0) pruned[key] = om[key];
   }
+  if (om.oversize_paths !== undefined && om.oversize_paths.length > 0) pruned.oversize_paths = om.oversize_paths.slice(0, MAX_OVERSIZE_PATHS_NAMED);
   // Undecodable text (see decodeTextBuffer/readLinesCached) is scan-time,
   // not walk-time — it lives on ScanCoverage, not WalkOmissions — but must
   // surface through the SAME `omitted` disclosure oversize uses, since it
@@ -3446,6 +3500,10 @@ function buildFindResponseImpl(
     if (notFound !== undefined) return { ...build([]), ...notFound } as unknown as FindResponse;
   }
 
+  if (input.regex && regexNotRunReason(query) !== undefined) {
+    return build([], regexNotRunExtra([query], opts.extraHint));
+  }
+
   // ---- One walk per response. Every pass below scans the same walked file
   // list through one shared content cache instead of re-walking and
   // re-reading per term/probe; the walk's per-layer skip counts are
@@ -3518,7 +3576,7 @@ function buildFindResponseImpl(
         matchedVariant = variant.variant;
       }
     }
-    walkOmissions.oversize += genericOmissions.oversize;
+    mergeOversizeOmissions(walkOmissions, genericOmissions);
     walkOmissions.non_text += genericOmissions.non_text;
     walkOmissions.secrets += genericOmissions.secrets;
     omittedExtra = buildOmittedExtra(walkOmissions, coverage);
@@ -3850,6 +3908,12 @@ function buildFindResponseForQueriesImpl(input: FindTextMultiInput, workspace: s
     if (notFound !== undefined) return { ...build([]), ...notFound } as unknown as FindResponse;
   }
 
+  // A pattern that never ran is an unknown, so it also holds back any certificate below.
+  const regexNotRun = input.regex ? queries.filter((query) => regexNotRunReason(query) !== undefined) : [];
+  if (regexNotRun.length === queries.length && regexNotRun.length > 0) {
+    return build([], regexNotRunExtra(regexNotRun));
+  }
+
   // One walk per response — same contract as buildFindResponse: shared file
   // list + content cache across the 1-10 query terms, `omitted` disclosure on
   // every return path.
@@ -3865,7 +3929,7 @@ function buildFindResponseForQueriesImpl(input: FindTextMultiInput, workspace: s
     // tens of thousands of lines — only the (separate, tree-sitter-driven)
     // symbol/role machinery needs the tighter 1 MB default. See
     // TEXT_SCAN_MAX_FILE_SIZE_BYTES's doc comment.
-    sizeCapBytes: TEXT_SCAN_MAX_FILE_SIZE_BYTES,
+    sizeCapBytes: input.path ? scopedFileScanCap(workspace, input.path) : TEXT_SCAN_MAX_FILE_SIZE_BYTES,
   });
   const contentCache = createScanContentCache();
   const coverage = createScanCoverage();
@@ -3949,7 +4013,7 @@ function buildFindResponseForQueriesImpl(input: FindTextMultiInput, workspace: s
     }
     // Ignore rules were already counted by the semantic walk. Only the
     // generic-only exclusions are merged so `omitted` remains stable.
-    walkOmissions.oversize += genericOmissions.oversize;
+    mergeOversizeOmissions(walkOmissions, genericOmissions);
     walkOmissions.non_text += genericOmissions.non_text;
     walkOmissions.secrets += genericOmissions.secrets;
   }
@@ -3966,15 +4030,15 @@ function buildFindResponseForQueriesImpl(input: FindTextMultiInput, workspace: s
       // Every entry was scanned against the same walked list, so a total miss
       // certifies the absence of the whole OR-set in one call — exactly the
       // multi-token negative an agent would otherwise shell out for.
-      ...buildAbsenceExtra({
+      ...(regexNotRun.length > 0 ? { regex_not_run: regexNotRun } : buildAbsenceExtra({
         tokens: queries,
         coverage,
         omissions: walkOmissions,
         ...(input.path ? { subPath: input.path } : {}),
         ...(input.regex ? { regex: true } : {}),
         caseSensitive: anyCaseSensitiveScan,
-      }),
-      hint: scopeHint ? `${scopeHint} | ${missHint}` : missHint,
+      })),
+      hint: [scopeHint, missHint, regexNotRun.length > 0 ? regexNotRunExtra(regexNotRun)["hint"] : undefined].filter(Boolean).join(" | "),
     };
   }
 
@@ -3994,12 +4058,13 @@ function buildFindResponseForQueriesImpl(input: FindTextMultiInput, workspace: s
   // the unreadable_dirs gate added there covers both shapes from one choke
   // point: `absent` only when that gate actually certifies, else `unknown`.
   const termResults: Record<string, unknown>[] | undefined =
-    queries.length > 1 && missedQueries.length > 0
+    queries.length > 1 && (missedQueries.length > 0 || regexNotRun.length > 0)
       ? queries.map((q) => {
           const matchCount = termMatchCounts.get(q);
           if (matchCount !== undefined) {
             return { original: q, status: "matched", match_count: matchCount };
           }
+          if (regexNotRun.includes(q)) return { original: q, status: "unknown", scope: { completeness: "partial" } };
           const termCaseInsensitive = input.caseInsensitive ?? (!input.regex && isSingleToken(q));
           const termAbsence = buildAbsenceExtra({
             tokens: [q],
@@ -4028,6 +4093,7 @@ function buildFindResponseForQueriesImpl(input: FindTextMultiInput, workspace: s
       ? {}
       : didYouMeanExtra(workspace, missedQueries, missedTokens, 5, coverage.scanned)),
     ...(termResults ? { term_results: termResults } : {}),
+    ...(regexNotRun.length > 0 ? { regex_not_run: regexNotRun, hint: regexNotRunExtra(regexNotRun)["hint"] } : {}),
     ...snippetCap.extra,
   };
   const buildWithExtra = (fs: FindFileGroup[]): FindResponse => build(fs, responseExtra);

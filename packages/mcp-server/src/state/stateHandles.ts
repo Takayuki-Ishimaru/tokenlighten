@@ -353,7 +353,7 @@ export function resolveContinuationHandle<T = unknown>(
  * page N+1 (§5.2: "再送された同じcursorは同じ論理ページを参照し、その再送で別の
  * ページへ進めない").
  */
-export type FetchRequestPurpose = "read-request" | "search-request";
+export type FetchRequestPurpose = "read-request" | "search-request" | "snapshot";
 
 /** A page cursor is short-lived by nature; an hour covers any real paging run. */
 export const FETCH_REQUEST_HANDLE_TTL_MS = 60 * 60 * 1000;

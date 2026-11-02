@@ -1701,7 +1701,7 @@ function artifactContent(body: Body): Body | undefined {
     // would make `bookCsvArtifactServe`'s staged booking permanently inert
     // again (retracted at settlement for want of corroboration), the exact
     // "SAFE but inert" state round-17 finding 3 was in before FX-P1.
-    keep(content, body, ["range", "file_range", "columns", "rows", "total_rows", "total_columns", "dialect", "note"]);
+    keep(content, body, ["range", "file_range", "columns", "rows", "total_rows", "total_columns", "dialect", "note", "selected_by", "row_spans", "counts"]);
     return content;
   }
 
@@ -1723,7 +1723,7 @@ function artifactContent(body: Body): Body | undefined {
   }
   if (Array.isArray(body["rows"])) {
     const content: Body = { form: "csv" };
-    keep(content, body, ["range", "file_range", "columns", "rows", "total_rows", "total_columns", "dialect", "note"]);
+    keep(content, body, ["range", "file_range", "columns", "rows", "total_rows", "total_columns", "dialect", "note", "selected_by", "row_spans", "counts"]);
     return content;
   }
   return undefined;
@@ -1736,7 +1736,8 @@ function artifactContent(body: Body): Body | undefined {
  * handle addresses a VIRTUAL member rather than a workspace file — which the
  * guide binds to ("virtual member handles stay immutable").
  */
-const KEPT_ON_ARTIFACT = ["archive"] as const;
+// B1: which revision these rows are from, and whether the file has moved since.
+const KEPT_ON_ARTIFACT = ["archive", "snapshot", "source"] as const;
 
 function projectArtifact(body: Body): Body {
   const content = artifactContent(body);

@@ -1,7 +1,7 @@
 {
   "name": "tokenlighten-vscode-extension",
   "displayName": "TokenLighten",
-  "version": "0.16.3",
+  "version": "0.16.4",
   "private": true,
   "description": "%extension.description%",
   "publisher": "tokenlighten",
@@ -98,6 +98,12 @@
           "default": true,
           "scope": "resource",
           "description": "%config.enabled%"
+        },
+        "tokenlighten.hostTokenCounter.modelFamily": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "description": "%config.hostTokenCounter.modelFamily%"
         },
         "tokenlighten.autoUpdate.enabled": {
           "type": "boolean",

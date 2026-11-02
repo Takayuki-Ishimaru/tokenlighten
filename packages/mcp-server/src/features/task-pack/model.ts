@@ -19,6 +19,7 @@ import type {
   ToolCall,
 } from "@tokenlighten/types";
 import type { ContinuationPlan } from "../../util/continuation.js";
+import type { CsvLookup } from "../../office/csvLookup.js";
 import type { OoxmlVisualInventory } from "../../office/ooxmlVisuals.js";
 
 // ---------------------------------------------------------------------------
@@ -167,7 +168,34 @@ export type ConcernCoverage = import("@tokenlighten/types").ConcernCoverage;
 
 /** One internally-executed artifact extraction, exposed at pack top level. */
 export type ArtifactTaskPackSection = (
-  | { sheet: string; range: string; columns: string[]; rows: unknown[][]; truncated: boolean }
+  | {
+      sheet: string;
+      range: string;
+      columns: string[];
+      rows: unknown[][];
+      truncated: boolean;
+      /**
+       * A plain csv section's data rows in the whole table, stamped once the section
+       * carries fewer of them: `range` then names the rows it does carry.
+       */
+      total_rows?: number;
+      /**
+       * A3: this csv section is the query-relevant window of the table rather than
+       * its head. `range` is then in the csv's logical data-row form, and
+       * `total_rows` counts the whole table. `anchor_row` is the logical row the
+       * query matched, which survives every later cut of this section. `line_offset`
+       * turns `range` into file lines: `protocol/envelope.ts` corroborates those, so
+       * the rows count as delivered. Absent when no such number exists, or once a cut
+       * has altered the rows it kept.
+       */
+      query_window?: { selected_by: "query"; total_rows: number; anchor_row: number; line_offset?: number };
+      /**
+       * Every row of the whole table with a cell containing a value the request
+       * spells (office/csvLookup.ts), beside `rows`, which is then only a sample.
+       * `lookup.rows` is empty when `rows` already carries the whole table.
+       */
+      lookup?: CsvLookup;
+    }
   | { kind: "docx"; sections: Array<{ heading: string; text: string }>; truncated: boolean }
   | { kind: "pptx"; slides: Array<{ heading: string; text: string }>; truncated: boolean }
   | { kind: "pdf"; pages: Array<{ page: number; text: string }>; truncated: boolean }
@@ -360,6 +388,45 @@ export interface TaskPackResult {
     /** Request-item ids (see `RequestItem.id`) this call is meant to cover. */
     ids: string[];
   };
+  /**
+   * 2026-10-29 (first-hop field report): whether every anchor the request
+   * names — a dotted member such as `res.redirect`, a code identifier, a
+   * quoted or bracketed literal (see `requestAnchors.ts`) — that the
+   * workspace defines is proved by a served DEFINITION row (a mention or call
+   * site does not count). INTERNAL ONLY, same convention as
+   * `request_item_gap`: stamped by the pack builder after its obligations,
+   * read by `canonicalDecision.ts` to stop proposing document/candidate zooms
+   * once the named subject is answered. Absent when the request names no
+   * workspace-defined anchor.
+   */
+  anchor_closure?: {
+    /** True iff every id below is proved by a definition row. */
+    satisfied: boolean;
+    /** Anchor obligation ids, e.g. `identifier:res.redirect`. */
+    ids: string[];
+  };
+  /**
+   * 2026-10-29: this task's exploration spend so far (hops = executed
+   * continuation calls, bytes = served bytes) against the per-task budget
+   * (`TASK_EXPLORATION_MAX_HOPS` / `TASK_EXPLORATION_MAX_BYTES`). INTERNAL
+   * ONLY: an exhausted budget stops `canonicalDecision.ts` from proposing
+   * further low-value document pages; it never removes a served body.
+   */
+  exploration_budget?: {
+    hops: number;
+    bytes: number;
+    exhausted: boolean;
+  };
+  /**
+   * 2026-10-29: workspace-relative paths, among this pack's served surfaces,
+   * that the request's own text names (`util/docPaths.ts`'s
+   * `queryNamesDocPath` — pure string match, no fs). INTERNAL ONLY, stamped
+   * beside `exploration_budget`: `canonicalDecision.ts` is fs-free and holds no
+   * query, yet `docZoomAllowed` must tell "the person asked for History.md"
+   * (page it) from "the locator ranked History.md" (do not). Absent when no
+   * served surface is named.
+   */
+  query_named_paths?: string[];
   /**
    * DESIGN-v0.15 R1 (2026-09-07): explicit request items (see
    * `requestItems.ts`) this pack's obligation graph closed by VERIFIED

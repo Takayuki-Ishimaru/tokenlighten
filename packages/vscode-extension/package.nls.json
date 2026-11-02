@@ -10,6 +10,7 @@
   "command.copilotGuide.applyToWorkspaceFile": "TokenLighten: Apply Copilot guide to workspace file",
   "view.controlCenter": "Workspace",
   "config.enabled": "Enable TokenLighten in this workspace.",
+  "config.hostTokenCounter.modelFamily": "Optional. A language model family (for example gpt-5) whose countTokens decides TokenLighten's reply encoding, when token selection is enabled. Reply text then reaches that model's counting API. Empty, the default, starts nothing.",
   "config.language": "Display language for all TokenLighten extension UI.",
   "config.language.auto": "Automatic (use the VS Code display language)",
   "config.language.en": "English",

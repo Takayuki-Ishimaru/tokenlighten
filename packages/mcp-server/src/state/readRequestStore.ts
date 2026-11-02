@@ -281,6 +281,10 @@ export interface OpenReadRequestInput {
     requested: LineWindow[];
     /** TL-REVIEW-2: see `ReadRequestTargetState.elided`. */
     elided?: LineWindow[];
+    /** A3: see `ReadRequestTargetState.artifact`. */
+    artifact?: { kind: "csv" | "tsv" };
+    /** B1: see `ReadRequestTargetState.snapshot`. */
+    snapshot?: { handle: string };
   }>;
 }
 
@@ -329,6 +333,8 @@ export function openReadRequest(input: OpenReadRequestInput): StagedReadRequest 
       requested: normalizeWindows(target.requested),
       remaining: normalizeWindows(target.requested),
       ...elidedOf(target.elided),
+      ...(target.artifact !== undefined ? { artifact: target.artifact } : {}),
+      ...(target.snapshot !== undefined ? { snapshot: target.snapshot } : {}),
     })),
     pages: [],
     created_at_ms: now,

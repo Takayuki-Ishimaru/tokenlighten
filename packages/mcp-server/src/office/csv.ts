@@ -19,6 +19,8 @@
 // i), never per-row {header: value} objects. csv has no worksheet, so `sheet`
 // is dropped and `total_rows`/`total_columns`/`dialect` are added.
 
+import type { CsvWindowModel } from "./csvWindow.js";
+
 // ---------------------------------------------------------------------------
 // Bounds — MIRRORED from office/xlsx.ts (that module does not EXPORT these, so
 // they are re-declared here with identical values; keep the two in sync).
@@ -506,24 +508,33 @@ function parseRowRange(
   return [sIdx, eIdx];
 }
 
-// ---------------------------------------------------------------------------
-// Public table extractor
-// ---------------------------------------------------------------------------
+/**
+ * One parse per bytes object: a query window reads the same bytes as a page model
+ * and then once per run of rows. Results are never written to, and they go when the
+ * bytes do.
+ */
+const parsedByBytes = new WeakMap<Uint8Array, Map<string, ReturnType<typeof parseCsvBytes>>>();
+
+function parseCsvData(bytes: Uint8Array, opts: Pick<CsvTableOptions, "delimiter" | "ext">): ReturnType<typeof parseCsvBytes> {
+  const key = `${opts.delimiter ?? ""}\0${opts.ext ?? ""}`;
+  let parsed = parsedByBytes.get(bytes);
+  if (parsed === undefined) {
+    parsed = new Map();
+    parsedByBytes.set(bytes, parsed);
+  }
+  let result = parsed.get(key);
+  if (result === undefined) {
+    result = parseCsvBytes(bytes, opts);
+    parsed.set(key, result);
+  }
+  return result;
+}
 
 /**
- * Extract a bounded, structured table view of CSV/TSV bytes — the csv analogue
- * of xlsxTable. Sniffs the dialect, parses RFC4180, and returns `columns` +
- * positional-tuple `rows` for a bounded window, with `total_rows` and (when
- * truncated) an honest `note` naming the exact range= call to fetch more.
+ * Decode, sniff and parse, dropping stray blank lines. Row numbering everywhere
+ * below this is over these RETAINED records, so it composes with the range= note.
  */
-export function csvTable(
-  bytes: Uint8Array,
-  opts: CsvTableOptions = {},
-): CsvTableResult | CsvTableFailure {
-  const warnings: string[] = [];
-  const maxRows = clampTableCount(opts.maxRows, DEFAULT_MAX_ROWS, MAX_ROWS_CEILING);
-  const maxCells = clampTableCount(opts.maxCells, DEFAULT_MAX_CELLS, MAX_CELLS_CEILING);
-
+function parseCsvBytes(bytes: Uint8Array, opts: Pick<CsvTableOptions, "delimiter" | "ext">) {
   const text = decodeCsvBytes(bytes);
 
   const dialect = opts.delimiter !== undefined
@@ -531,10 +542,8 @@ export function csvTable(
     : sniffCsvDialect(text, opts.ext !== undefined ? { ext: opts.ext } : {});
   const delimiter = opts.delimiter ?? dialect.delimiter;
 
-  // Parse every record, then drop stray blank lines. Row numbering below is
-  // over these RETAINED records so it composes with the range= note.
   // parseTruncated tracks whether PARSE_MAX_* fired early (finding 1) — see
-  // the truncation-warning block near the end of this function.
+  // the truncation-warning block near the end of csvTable.
   const parseTruncated = { truncated: false };
   // round-18A finding 1 / ruling (v): track each record's PHYSICAL file line
   // span alongside it, filtering blanks OUT OF BOTH ARRAYS TOGETHER so
@@ -575,6 +584,52 @@ export function csvTable(
   const dataRecords = hasHeader ? allRecords.slice(1) : allRecords;
   const dataSpans = spansReliable ? (hasHeader ? allSpans.slice(1) : allSpans) : undefined;
   const firstDataRow = hasHeader ? 2 : 1; // logical row number of data row 0
+  return { delimiter, parseTruncated, allRecords, headerRecord, dataRecords, dataSpans, firstDataRow, hasHeader };
+}
+
+/**
+ * A3: every data row of the table with its physical line span, projected to the
+ * columns `csvTable` would serve -- what a query-relevant window is chosen from.
+ * `undefined` when any part of that mapping is unknown: a parse quota stopped
+ * short (the file has rows nobody scanned) or the row-to-line mapping is not
+ * reliable. An unscanned or unaddressable remainder must never look like an empty
+ * one, so such a file keeps the ordinary bounded read.
+ */
+export function csvPageModel(
+  bytes: Uint8Array,
+  opts: Pick<CsvTableOptions, "ext"> = {},
+): (CsvWindowModel & { readonly firstDataRow: number; readonly columns: readonly string[]; readonly cellsDropped: boolean }) | undefined {
+  const { parseTruncated, allRecords, headerRecord, dataRecords, dataSpans, firstDataRow } = parseCsvData(bytes, opts);
+  if (parseTruncated.truncated || dataSpans === undefined || dataSpans.length !== dataRecords.length) return undefined;
+  const width = Math.min(MAX_COLS, headerRecord !== undefined ? headerRecord.length : allRecords.reduce((m, r) => Math.max(m, r.length), 0));
+  const cellsDropped = allRecords.some((record) => record.length > width);
+  const columns = Array.from({ length: width }, (_, i) => {
+    const header = headerRecord?.[i];
+    return header === undefined || header.trim() === "" ? `col_${i + 1}` : header;
+  });
+  const rows = dataRecords.map((record) => (record.length === width ? record : Array.from({ length: width }, (_, i) => (i < record.length ? record[i]! : null))));
+  return { rows, dataSpans, firstDataRow, columns, cellsDropped };
+}
+
+// ---------------------------------------------------------------------------
+// Public table extractor
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract a bounded, structured table view of CSV/TSV bytes — the csv analogue
+ * of xlsxTable. Sniffs the dialect, parses RFC4180, and returns `columns` +
+ * positional-tuple `rows` for a bounded window, with `total_rows` and (when
+ * truncated) an honest `note` naming the exact range= call to fetch more.
+ */
+export function csvTable(
+  bytes: Uint8Array,
+  opts: CsvTableOptions = {},
+): CsvTableResult | CsvTableFailure {
+  const warnings: string[] = [];
+  const maxRows = clampTableCount(opts.maxRows, DEFAULT_MAX_ROWS, MAX_ROWS_CEILING);
+  const maxCells = clampTableCount(opts.maxCells, DEFAULT_MAX_CELLS, MAX_CELLS_CEILING);
+
+  const { delimiter, parseTruncated, allRecords, headerRecord, dataRecords, dataSpans, firstDataRow, hasHeader } = parseCsvData(bytes, opts);
 
   // Column roster. Ragged data rows can be wider than the header; the header
   // (or synthesized col_1..col_n over the widest record) defines the columns.

@@ -5,7 +5,13 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { usageWorkspaceId } from "@tokenlighten/usage";
-import { cliVersion, formatReductionRange, runLogs } from "../commands/logs.js";
+import {
+  BASELINE_NOTE,
+  cliVersion,
+  formatBaselineLine,
+  formatReductionRange,
+  runLogs,
+} from "../commands/logs.js";
 
 describe("formatReductionRange", () => {
   it("prints one decimal 95% range only when an interval is available", () => {
@@ -269,6 +275,70 @@ describe("tl logs summary scoping", () => {
     expect(json.measurementDisplay.contextAvoided.basis).toContain(
       "1 baseline-bearing call(s)",
     );
+  });
+
+  it("states that the baseline is an estimate of native reads of the same files/ranges, not billed cost", async () => {
+    const root = join(logDirectory, "ws-baseline-note");
+    mkdirSync(root, { recursive: true });
+    const workspaceId = usageWorkspaceId(root, logDirectory)!;
+    writeFileSync(
+      join(logDirectory, "usage-2026-08-11.ndjson"),
+      `${JSON.stringify(event(workspaceId, 0, 100))}\n`,
+    );
+
+    await runLogs(["summary", "--json", "--workspace-root", root]);
+    const json = lastJson() as ReturnType<typeof lastJson> & { baselineNote: string };
+    expect(json.baselineNote).toBe(BASELINE_NOTE);
+    expect(json.baselineNote).toContain("native reads of the same files/ranges");
+    expect(json.baselineNote).toContain("not billed cost");
+    expect(json.measurementDisplay.contextAvoided.basis).toContain(
+      "estimate of native reads of the same files/ranges, not billed cost",
+    );
+
+    writes.length = 0;
+    await runLogs(["summary", "--workspace-root", root]);
+    const text = writes.join("");
+    expect(text).toContain(
+      "Baseline: estimate of what native reads of the same files/ranges would have returned",
+    );
+    expect(text).toContain("not billed cost");
+    // The note precedes the savings figures it qualifies.
+    expect(text.indexOf("Baseline:")).toBeLessThan(text.indexOf("Context avoided:"));
+  });
+
+  it("formats the Baseline line with per-method call counts when the summary carries them", () => {
+    expect(formatBaselineLine({ "file-bytes": 3, "range-bytes": 2 })).toBe(
+      `Baseline: ${BASELINE_NOTE} [3 whole-file and 2 ranged/symbol baseline call(s)]\n`,
+    );
+    expect(formatBaselineLine(undefined)).toBe(`Baseline: ${BASELINE_NOTE}\n`);
+  });
+
+  // Needs a rebuilt @tokenlighten/usage (this package reads events through
+  // its dist): a stale reader drops `range-bytes` lines as unknown.
+  it("counts range-bytes baseline calls separately in the summary", async () => {
+    const root = join(logDirectory, "ws-range-bytes");
+    mkdirSync(root, { recursive: true });
+    const workspaceId = usageWorkspaceId(root, logDirectory)!;
+    const rows = [
+      event(workspaceId, 0, 1_000),
+      { ...event(workspaceId, 1, 40), baselineMethod: "range-bytes" },
+    ];
+    writeFileSync(
+      join(logDirectory, "usage-2026-08-11.ndjson"),
+      `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`,
+    );
+
+    await runLogs(["summary", "--json", "--workspace-root", root]);
+    expect(lastJson()).toMatchObject({
+      eventCount: 2,
+      measuredBaselineCalls: 2,
+      baselineBasis: "native-read-estimate",
+      measuredBaselineCallsByMethod: { "file-bytes": 1, "range-bytes": 1 },
+    });
+
+    writes.length = 0;
+    await runLogs(["summary", "--workspace-root", root]);
+    expect(writes.join("")).toContain("[1 whole-file and 1 ranged/symbol baseline call(s)]");
   });
 
   it("shows sane zeros for the measured block on an empty store, without crashing", async () => {

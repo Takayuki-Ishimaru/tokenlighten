@@ -2,3 +2,4 @@
 # its committed bytes on every checkout, including Windows checkouts where
 # core.autocrlf=true would otherwise rewrite LF as CRLF.
 assets/licenses/onnxruntime/* -text
+assets/licenses/js-tiktoken/* -text

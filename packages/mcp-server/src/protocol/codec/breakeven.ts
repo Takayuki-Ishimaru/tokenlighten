@@ -25,6 +25,7 @@
 // ---------------------------------------------------------------------------
 
 import type { Kind } from "@tokenlighten/types";
+import { wireTokenPolicyOverride } from "../../util/flags.js";
 import { MIN_ABSOLUTE_GAIN_BYTES, MIN_RELATIVE_GAIN, MIN_ROWS } from "./policy.js";
 import type { ShapeClass } from "./shape.js";
 
@@ -107,4 +108,58 @@ const TABLE: ReadonlyMap<string, BreakevenThresholds> = new Map([
 /** Resolves the effective thresholds for one cell -- an unlisted cell (unknown client profile, unknown tokenizer, or a combination the table simply does not name) always answers `GLOBAL_DEFAULT_THRESHOLDS`. */
 export function resolveBreakevenThresholds(key: BreakevenCellKey): BreakevenThresholds {
   return TABLE.get(cellKeyString(key)) ?? GLOBAL_DEFAULT_THRESHOLDS;
+}
+
+// ---------------------------------------------------------------------------
+// A2 (2026-10-30): the TOKEN policy. `GLOBAL_DEFAULT_THRESHOLDS` above is
+// denominated in bytes; `minAbsoluteGainUnits: 64` read as 64 tokens would be a
+// four-times-stricter gate nobody decided on. So a counter that declares
+// `unit:"tokens"` never reaches that table: it resolves here, by ENCODING, and
+// an encoding with no entry answers `undefined`, which selectV2.ts reports as
+// `no-token-policy` and pipeline.ts turns into byte selection.
+//
+// `token-1`: uncalibrated design values, fixed before any evaluation run. The relative
+// floors and row floors restate the byte table's own; the absolute floors divide its
+// byte floors by ~4 bytes per token, the same ratio `estimateTokensFromBytes` uses.
+//
+// `token-2` (B3, 2026-10-30): the default cell's relative floor fitted by
+// bench/wire-token/fit-policy.mts on the corpus's tuning split alone. It keeps more
+// small real gains, so more replies leave JSON (16 to 30 of 66 on the corpus's holdout),
+// and how well a model reads that many is unmeasured. The two named cells had too few
+// tuning payloads to fit and stay as they were. Nothing here adapts at run time: a
+// change is a new version, judged on the holdout split, and
+// TL_WIRE_TOKEN_POLICY=token-1 restores the earlier one.
+// ---------------------------------------------------------------------------
+
+/** The current version; bump on any change to the values below. */
+export const TOKEN_POLICY_VERSION = "token-2";
+
+/** The version in force, recorded on every token-selection trace. */
+export function tokenPolicyVersion(): string {
+  return wireTokenPolicyOverride() === "token-1" ? "token-1" : TOKEN_POLICY_VERSION;
+}
+
+const TOKEN_DEFAULT_THRESHOLDS: Readonly<Record<string, BreakevenThresholds>> = {
+  "token-1": { minRelativeGain: MIN_RELATIVE_GAIN, minAbsoluteGainUnits: 16, minRows: MIN_ROWS },
+  "token-2": { minRelativeGain: 0.03, minAbsoluteGainUnits: 16, minRows: MIN_ROWS },
+};
+
+// "host" is a host counter's own units (hostTokenCounter.ts): the operator opted into
+// them, they are tokens, and these uncalibrated values are no more tuned to one
+// encoding than to another.
+const TOKEN_POLICY_ENCODINGS: ReadonlySet<string> = new Set(["o200k_base", "cl100k_base", "host"]);
+
+/** The same two cells as `TABLE`, with absolute floors in tokens. Keys omit the tokenizer: the encoding gate above already decided that. */
+const TOKEN_CELLS: ReadonlyMap<string, BreakevenThresholds> = new Map([
+  ["tl-reference-client read.text string-heavy", { minRelativeGain: 0.05, minAbsoluteGainUnits: 8, minRows: 0 }],
+  ["tl-reference-client search.matches rows-large-numeric", { minRelativeGain: 0.15, minAbsoluteGainUnits: 16, minRows: MIN_ROWS }],
+]);
+
+/** The token thresholds for one cell, or `undefined` when `encoding` has no policy -- never a byte value, never another encoding's. */
+export function resolveTokenBreakevenThresholds(
+  encoding: string,
+  key: Omit<BreakevenCellKey, "tokenizerId">,
+): BreakevenThresholds | undefined {
+  if (!TOKEN_POLICY_ENCODINGS.has(encoding)) return undefined;
+  return TOKEN_CELLS.get(`${key.clientProfileId} ${key.kind} ${key.shapeClass}`) ?? TOKEN_DEFAULT_THRESHOLDS[tokenPolicyVersion()];
 }

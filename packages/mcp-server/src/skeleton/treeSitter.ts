@@ -46,6 +46,8 @@ interface LangRule {
   wrapperTypes: Set<string>;
   bodyField: string;
   style: BodyStyle;
+  /** JS/TS: elide function values defined by assignment (see assignedFunctionSkeleton). */
+  assignedFunctions: boolean;
 }
 
 function rule(
@@ -53,6 +55,7 @@ function rule(
   containerTypes: string[],
   style: BodyStyle,
   wrapperTypes: string[] = [],
+  assignedFunctions = false,
 ): LangRule {
   return {
     funcTypes: new Set(funcTypes),
@@ -60,8 +63,20 @@ function rule(
     wrapperTypes: new Set(wrapperTypes),
     bodyField: "body",
     style,
+    assignedFunctions,
   };
 }
+
+/** JS/TS node types of a function value (`x.y = function () {}`, `() => {}`). */
+export const JS_FUNCTION_VALUE_TYPES: ReadonlySet<string> = new Set([
+  "function_expression",
+  "function",
+  "arrow_function",
+  "generator_function",
+]);
+/** `defineGetter(req, 'protocol', function protocol() {})` and the
+ * Object.defineProperty spelling of the same accessor definition. */
+export const JS_ACCESSOR_DEFINER_RE = /(?:^|\.)(?:define(?:Getter|Setter|Property)|__define[GS]etter__)$/;
 
 const RULES: Record<string, LangRule> = {
   go: rule(["function_declaration", "method_declaration"], [], "brace"),
@@ -109,24 +124,28 @@ const RULES: Record<string, LangRule> = {
     ["class_declaration"],
     "brace",
     ["export_statement"],
+    true,
   ),
   javascriptreact: rule(
     ["function_declaration", "generator_function_declaration", "method_definition"],
     ["class_declaration"],
     "brace",
     ["export_statement"],
+    true,
   ),
   typescript: rule(
     ["function_declaration", "generator_function_declaration", "method_definition"],
     ["class_declaration", "abstract_class_declaration", "internal_module", "module"],
     "brace",
     ["export_statement"],
+    true,
   ),
   typescriptreact: rule(
     ["function_declaration", "generator_function_declaration", "method_definition"],
     ["class_declaration", "abstract_class_declaration", "internal_module", "module"],
     "brace",
     ["export_statement"],
+    true,
   ),
 };
 
@@ -356,8 +375,37 @@ function renderChildren(nodes: AnyNode[], src: string, r: LangRule): string[] {
   return rendered.filter((x) => x.length > 0);
 }
 
+/**
+ * CommonJS code defines most of its API by assignment: `res.redirect =
+ * function redirect(url) { ... };`. Render those like declarations — the
+ * statement up to the body, then `{ ... }` — instead of verbatim, which left
+ * the skeleton of such a file nearly as large as the file.
+ */
+function assignedFunctionSkeleton(node: AnyNode, src: string, r: LangRule): string | undefined {
+  if (!r.assignedFunctions || node.type !== "expression_statement") return undefined;
+  const expression = namedChildren(node)[0];
+  let value: AnyNode | null | undefined;
+  if (expression?.type === "assignment_expression") {
+    value = expression.childForFieldName("right");
+  } else if (expression?.type === "call_expression") {
+    const callee = expression.childForFieldName("function");
+    const calleeText = callee ? src.slice(callee.startIndex, callee.endIndex) : "";
+    const args = expression.childForFieldName("arguments");
+    if (args && JS_ACCESSOR_DEFINER_RE.test(calleeText)) value = namedChildren(args).at(-1);
+  }
+  if (!value || !JS_FUNCTION_VALUE_TYPES.has(value.type)) return undefined;
+  const body = value.childForFieldName(r.bodyField);
+  if (!body || body.type !== "statement_block") return undefined;
+  const head = rtrim(src.slice(node.startIndex, body.startIndex));
+  const tail = src.slice(body.endIndex, node.endIndex).trim();
+  return `${funcSkeleton(head, r.style)}${tail}`;
+}
+
 function renderNode(node: AnyNode, src: string, r: LangRule): string {
   const type = node.type;
+
+  const assigned = assignedFunctionSkeleton(node, src, r);
+  if (assigned !== undefined) return assigned;
 
   if (r.wrapperTypes.has(type)) {
     const inner = namedChildren(node).find(

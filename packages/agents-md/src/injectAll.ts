@@ -17,6 +17,7 @@ import { copilotGuideModeForWorkspace, type CopilotGuideMode } from "./copilotGu
 import { migrateLegacyTargetPath } from "./migrateLegacyTarget.js";
 import { assertSafeWriteTarget, ensureSafeWriteParent } from "./safeWritePath.js";
 import { defaultGuideProfileForSurface } from "./guideProfileDefault.js";
+import { SHARED_FILE_MODE, existingFileMode, keepExistingFileMode } from "./fileMode.js";
 
 /** Maximum file size to parse (5 MB). Files larger than this are refused. */
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -309,7 +310,8 @@ export async function removeAll(config: RemoveAllConfig): Promise<RemoveAllResul
       if (deleteWhenBare) {
         unlinkSync(absPath);
       } else {
-        writeFileSync(tmpPath, next, { encoding: "utf8", flag: "wx", mode: 0o600 });
+        writeFileSync(tmpPath, next, { encoding: "utf8", flag: "wx", mode: SHARED_FILE_MODE });
+        keepExistingFileMode(tmpPath, existingFileMode(absPath));
         assertSafeWriteTarget(repoRoot, absPath);
         const finalStat = lstatSync(absPath);
         if (finalStat.dev !== beforeStat.dev || finalStat.ino !== beforeStat.ino) {
@@ -518,7 +520,8 @@ async function processFile(opts: ProcessFileOptions): Promise<void> {
   try {
     ensureSafeWriteParent(repoRoot, absPath, true);
     assertSafeWriteTarget(repoRoot, absPath);
-    writeFileSync(tmpPath, finalText, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    writeFileSync(tmpPath, finalText, { encoding: "utf8", flag: "wx", mode: SHARED_FILE_MODE });
+    keepExistingFileMode(tmpPath, existingFileMode(absPath));
     ensureSafeWriteParent(repoRoot, absPath, false);
     assertSafeWriteTarget(repoRoot, absPath);
     renameSync(tmpPath, absPath);

@@ -1,6 +1,7 @@
 import type { TaskExecutionContract, TaskReadinessObligation, ToolCall } from "@tokenlighten/types";
 import {
   enforceContinuationBudget,
+  explorationBudgetExhausted,
   type ContinuationPlan,
 } from "../../util/continuation.js";
 import type { TaskPackResult } from "./model.js";
@@ -11,7 +12,9 @@ import { isSemanticFrontierContinuationOptional } from "./semanticFrontier.js";
 import { sfPackContextFor, isAddressGroundingOpenConcern } from "./sfSatisfaction.js";
 import { selectCanonicalNext } from "./selectCanonicalNext.js";
 import { sfByteResidency, type SfTaskContext } from "../../task-state/sfState.js";
-import { epochServedPaths } from "../../util/packServeLog.js";
+import { epochServedPaths, taskExplorationSpend } from "../../util/packServeLog.js";
+import { isLowValueDocPath, queryNamesDocPath } from "../../util/docPaths.js";
+import { measureResponseBytes } from "../../protocol/budget/measure.js";
 import {
   surfaceAlreadyCoversWholeFile,
   surfaceExceedsRepackBudget,
@@ -1123,6 +1126,12 @@ export function discoveryBundleNext(
       // between (`isSupportingEvidenceWhy`): bundling it re-packed the context
       // files as caller-named targets (gauge fixture, 2026-10-17).
       if (String((surface as { why?: unknown }).why ?? "").startsWith("edit-context:")) continue;
+      // 2026-10-29: a candidate the answer no longer needs (anchors already
+      // proved by a served definition), a changelog / docs page nobody asked
+      // for, or any candidate once the task's exploration budget is spent is no
+      // reason to re-pack — click re-packed 48 KB after the answering function
+      // was already served.
+      if (!docZoomAllowed(result, surface)) continue;
       const candidatePath = (surface as { path?: unknown }).path;
       if (
         typeof candidatePath === "string" && candidatePath !== ""
@@ -1214,6 +1223,133 @@ function servedZoomSuppressed(result: TaskPackResult, handle: string, range: str
   return Array.isArray(entries) && entries.includes(JSON.stringify([handle, range]));
 }
 
+/**
+ * 2026-10-29 (first-hop field report) — IS A DOCUMENT ZOOM / RE-PACK ROW WORTH
+ * PROPOSING?
+ *
+ * The ONE predicate behind `requiredAnswerDocumentZoom`, `servedDocumentZoom`
+ * and `discoveryBundleNext`'s candidate-list arm. All three used to offer "page
+ * the rest of this served document" for any surface with `remaining_ranges`,
+ * whether or not the question was about it, and every hop re-granted another
+ * call: express's "How does res.redirect work?" paged the 3,928-line History.md
+ * for ten hops (129 KB) and never served res.redirect, and click's candidate
+ * re-pack pulled ~48 KB more after the answering function was already served.
+ * It decides which `next` is PROPOSED; it never touches a served body, and
+ * `task.force_serve` / an explicit request for the file stay the escapes.
+ *
+ * False when
+ *  (a) the pack's named anchors are all proved by served definitions
+ *      (`anchor_closure.satisfied`) and the request does not name this path —
+ *      the subject is answered, more of an unrelated file is not evidence;
+ *  (b) the task's exploration budget is spent (`exploration_budget.exhausted`,
+ *      stamped from `TASK_EXPLORATION_MAX_HOPS` / `_MAX_BYTES`);
+ *  (c) the path is a changelog / release log / `docs/` page
+ *      (`isLowValueDocPath`) and the request does not name it.
+ * "Names" = `result.query_named_paths` (stamped from the request text) or the
+ * pack's own `query-named-file` provenance. `caller-supplied` is NOT naming: a
+ * qref re-pack of a candidate list marks every candidate that way.
+ */
+export function docZoomAllowed(result: TaskPackResult, surface: { path?: unknown; why?: unknown }): boolean {
+  if (explorationBudgetOf(result)?.exhausted === true) return false;
+  const path = typeof surface.path === "string" ? surface.path : "";
+  const why = typeof surface.why === "string" ? surface.why : "";
+  const named = path !== "" && (
+    queryNamedPathsOf(result)?.includes(path) === true || why.includes("query-named-file")
+  );
+  if (result.anchor_closure?.satisfied === true && !named) return false;
+  return !(path !== "" && isLowValueDocPath(path) && !named);
+}
+
+/**
+ * Where `stampExplorationState` keeps its stamp. A `Symbol` key (as
+ * sfSatisfaction.ts's SF_CONTEXT_TOKEN_KEY) rides the `{...result}` copies the
+ * dispatch makes (`attachSupply`) but is invisible to `JSON.stringify`, so the
+ * stamp never counts against a pack's byte ceiling; the value keeps its state in
+ * private fields, so two packs that differ only in this task's spend still
+ * compare equal. A hand-built pack may carry `exploration_budget` /
+ * `query_named_paths` itself; the two readers below prefer the stamp.
+ */
+const EXPLORATION_STAMP_KEY: unique symbol = Symbol("tokenlighten.explorationStamp");
+
+class ExplorationStamp {
+  readonly #budget: NonNullable<TaskPackResult["exploration_budget"]>;
+  readonly #namedPaths: string[] | undefined;
+  constructor(budget: NonNullable<TaskPackResult["exploration_budget"]>, namedPaths: string[] | undefined) {
+    this.#budget = budget;
+    this.#namedPaths = namedPaths;
+  }
+  get budget(): NonNullable<TaskPackResult["exploration_budget"]> {
+    return this.#budget;
+  }
+  get namedPaths(): string[] | undefined {
+    return this.#namedPaths;
+  }
+}
+
+function explorationStampOf(result: object): ExplorationStamp | undefined {
+  const stamp = (result as Record<symbol, unknown>)[EXPLORATION_STAMP_KEY];
+  return stamp instanceof ExplorationStamp ? stamp : undefined;
+}
+
+/** The task's exploration spend `stampExplorationState` stamped on `result` (else its own `exploration_budget`). */
+export function explorationBudgetOf(result: object): TaskPackResult["exploration_budget"] {
+  return explorationStampOf(result)?.budget ?? (result as TaskPackResult).exploration_budget;
+}
+
+/** The served paths the request names, as `stampExplorationState` stamped them (else `query_named_paths`). */
+export function queryNamedPathsOf(result: object): string[] | undefined {
+  const stamp = explorationStampOf(result);
+  return stamp !== undefined ? stamp.namedPaths : (result as TaskPackResult).query_named_paths;
+}
+
+/**
+ * Stamp the task's spend against `TASK_EXPLORATION_MAX_HOPS` / `_MAX_BYTES`
+ * (`explorationBudgetOf`) and the served surfaces the request's own text names
+ * (`queryNamedPathsOf`) — the two internal inputs `docZoomAllowed` reads — under
+ * `EXPLORATION_STAMP_KEY`. Called once, at the very end of
+ * `dedupeTrimAndPersist`, when the pack that ships is final.
+ *
+ * `bytes` = what earlier responses of this task epoch emitted PLUS this
+ * response's own size, so the budget decides whether to propose the NEXT hop
+ * (`hops` = follow-up calls executed up to and including the one this response
+ * answers). The own size is the serialized pack — an upper bound of its wire
+ * form — and costs one `JSON.stringify` of an at-most-22 KiB object.
+ */
+export function stampExplorationState(result: TaskPackResult, workspaceRoot: string, query: string): void {
+  if (!Array.isArray(result.surfaces)) return;
+  delete result.exploration_budget;
+  delete result.query_named_paths;
+  const spend = taskExplorationSpend(workspaceRoot);
+  let own = 0;
+  try {
+    own = measureResponseBytes(JSON.stringify(result));
+  } catch {
+    own = 0;
+  }
+  const bytes = spend.bytes + own;
+  const budget = { hops: spend.hops, bytes, exhausted: explorationBudgetExhausted(spend.hops, bytes) };
+  const named = [...new Set(result.surfaces
+    .map((surface) => (surface as { path?: unknown }).path)
+    .filter((path): path is string => typeof path === "string" && path !== "" && queryNamesDocPath(query, path)))];
+  (result as unknown as Record<symbol, unknown>)[EXPLORATION_STAMP_KEY] = new ExplorationStamp(budget, named.length > 0 ? named : undefined);
+  trace("exploration_budget", { ...budget, named: named.length }, workspaceRoot);
+}
+
+/**
+ * Is `call` a plain `{handle, range}` zoom of a served surface that
+ * `docZoomAllowed` now refuses? The producer's own earlier `next` (route /
+ * continuation / contract.next_call, all minted before the exploration stamp
+ * existed) can still name such a zoom; this is how the chain recognises it.
+ */
+function isDisallowedZoomCall(result: TaskPackResult, call: unknown): boolean {
+  if (!isReadOnlyCall(call) || call.tool !== "tl_read_file") return false;
+  const args = call.arguments as Record<string, unknown>;
+  if (typeof args["handle"] !== "string" || typeof args["range"] !== "string") return false;
+  if (args["targets"] !== undefined || args["paths"] !== undefined || args["query"] !== undefined) return false;
+  const surface = result.surfaces.find((candidate) => (candidate as { handle?: unknown }).handle === args["handle"]);
+  return surface !== undefined && !docZoomAllowed(result, surface);
+}
+
 function servedDocumentZoom(result: TaskPackResult): ContinuationCall | undefined {
   const candidates = result.surfaces
     .map((surface) => ({
@@ -1222,6 +1358,7 @@ function servedDocumentZoom(result: TaskPackResult): ContinuationCall | undefine
     }))
     .filter((item): item is { surface: TaskPackResult["surfaces"][number]; range: unknown[] } =>
       Array.isArray(item.range)
+      && docZoomAllowed(result, item.surface)
       && (!semanticFrontierGuardEnabled() || !isSemanticFrontierContinuationOptional(item.surface))
       && typeof (item.surface as { handle?: unknown }).handle === "string"
       && item.range.some((value) =>
@@ -1233,9 +1370,14 @@ function servedDocumentZoom(result: TaskPackResult): ContinuationCall | undefine
         ))
     )
     .sort((a, b) => {
-      const aDoc = /\.(?:md|markdown|mdx)$/iu.test((a.surface as { path?: string }).path ?? "") ? 0 : 1;
-      const bDoc = /\.(?:md|markdown|mdx)$/iu.test((b.surface as { path?: string }).path ?? "") ? 0 : 1;
-      return aDoc - bDoc;
+      // Markdown first, EXCEPT a change/release log or docs/ page (reachable here
+      // only because the request names it): those sort last, never first.
+      const rank = (item: typeof a): number => {
+        const itemPath = (item.surface as { path?: string }).path ?? "";
+        if (isLowValueDocPath(itemPath)) return 2;
+        return /\.(?:md|markdown|mdx)$/iu.test(itemPath) ? 0 : 1;
+      };
+      return rank(a) - rank(b);
     });
   const selected = candidates[0];
   if (selected === undefined) return undefined;
@@ -1445,6 +1587,7 @@ function requiredAnswerDocumentZoom(result: TaskPackResult): ContinuationCall | 
     const value = candidate as { path?: unknown; handle?: unknown; remaining_ranges?: unknown };
     return typeof value.path === "string"
       && (!semanticFrontierGuardEnabled() || !isSemanticFrontierContinuationOptional(candidate))
+      && docZoomAllowed(result, candidate)
       && /\.(?:md|markdown|mdx)$/iu.test(value.path)
       && typeof value.handle === "string"
       && Array.isArray(value.remaining_ranges)
@@ -1964,10 +2107,14 @@ function deriveCanonicalTaskDecisionRaw(result: TaskPackResult): CanonicalTaskDe
     };
   }
 
+  // The producer's own earlier `next` (contract.next_call / continuation) is
+  // honoured below unless it is a zoom `docZoomAllowed` now refuses — it was
+  // minted before the exploration stamp existed and would otherwise smuggle the
+  // very document page the arms above just declined back in.
+  const producerNext = [isReadOnlyCall(contract.next_call) ? contract.next_call : undefined, firstReadOnlyContinuation(result)]
+    .find((call) => call !== undefined && !isDisallowedZoomCall(result, call));
   const next = canonicalNextAllowed ? discoveryBundleNext(result, false)
-    ?? sanitizeSemanticFrontierNext(result, isReadOnlyCall(contract.next_call)
-      ? contract.next_call
-      : firstReadOnlyContinuation(result), false)
+    ?? sanitizeSemanticFrontierNext(result, producerNext, false)
     // FIXALL-A (2026-09-14), LAST RESORT: the rows this pack addressed and did
     // not serve. Reached only when every producer above declined, so it can
     // only replace the absence of a call — see `unservedAddressableRepack`.
@@ -2305,7 +2452,12 @@ export function applyCanonicalTaskDecision(result: TaskPackResult): CanonicalTas
   const needsRepair =
     canonicalTaskDecisionInvariantViolations(result).length > 0
     || (contract.typestate.phase === "prepared" && requiredAnswerDocumentZoom(result) !== undefined)
-    || (contract.typestate.phase === "awaiting-input" && decision.kind === "discover");
+    || (contract.typestate.phase === "awaiting-input" && decision.kind === "discover")
+    // 2026-10-29: the exploration stamp (and `anchor_closure`) land AFTER the
+    // in-build decision was applied, so a pack can ship a `discover` whose
+    // `next` is a document zoom the stamped state now refuses. The disagreement
+    // itself is the trigger, so it is self-gating like the two terms above.
+    || (contract.typestate.phase === "discovery" && isDisallowedZoomCall(result, contract.next_call));
   if (!needsRepair) return decision;
 
   // F-A1-1: a coverage-honesty repair, orthogonal to the decision-shape

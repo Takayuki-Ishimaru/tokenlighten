@@ -14,6 +14,8 @@ import {clearSourceCapsules, sourceCapsulePrior, stageSourceCapsules} from "./so
 import {rehydrateHandleEntry} from "../../state/stateHandles.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { currentRequestSignal } from "../../util/requestCancellation.js";
+import { boundedTextMemo } from "../../util/boundedTextMemo.js";
+import { readFileForRequest } from "../../util/requestFileCache.js";
 import {protocolCallContext} from "../../protocol/envelope.js";
 import {estimateAnswerBody, isExactContiguousBody, preferExactAnswerBody} from "../../protocol/answerBodyPolicy.js";
 import {goReturnedLocalReview, bindGoReviewOrigin} from "../../goReturnedLocalReview.js";
@@ -37,6 +39,7 @@ import {
   artifactQueryTokenVariants,
   buildBasenameFrequency,
   discoverArtifactFiles,
+  discoverNamedLargeCsvFiles,
   extractClassMethodPairs,
   extractIdentifiers,
   inferQueryProjectScope,
@@ -101,6 +104,17 @@ import {
 } from "./artifactConsumers.js";
 import { expandOneHop } from "./openUniverseExpansion.js";
 import { scanRequestItemLiteral } from "./requestItemScan.js";
+import {
+  anchorChainsOf,
+  anchorDefinitionsFor,
+  rememberAnchorResolution,
+  requestAnchorsOf,
+  resolveAnchorDefinitions,
+  resolveAnchorLiterals,
+  type AnchorIO,
+  type AnchorResolution,
+} from "./anchorFirst.js";
+import { anchorFirstEnabled, subjectLiteralsIfEnabled } from "./anchorFlag.js";
 import { containsWholeIdentifier, nearMissIdentifiersIn, wholeIdentifierOffsets } from "./wholeIdentifier.js";
 import {
   createScanContentCache,
@@ -307,6 +321,8 @@ import {
   type ExecutedSearchResult,
 } from "../../util/packServeLog.js";
 import { currentSessionLane, laneScopedKey } from "../../util/laneKey.js";
+import { isLowValueDocPath, queryNamesDocPath } from "../../util/docPaths.js";
+import { stampExplorationState } from "./canonicalDecision.js";
 import { surfaceAlreadyCoversWholeFile } from "../../util/surfaceServedCoverage.js";
 import { computeClosureStateSafe } from "../../util/closureTracking.js";
 import { mustFetchPackCap } from "../../util/mustFetch.js";
@@ -597,7 +613,9 @@ import {
   hasOoxmlVisualInventory,
   renderOoxmlVisualInventory,
 } from "../../office/ooxmlVisuals.js";
-import { csvTable } from "../../office/csv.js";
+import { csvPageModel, csvTable, decodeCsvBytes } from "../../office/csv.js";
+import { csvLookupAbsent, csvLookupAcrossColumns, csvLookupAnswersRequest, csvLookupAsksCount, csvLookupColumnValues, csvLookupProjected, csvLookupRows, csvLookupTerms, csvLookupWholeCells, type CsvLookup } from "../../office/csvLookup.js";
+import { csvQueryWindow } from "../../office/csvWindow.js";
 import type {
   ImpactCandidate,
   ImpactSurface,
@@ -668,6 +686,13 @@ import {
   artifactSectionEntryIds,
   codeTaskPackSurfaces,
   fitArtifactSectionToBytes,
+  csvLookupComplete,
+  plainCsvCutNote,
+  plainCsvLookupNote,
+  plainCsvSample,
+  plainCsvSampleNote,
+  plainCsvRemainder,
+  queryWindowSectionNote,
   isArtifactTaskPackSurface,
 } from "./artifactSections.js";
 export { isArtifactTaskPackSurface } from "./artifactSections.js";
@@ -691,7 +716,7 @@ function deriveNextFromPlan(plan: ContinuationPlan): ContinuationCall | undefine
 import { applySemanticFrontierDemotion, attachSfDemotionResidency, deriveCanonicalTaskDecision, hasCertificateBinding, isSupportingEvidenceWhy, reapplySemanticFrontierDecision } from "./canonicalDecision.js";
 import { markSemanticFrontierNamedJoin, markCallerRangeSurface, isCallerRangeSurface, isExplicitRangeSurface, markExplicitRangeSurface, markSurfaceProvenance, surfaceProvenance, wasSemanticFrontierBodyWithheld } from "./sfWithholdingMarks.js";
 import { withdrawProvisionalServedRanges } from "../../state/session.js";
-import { decisionInvariantStrictEnabled, effEvidencePathGroupsEnabled, effHubWholeEnabled, effMapAnswerFirstEnabled, effStructureMapEnabled } from "../../util/flags.js";
+import { artifactQueryWindowEnabled, csvLookupEnabled, csvSampleEnabled, decisionInvariantStrictEnabled, effEvidencePathGroupsEnabled, effHubWholeEnabled, effMapAnswerFirstEnabled, effStructureMapEnabled } from "../../util/flags.js";
 import {
   breachedCitations,
   certificateCitations,
@@ -978,6 +1003,15 @@ function clampToActiveCeiling(typeSpecificCap: number): number {
  * exact per-section follow-up call, never dropped to a stub.
  */
 const ARTIFACT_SURFACE_INLINE_CAP_BYTES = 8192;
+/** Rows a pack shows of a csv it cannot carry whole (artifactSections.ts `plainCsvSample`). */
+const CSV_SURFACE_SAMPLE_ROWS = 10;
+/** Beside a complete lookup the sample only has to show the columns' values. */
+const CSV_LOOKUP_SAMPLE_ROWS = 1;
+const CSV_LOOKUP_MAX_ROWS = 30;
+const CSV_LOOKUP_PARTIAL_ROWS = 3;
+const CSV_LOOKUP_MAX_BYTES = 6 * 1024;
+/** Room a lookup leaves in the entry for the columns, the sample and the note. */
+const CSV_LOOKUP_SECTION_OVERHEAD_BYTES = 2 * 1024;
 const ARTIFACT_SURFACE_INLINE_TOTAL_BYTES = 16384;
 
 /** Same bound artifact_build's own input selection uses (selectArtifactBuildInputs). */
@@ -1141,7 +1175,7 @@ export class FileReadCache {
       const abs = workspaceBodyPath(workspace, relPath);
       if (abs === undefined) throw new Error(`${relPath} resolves outside the workspace`);
       // served-bytes: readServedText
-      const verdict = readServedText(fs.readFileSync(abs));
+      const verdict = readServedText(readFileForRequest(abs));
       this.verdicts.set(relPath, verdict);
       raw = verdict.kind === "undecodable" ? READ_FAILED : verdict.text;
     } catch {
@@ -1957,6 +1991,9 @@ function collectArtifactSurfaces(
     for (const file of discoverArtifactFiles(workspace, { query })) {
       foundByPath.set(file.relPath, file);
     }
+    if (csvLookupEnabled()) {
+      for (const file of discoverNamedLargeCsvFiles(workspace, query)) foundByPath.set(file.relPath, file);
+    }
   }
 
   return [...foundByPath.values()]
@@ -2296,9 +2333,22 @@ interface PrefetchedArtifactSections {
   stamps: string[];
   /** Normalized paths the caller named — trimToCap sheds these LAST. */
   callerNamed: Set<string>;
+  /** The one named csv's lookup found every row this request asks for. */
+  lookupAnswers: boolean;
+  /** Those rows were attached to a read-only pack with no code surface, so nothing else is owed. */
+  lookupClosedUniverse?: boolean;
 }
 
 const artifactSectionPrefetch = new Map<string, PrefetchedArtifactSections>();
+
+/**
+ * Parallel packs on one workspace run in separate lanes, and a pack waits on I/O
+ * between its prefetch and its attach, so a workspace-only key handed one lane the
+ * section another lane's query selected.
+ */
+function artifactPrefetchKey(workspace: string): string {
+  return `${workspace}\0${currentSessionLane()}`;
+}
 
 /** Test/reset hook parity with the other module-level pack caches. */
 export function resetArtifactSectionPrefetch(): void {
@@ -2415,11 +2465,25 @@ function remintPackArtifact(
   }
 }
 
+/** The logical row span a plain csv section's `remaining_sections` names, if any. */
+function csvRowsOf(remaining: readonly string[] | undefined): string | undefined {
+  return /^rows (\d+-\d+)$/.exec(remaining?.[0] ?? "")?.[1];
+}
+
+/**
+ * A logical row span of a csv. `kind` is what keeps it one: the wire form of a call
+ * has no `mode`, and a `range` with no select field beside it is read as file lines.
+ */
+function csvRowsSelector(artifactPath: string, rows: string): ToolCall["arguments"] {
+  return { range: rows, kind: artifactPath.toLowerCase().endsWith(".tsv") ? "tsv" : "csv" };
+}
+
 /**
  * The exact ONE call that fetches the entries a bounded inline left out,
  * addressed through the artifact's own handle so the caller never re-finds it.
- * mode=artifact addresses docx by heading, pptx by slide number, pdf by page;
- * a sheet has no sub-selector, so the whole sheet is named instead.
+ * mode=artifact addresses docx by heading, pptx by slide number, pdf by page,
+ * csv by logical row range (it ignores `sheet`, and would serve the head again);
+ * an xlsx sheet has no sub-selector, so the whole sheet is named instead.
  */
 function remainingArtifactSectionsCall(
   surface: ArtifactTaskPackSurface,
@@ -2430,6 +2494,10 @@ function remainingArtifactSectionsCall(
     tool: "tl_read_file",
     arguments: { mode: "artifact", handle: surface.handle, ...extra },
   });
+  if ("sheet" in section && surface.artifactKind === "csv") {
+    const rows = csvRowsOf(remaining);
+    return call(rows !== undefined ? csvRowsSelector(surface.path, rows) : {});
+  }
   if ("sheet" in section) return call({ sheet: section.sheet, as: "json" });
   if (section.kind === "docx") return call({ sections: remaining.slice(0, MAX_REMAINING_SECTION_IDS) });
   if (section.kind === "pptx") {
@@ -2462,14 +2530,44 @@ function boundedRemainingIds(remaining: readonly string[]): string[] {
  */
 function buildArtifactSectionEntry(
   surface: ArtifactTaskPackSurface,
-  section: ArtifactTaskPackSection,
+  extracted: ArtifactTaskPackSection,
   capBytes: number,
+  query: string,
 ): ArtifactTaskPackSectionEntry {
+  const section = surface.artifactKind === "csv" && csvSampleEnabled()
+    ? plainCsvSample(extracted, capBytes, csvLookupComplete(extracted) ? CSV_LOOKUP_SAMPLE_ROWS : CSV_SURFACE_SAMPLE_ROWS)
+    : extracted;
   const fit = fitArtifactSectionToBytes(section, capBytes);
   const entry: ArtifactTaskPackSectionEntry = { path: surface.path, section: fit.section };
   if (!fit.partial) return entry;
   entry.content_completeness = "partial";
   entry.handle = surface.handle;
+  if ("sheet" in fit.section && fit.section.query_window !== undefined) {
+    // A3: `next` opens the request over the whole table. Rows this reply ends up
+    // carrying in full are booked at the settle, so it does not repeat them; rows that
+    // cannot be booked (a multi-line row, a shed body) it repeats, and it never skips one.
+    const kind = surface.path.toLowerCase().endsWith(".tsv") ? "tsv" : "csv";
+    entry.next = {
+      tool: "tl_read_file",
+      arguments: { targets: [{ path: surface.path }], select: { kind }, query },
+    };
+    entry.note = queryWindowSectionNote(fit.section);
+    return entry;
+  }
+  if ("sheet" in section && "sheet" in fit.section && surface.artifactKind === "csv" && fit.remaining.length > 0) {
+    entry.remaining_sections = boundedRemainingIds(fit.remaining);
+    if (fit.section.lookup !== undefined) {
+      // A complete lookup is what the request came for: `handle` still reads any other row.
+      if (!csvLookupComplete(fit.section)) entry.next = remainingArtifactSectionsCall(surface, fit.section, fit.remaining);
+      entry.note = plainCsvLookupNote(fit.section);
+      return entry;
+    }
+    entry.next = remainingArtifactSectionsCall(surface, fit.section, fit.remaining);
+    entry.note = section !== extracted && fit.section === section
+      ? plainCsvSampleNote(fit.section)
+      : plainCsvCutNote(section, fit.section, fit.section === section ? "" : ` (${ARTIFACT_SURFACE_INLINE_CAP_BYTES}B per-artifact inline cap)`);
+    return entry;
+  }
   if (fit.remaining.length > 0) {
     const served = artifactSectionEntryIds(fit.section).length;
     entry.remaining_sections = boundedRemainingIds(fit.remaining);
@@ -2517,7 +2615,7 @@ async function prefetchArtifactSurfaceSections(
     if (minted === undefined) continue;
     let extraction: ArtifactBuildExtraction;
     try {
-      extraction = await extractArtifactBuildSection(minted, query);
+      extraction = await extractArtifactBuildSection(minted, query, { csvQueryWindowBytes: Math.min(ARTIFACT_SURFACE_INLINE_CAP_BYTES, remainingBudget), workspace });
     } catch {
       continue;
     }
@@ -2531,13 +2629,14 @@ async function prefetchArtifactSurfaceSections(
       surface,
       extraction.section,
       Math.min(ARTIFACT_SURFACE_INLINE_CAP_BYTES, remainingBudget),
+      query,
     );
     let entryBytes = Buffer.byteLength(JSON.stringify(entry), "utf8");
     if (entryBytes > remainingBudget) {
       const overhead = entryBytes - Buffer.byteLength(JSON.stringify(entry.section), "utf8");
       const retryCap = remainingBudget - overhead;
       if (retryCap <= 0) break;
-      entry = buildArtifactSectionEntry(surface, extraction.section, retryCap);
+      entry = buildArtifactSectionEntry(surface, extraction.section, retryCap, query);
       entryBytes = Buffer.byteLength(JSON.stringify(entry), "utf8");
       if (entryBytes > remainingBudget) break;
     }
@@ -2546,7 +2645,12 @@ async function prefetchArtifactSurfaceSections(
     usedBytes += entryBytes;
   }
   if (entries.length === 0) return;
-  artifactSectionPrefetch.set(workspace, { entries, stamps, callerNamed });
+  artifactSectionPrefetch.set(artifactPrefetchKey(workspace), {
+    entries,
+    stamps,
+    callerNamed,
+    lookupAnswers: entries.length === 1 && csvLookupComplete(entries[0]!.section) && csvLookupAnswersRequest(stripPathSpans("", query)),
+  });
 }
 
 /**
@@ -2561,10 +2665,10 @@ async function prefetchArtifactSurfaceSections(
  * The whole-pack ceiling is the artifact-bundle tier, the highest transport-safe
  * cap that exists, so artifact bodies can never push a pack past it.
  */
-function attachPrefetchedArtifactSections(result: TaskPackResult, workspace: string): void {
+function attachPrefetchedArtifactSections(result: TaskPackResult, workspace: string, profile: TaskProfile): void {
   if (result.pack_unchanged === true) return;
   if (result.section !== undefined || result.artifact_sections !== undefined) return;
-  const prefetch = artifactSectionPrefetch.get(workspace);
+  const prefetch = artifactSectionPrefetch.get(artifactPrefetchKey(workspace));
   if (prefetch === undefined || prefetch.entries.length === 0) return;
   const artifactPaths = new Set(
     (result.surfaces as TaskPackResultSurface[])
@@ -2588,11 +2692,40 @@ function attachPrefetchedArtifactSections(result: TaskPackResult, workspace: str
   if (entries.length === 0) return;
   result.artifact_sections = entries;
   result.inlined = [...(result.inlined ?? []), ...stamps];
+  // A read-only question a csv's own rows answer needs no code role. Without this the
+  // default "contract, api" gap sends it on to a search for rows it already holds.
+  prefetch.lookupClosedUniverse = prefetch.lookupAnswers && profile === "answer" && entries.length === 1 && codeTaskPackSurfaces(result.surfaces).length === 0;
+  if (prefetch.lookupClosedUniverse) result.missing = [];
+}
+
+/**
+ * "All the rows with X" names an open universe that this response has already closed:
+ * the lookup read every row of the table the request named.
+ */
+function csvLookupClosedUniverse(workspace: string | undefined): boolean {
+  return workspace !== undefined && artifactSectionPrefetch.get(artifactPrefetchKey(workspace))?.lookupClosedUniverse === true;
+}
+
+/**
+ * What to add to a window's logical row number to get its file line, when that holds
+ * for every row of the window, so any cut of it can still name its lines. A blank line
+ * or a multi-line field inside the window has no such number.
+ */
+function csvWindowLineOffset(
+  model: { readonly dataSpans: ReadonlyArray<readonly [number, number]>; readonly firstDataRow: number },
+  window: { readonly startIdx: number; readonly endIdx: number },
+): number | undefined {
+  const offset = model.dataSpans[window.startIdx]![0] - (model.firstDataRow + window.startIdx);
+  for (let index = window.startIdx; index < window.endIdx; index += 1) {
+    const [start, end] = model.dataSpans[index]!;
+    if (start !== end || start !== model.firstDataRow + index + offset) return undefined;
+  }
+  return offset;
 }
 
 /** Normalized paths of the artifacts THIS request named, for trimToCap's shed order. */
 function prefetchedCallerNamedArtifacts(workspace: string): ReadonlySet<string> {
-  return artifactSectionPrefetch.get(workspace)?.callerNamed ?? new Set<string>();
+  return artifactSectionPrefetch.get(artifactPrefetchKey(workspace))?.callerNamed ?? new Set<string>();
 }
 
 interface GenericTaskPackFallback {
@@ -2699,7 +2832,7 @@ async function buildTaskPackWithEngineConfiguration(
   args: TaskPackArgs,
   workspace: string,
 ): Promise<TaskPackResult> {
-  artifactSectionPrefetch.delete(workspace);
+  artifactSectionPrefetch.delete(artifactPrefetchKey(workspace));
   // T1: resolve the effective byte ceiling ONCE per call and hold it for the
   // entire async lifetime of this call (prefetch AND core) -- see
   // packByteCeilingStorage's doc comment above for why this is an ALS run()
@@ -2741,7 +2874,7 @@ async function buildTaskPackWithEngineConfiguration(
     } catch {
       // A failed prefetch must never fail the pack — it degrades to the
       // pre-A1 behavior (artifact stubs + the `extract` call).
-      artifactSectionPrefetch.delete(workspace);
+      artifactSectionPrefetch.delete(artifactPrefetchKey(workspace));
     }
     try {
       const built = await buildTaskPackCore(args, workspace);
@@ -2788,7 +2921,7 @@ async function buildTaskPackWithEngineConfiguration(
       }
       return built;
     } finally {
-      artifactSectionPrefetch.delete(workspace);
+      artifactSectionPrefetch.delete(artifactPrefetchKey(workspace));
     }
   })))));
 }
@@ -4190,7 +4323,7 @@ function singleSiteShortCircuitSeed(
   let buf: Buffer;
   try {
     // served-bytes: readServedText
-    buf = fs.readFileSync(real);
+    buf = readFileForRequest(real);
   } catch {
     return undefined;
   }
@@ -4484,7 +4617,7 @@ function boundedWorkspaceText(workspace: string, relPath: string): string | unde
     const stat = fs.statSync(real);
     if (!stat.isFile() || stat.size > EXECUTED_SEARCH_HIT_SCAN_MAX_BYTES) return undefined;
     // served-bytes: not-served (executed-search hit VERIFICATION: undefined means 'I could not look', never 'the answer is no')
-    return decodeTextBuffer(fs.readFileSync(real)) ?? undefined;
+    return decodeTextBuffer(readFileForRequest(real)) ?? undefined;
   } catch {
     return undefined;
   }
@@ -5525,9 +5658,20 @@ async function buildTaskPackCore(
     locatingQuery, workspace, args.surfaceRoles, allCandidates.map((c) => c.path),
   );
 
+  // 2026-10-29 (first-hop field report): a generic first pack that names a declaration the
+  // workspace defines in one implementation file (`res.send`, `req.protocol`, `click.prompt`)
+  // leads with that declaration's body. Only the surfaces built from the SELECTION change; the
+  // locator's verdict, `anchorPaths` and `trimmedPaths` below stay what the locator made them.
+  const { candidates: surfaceCandidates, declaration: namedDeclaration } =
+    await withNamedDeclarationLead(selectedCandidates, args, query, workspace, cache, profile);
   const builtSurfaces = await Promise.all(
-    selectedCandidates.map((candidate) => candidateToSurface(candidate, workspace, requiredRoles, locatingQuery, cache)),
+    surfaceCandidates.map((candidate) => candidateToSurface(candidate, workspace, requiredRoles, locatingQuery, cache)),
   );
+  // The lead is context, not a write frontier: the role-derived `required` candidateToSurface
+  // gives any surface of a required role is not claimed for it (the locator's own pack decides).
+  surfaceCandidates.forEach((candidate, index) => {
+    if (candidate.why === REQUEST_ANCHOR_DEFINITION_WHY && candidate.required !== true) delete builtSurfaces[index]!.required;
+  });
   surfaces.push(...builtSurfaces);
   const protectedSurfaces = new Set<TaskPackSurface>();
   await augmentConcernGroupSurfaces(surfaces, locatingQuery, workspace, requiredRoles, cache, protectedSurfaces);
@@ -5685,6 +5829,7 @@ async function buildTaskPackCore(
   // traffic generic-profile path. Same default-OFF prototypes as the other
   // hook sites; see frontierNeighbours.ts/usageInventory.ts's doc comments.
   attachPlanAids(finalResult, workspace, query);
+  moveNamedDeclarationFirst(finalResult, namedDeclaration);
   return finalResult;
 }
 
@@ -5879,7 +6024,13 @@ async function buildAnswerTaskPack(
     workspace,
     cache,
   );
-  const locatedCandidates = [...locatorCandidates, ...responsibilityCandidates]
+  // 2026-10-29 (first-hop field report): the anchors the request NAMES — a dotted
+  // member (`res.redirect`), an identifier, a quoted or bracketed literal — are
+  // looked up in the workspace before any lexical ranking, and their declaration /
+  // exact-text windows lead the candidate list (anchorFirst.ts).
+  const anchorResolution = await resolveRequestAnchorsForPack(args, query, workspace, cache);
+  const anchorCandidates = requestAnchorCandidates(anchorResolution);
+  const locatedCandidates = [...anchorCandidates, ...locatorCandidates, ...responsibilityCandidates]
     .filter((candidate, index, all) => all.findIndex((other) =>
       other.path === candidate.path
       && other.symbol === candidate.symbol
@@ -5899,6 +6050,35 @@ async function buildAnswerTaskPack(
     cache,
   );
   const explicitAnswerNames = new Set(explicitCodeIdentifiers(query).map(normIdent));
+  // The anchors lead the answer (their declaration IS the subject) only where the locator agrees
+  // that subject is in their file. A locator that found its primary elsewhere (the focal the
+  // request names in plain words, `resend300`; a test file the request also asks for) has
+  // understood something the anchors do not cover: the pack is then decided exactly as it would
+  // have been without them, and the anchors only LEAD the evidence it serves (the lead block
+  // below) — they neither settle the decision state nor displace the locator's own selection.
+  const anchorRankedEntries = rankedAnswerCandidates.filter((entry) => entry.anchorDefinition === true || entry.anchorLiteral === true);
+  const anchorOwnedPaths = new Set(anchorRankedEntries.map((entry) => entry.candidate.path));
+  // A request that also asks for test evidence ("Explain Cache.get … its tests") is not only about
+  // the declaration either: the locator's own selection decides, the anchors lead.
+  // …nor when the ranking itself already holds exact identifiers the request names in other files
+  // (`OrderService`, `PaymentService` beside a `cancelOrder` that is defined in the frontend): that
+  // is the baseline's answer, and its primary stays.
+  const exactElsewhere = rankedAnswerCandidates.some((entry) =>
+    entry.anchorDefinition !== true && entry.anchorLiteral !== true
+    && entry.exactIdentifier && !anchorOwnedPaths.has(entry.candidate.path));
+  const anchorsAgreeWithLocator = anchorRankedEntries.length === 0
+    || (
+      !queryRequestsTestEvidence(query)
+      && !exactElsewhere
+      && (!locateResult.hit || primaryLocatorPath === undefined || anchorOwnedPaths.has(primaryLocatorPath))
+    );
+  const deferredAnchorEntries: RankedAnswerEvidenceCandidate[] = [];
+  if (!anchorsAgreeWithLocator) {
+    for (const entry of anchorRankedEntries) {
+      deferredAnchorEntries.push(entry);
+      rankedAnswerCandidates.splice(rankedAnswerCandidates.indexOf(entry), 1);
+    }
+  }
   rankedAnswerCandidates.sort((a, b) => {
     const namedPath = (entry: RankedAnswerEvidenceCandidate): number => Number(
       explicitAnswerNames.has(normIdent(path.basename(
@@ -5906,7 +6086,9 @@ async function buildAnswerTaskPack(
         path.extname(entry.candidate.path),
       ))),
     );
-    return namedPath(b) - namedPath(a);
+    return Number(b.anchorDefinition === true) - Number(a.anchorDefinition === true)
+      || Number(b.anchorLiteral === true) - Number(a.anchorLiteral === true)
+      || namedPath(b) - namedPath(a);
   });
   if (
     rankedAnswerCandidates[0] !== undefined
@@ -5915,6 +6097,8 @@ async function buildAnswerTaskPack(
   ) {
     const implementationOwned = rankedAnswerCandidates.filter((entry) =>
       !isNonImplementationAnswerCandidate(entry.candidate)
+      || entry.anchorDefinition === true
+      || entry.anchorLiteral === true
       || (
         entry.candidate.symbol !== undefined
         && explicitAnswerNames.has(normIdent(entry.candidate.symbol))
@@ -5943,7 +6127,8 @@ async function buildAnswerTaskPack(
   const identifierAbsences = explicitIdentifierAbsences(
     workspace,
     explicitCodeIdentifiers(query).slice(0, 6).filter((identifier) =>
-      !rankedAnswerCandidates.some((entry) =>
+      !anchorResolution.definedIds.some((defined) => normIdent(defined) === normIdent(identifier))
+      && !rankedAnswerCandidates.some((entry) =>
         entry.candidate.symbol !== undefined && unqualifiedSymbolTail(entry.candidate.symbol) === identifier)),
     () => freshAbsenceUniverse(workspace),
     cache,
@@ -5973,8 +6158,20 @@ async function buildAnswerTaskPack(
     explicitRecoveryRan,
   );
   if (sameNameSubjects.size > 0) sameNameSubjectsByCache.set(cache, sameNameSubjects);
+  // …and the anchor's declaration does the recovery's job: with no locator-ranked candidate for the
+  // named identifier, the pack baseline would have injected it as `answer-explicit-identifier-recovery`
+  // (recoverExplicitIdentifierAnswerCandidates stands down once any exact candidate leads).
+  // The exact candidates the ranking WITHOUT the anchors' declarations would have carried: an
+  // anchor's declaration counts only where the locator's own candidate for that file ranked as the
+  // named identifier too (`locatorAlsoExact`). The decision state of a pack — one exact site
+  // (`exactLocatedAnswer`), a recovered one, a candidate list — is read from these, so naming a
+  // second identifier that the workspace merely DEFINES (a constant `isRetryable` reads) does not
+  // turn a settled answer into a choice between two files.
+  const decisionExactEntries = rankedAnswerCandidates.filter((entry) =>
+    entry.exactIdentifier && (entry.anchorDefinition !== true || entry.locatorAlsoExact === true));
   const recoveredExactAnswer =
-    rankedAnswerCandidates[0]?.candidate.why === "answer-explicit-identifier-recovery";
+    rankedAnswerCandidates[0]?.candidate.why === "answer-explicit-identifier-recovery"
+    || (rankedAnswerCandidates[0]?.anchorDefinition === true && decisionExactEntries.length === 0);
   const strongEvidenceAnswer = rankingQuery !== query
     && !locateResult.hit
     && rankedAnswerCandidates[0]?.strongEvidence === true
@@ -6015,8 +6212,7 @@ async function buildAnswerTaskPack(
       || (!locateResult.hit && isStrongRecoveredAnswerCandidate(rankedAnswerCandidates, rankingEvidenceQuery))
   );
   const exactLocatedPaths = new Set(
-    rankedAnswerCandidates
-      .filter((entry) => entry.exactIdentifier)
+    (decisionExactEntries.length > 0 ? decisionExactEntries : rankedAnswerCandidates.filter((entry) => entry.exactIdentifier))
       .map((entry) => entry.candidate.path),
   );
   const topAnswerPathStem = rankedAnswerCandidates[0]
@@ -6054,12 +6250,27 @@ async function buildAnswerTaskPack(
     && !requiresRelatedAnswerContext(query)
     && exactLocatedPaths.size > 0
     && [...exactLocatedPaths].every((exactPath) => sameNameAnswerPaths.has(exactPath));
+  // 2026-10-29: the declaration(s) of the anchors the request names, when they
+  // are the ONLY exact-identifier site of the pack (one file): that file's
+  // declarations ARE the answer's subject, located or not by the lexical locator.
+  const anchorEntries = anchorsAgreeWithLocator
+    ? rankedAnswerCandidates.filter((entry) => entry.anchorDefinition === true || entry.anchorLiteral === true)
+    : deferredAnchorEntries;
+  const anchorDefinitionLed = rankedAnswerCandidates[0]?.anchorDefinition === true
+    // The decision state stays the locator's: an anchor the locator itself did not hit
+    // leads the evidence but does not turn a candidate list into a settled answer.
+    && locateResult.hit
+    && exactLocatedPaths.size === 1
+    && !sameNameAmbiguousAnswer && !hasOpenUniverseIntent(query) && !requiresRelatedAnswerContext(query);
   const exactLocatedAnswer = !sameNameAmbiguousAnswer && !hasOpenUniverseIntent(query) && !requiresRelatedAnswerContext(query) && (exactNamedFileAnswer
+    || anchorDefinitionLed
     || (recoveredExactAnswer && exactLocatedPaths.size === 1)
     || (locateResult.hit
       && rankedAnswerCandidates[0]?.exactIdentifier === true
       && exactLocatedPaths.size === 1));
-  let candidates = exactLocatedAnswer
+  let candidates = anchorDefinitionLed
+    ? rankedAnswerCandidates.filter((entry) => entry.anchorDefinition === true || entry.anchorLiteral === true).map((entry) => entry.candidate)
+    : exactLocatedAnswer
     ? [rankedAnswerCandidates[0]!.candidate]
     : sameNameAmbiguousAnswer
     ? rankedAnswerCandidates
@@ -6074,7 +6285,7 @@ async function buildAnswerTaskPack(
     : strongRecoveredAnswer
     ? [rankedAnswerCandidates[0]!.candidate]
     : orderByLocatorVerdict(rankedAnswerCandidates, requiredLocatorPaths, primaryLocatorPath);
-  let selectionLimit = sameNameAmbiguousAnswer
+  let selectionLimit = sameNameAmbiguousAnswer || anchorDefinitionLed
     ? candidates.length
     : locateResult.hit
     ? exactLocatedAnswer ? 1 : MAX_SURFACES_DISTINCT
@@ -6083,6 +6294,23 @@ async function buildAnswerTaskPack(
     : strongRecoveredAnswer
     ? 1
     : 3;
+  // The anchors lead whatever the selection above chose (orderByLocatorVerdict
+  // puts the locator's primary first); the rest of the selection follows them.
+  if (anchorEntries.length > 0 && !anchorDefinitionLed) {
+    const anchorCandidateKey = (candidate: ImpactCandidate): string => `${candidate.path}\0${candidate.range ?? candidate.line}`;
+    const anchorKeys = new Set(anchorEntries.map((entry) => anchorCandidateKey(entry.candidate)));
+    // Anchors the locator does not agree with (`anchorsAgreeWithLocator`) follow the locator's own
+    // front instead: its primary stays the pack's primary (the surface the member excerpts, the
+    // structure map and the focus are planned against).
+    const selectionWithoutAnchors = candidates.filter((candidate) => !anchorKeys.has(anchorCandidateKey(candidate)));
+    const front = anchorsAgreeWithLocator ? 0 : Math.max(1, primaryCount);
+    candidates = [
+      ...selectionWithoutAnchors.slice(0, front),
+      ...anchorEntries.map((entry) => entry.candidate),
+      ...selectionWithoutAnchors.slice(front),
+    ];
+    selectionLimit = Math.max(selectionLimit, anchorEntries.length + 1);
+  }
   // TL_CONCERN_RECOVERY / prose diversification (Phase 3, orchestrator
   // adjudication 2026-09-19). Both gated on concernRecoveryEnabled() and both
   // computed ONLY from `candidates`/`selectionLimit` as derived above this
@@ -6532,6 +6760,25 @@ async function buildAnswerTaskPack(
       typeof surface.code === "string" && surface.code.length > 0,
   );
   if (surfaces.length === 0) return undefined;
+  // 2026-10-29: the rows the LOCATOR contributed that nothing supports (see the
+  // location-only pass below) — identified by object, so a row another mechanism
+  // adds later (a facet closure window, a caller, a counterexample) is never one.
+  const locationOnlySurfaces = new Set<TaskPackSurface>();
+  if (anchorEntries.length > 0) {
+    const supportedPaths = new Set<string>([
+      ...anchorEntries.map((entry) => entry.candidate.path),
+      // A window a facet closure, a caller or a concern recovery added is that mechanism's evidence
+      // (the focal the request names in plain words: `resend300`), not a bare locator hit.
+      ...concernRecoveredPaths,
+      ...rankedAnswerCandidates
+        .filter((entry) => entry.exactIdentifier || (entry.strongEvidence && classifySurface(entry.candidate.path) !== "doc"))
+        .map((entry) => entry.candidate.path),
+    ]);
+    built.forEach((surface, index) => {
+      const why = selected[index]!.why;
+      if (!supportedPaths.has(selected[index]!.path) && isLocatorOriginWhy(why)) locationOnlySurfaces.add(surface);
+    });
+  }
   // v0.16 6t-7 T03: the structure map replaces the primary type's centered
   // slice, and the enum types its header is declared in (the state a
   // transition table maps) ride beside it. The query-focused member excerpts
@@ -6778,6 +7025,31 @@ async function buildAnswerTaskPack(
   // instead of this function ever throwing a bare, unstructured JSON-RPC
   // error with no `v:1` envelope.
   if (surfaces.length === 0) return undefined;
+  // 2026-10-29: once the request's own anchors are served, every other row that
+  // is neither an exact-identifier site nor strong code evidence is a LOCATION —
+  // path, range, handle and `remaining` = its whole range, no body (a changelog
+  // that repeats the word, a filename-match neighbour). The caller reads it by
+  // handle if it wants it; the answer does not pay for it.
+  if (locationOnlySurfaces.size > 0) {
+    for (const surface of surfaces) {
+      if (!locationOnlySurfaces.has(surface) || surfaceWhyHasMarker(surface.why, "query-named-file")) continue;
+      // A few lines cost less than the location that replaces them (path, range, handle, remaining).
+      if (Buffer.byteLength(surface.code ?? "", "utf8") < LOCATION_ONLY_MIN_BODY_BYTES) continue;
+      // Bytes another row of the same file already carries are not a location to point at.
+      const bounds = parsePackLineRange(surface.range);
+      if (surfaces.some((other) => {
+        if (other === surface || other.path !== surface.path || other.code === undefined || locationOnlySurfaces.has(other)) return false;
+        const otherBounds = parsePackLineRange(other.range);
+        return bounds === undefined || otherBounds === undefined || (otherBounds[0] <= bounds[1] && bounds[0] <= otherBounds[1]);
+      })) continue;
+      delete surface.code;
+      delete surface.outline;
+      delete surface.appended_windows;
+      surface.required = false;
+      surface.content_completeness = "partial";
+      surface.remaining_ranges = [surface.range];
+    }
+  }
 
   // Issue #3 dominance tie-break: computed once, reused below (after `result`
   // exists) to serve the winner's body — see `applyDominancePromotion`.
@@ -11081,9 +11353,41 @@ function relevantSheetName(
   return best?.name ?? sheets[0]?.name;
 }
 
+/** The rows of a named csv holding a value the request spells, or undefined when it spells none or the table was not read whole. */
+function csvSectionLookup(bytes: Uint8Array, ext: string, query: string, capBytes: number): CsvLookup | undefined {
+  const model = csvPageModel(bytes, { ext });
+  // A cell past the served columns was not searched, so "every row" could not be claimed.
+  if (model === undefined || model.cellsDropped) return undefined;
+  const request = stripPathSpans("", query);
+  const terms = csvLookupTerms(model, request);
+  if (terms.length === 0) {
+    const absent = csvLookupAbsent(model, request);
+    if (absent.length === 0) return undefined;
+    const column_values = csvLookupColumnValues(model, request);
+    return { terms: [], absent, ...(column_values !== undefined ? { column_values } : {}), total: 0, scanned: model.rows.length, row_numbers: [], rows: [] };
+  }
+  const roomBytes = Math.min(CSV_LOOKUP_MAX_BYTES, capBytes - CSV_LOOKUP_SECTION_OVERHEAD_BYTES);
+  const any = csvLookupRows(model, terms, CSV_LOOKUP_MAX_ROWS, roomBytes);
+  if (any.row_numbers.length === any.total) return csvLookupProjected(model, any, request);
+  // Too many to list. Values of different columns may narrow them to a list that fits.
+  const across = csvLookupAcrossColumns(model, terms, request, CSV_LOOKUP_MAX_ROWS, roomBytes);
+  const found = across === undefined ? any : { ...across, any_total: any.total };
+  if (found.row_numbers.length === found.total) return csvLookupProjected(model, found, request);
+  // Still too many: the count and a few rows are what is worth paying for now.
+  const partial: CsvLookup = { ...found, row_numbers: found.row_numbers.slice(0, CSV_LOOKUP_PARTIAL_ROWS), rows: found.rows.slice(0, CSV_LOOKUP_PARTIAL_ROWS) };
+  if (!csvLookupAsksCount(request, model.columns) || (terms.length > 1 && across === undefined)) return partial;
+  // The count answers it, so no row is worth paying for.
+  const counted: CsvLookup = { ...partial, counted: true, row_numbers: [], rows: [] };
+  if (across !== undefined) return counted;
+  const whole = csvLookupWholeCells(model, terms);
+  return { ...counted, ...(whole.total !== found.total ? { whole_cell_total: whole.total } : whole.column !== undefined ? { all_of: { [whole.column]: terms } } : {}) };
+}
+
 async function extractArtifactBuildSection(
   artifact: MintedArtifactSurface,
   query: string,
+  /** A3: the bytes a query-relevant csv window may use. Only the surface inliner passes it; artifact_build's own ladder keeps the head. */
+  options: { csvQueryWindowBytes?: number; workspace?: string } = {},
 ): Promise<ArtifactBuildExtraction> {
   const artifactPath = artifact.surface.path;
   const artifactCall = (selection: ToolCall["arguments"] = {}): ContinuationCall => ({
@@ -11250,9 +11554,55 @@ async function extractArtifactBuildSection(
     // (artifactSectionCandidates' "sheet" in section table path, meaningful(),
     // fitArtifactSections). `sheet` carries the file basename as the logical
     // table name; `ext` forces the tab delimiter for .tsv inside csvTable.
+    const sectionId = path.posix.basename(artifactPath);
+    if (options.csvQueryWindowBytes !== undefined && artifactQueryWindowEnabled()) {
+      const model = csvPageModel(artifact.bytes, { ext: artifact.file.ext });
+      // The section's JSON scaffolding beside its rows; the fit trims any excess.
+      const room = options.csvQueryWindowBytes - Buffer.byteLength(JSON.stringify({ sheet: sectionId, columns: model?.columns ?? [] }), "utf8") - 128;
+      const window = model === undefined ? undefined : csvQueryWindow(model, artifactQueryTokens(query), room, 200);
+      if (model !== undefined && window !== undefined) {
+        const windowed = csvTable(artifact.bytes, {
+          ext: artifact.file.ext,
+          range: `${model.firstDataRow + window.startIdx}-${model.firstDataRow + window.endIdx - 1}`,
+          maxRows: window.endIdx - window.startIdx,
+        });
+        if (windowed.ok && windowed.columns.length > 0) {
+          const lineOffset = csvWindowLineOffset(model, window);
+          if (lineOffset !== undefined && options.workspace !== undefined) {
+            // Staged only: the settle keeps just the rows the finished reply still carries in full.
+            const first = model.dataSpans[window.startIdx]![0];
+            const last = model.dataSpans[window.endIdx - 1]![1];
+            recordServedRange(options.workspace, artifactPath, shaOfBytes(artifact.bytes), first, last, Math.max(countLines(decodeCsvBytes(artifact.bytes)), last), {
+              mode: "task_pack",
+              range: `${first}-${last}`,
+              call: beginServeCall(options.workspace),
+            });
+          }
+          return {
+            section: {
+              sheet: sectionId,
+              range: windowed.range,
+              columns: windowed.columns,
+              rows: windowed.rows,
+              truncated: window.endIdx - window.startIdx < model.rows.length,
+              query_window: {
+                selected_by: "query",
+                total_rows: model.rows.length,
+                anchor_row: model.firstDataRow + window.anchorIdx,
+                ...(lineOffset !== undefined ? { line_offset: lineOffset } : {}),
+              },
+            },
+            sectionId,
+            next: baseNext,
+          };
+        }
+      }
+    }
     const table = csvTable(artifact.bytes, { ext: artifact.file.ext });
     if (!table.ok || table.columns.length === 0) return { next: baseNext };
-    const sectionId = path.posix.basename(artifactPath);
+    const lookup = options.csvQueryWindowBytes !== undefined && csvLookupEnabled()
+      ? csvSectionLookup(artifact.bytes, artifact.file.ext, query, options.csvQueryWindowBytes)
+      : undefined;
     return {
       section: {
         sheet: sectionId,
@@ -11260,6 +11610,8 @@ async function extractArtifactBuildSection(
         columns: table.columns,
         rows: table.rows,
         truncated: table.truncated,
+        ...(table.truncated ? { total_rows: table.total_rows } : {}),
+        ...(lookup !== undefined ? { lookup } : {}),
       },
       sectionId,
       next: baseNext,
@@ -11894,6 +12246,25 @@ function surfaceBodyCoversRange(surface: TaskPackSurface, range: string): boolea
   return true;
 }
 
+/** True when this surface's served body shows line `line` of its file (the main range minus its holes, or an appended window). */
+function surfaceServesLine(surface: TaskPackSurface, line: number): boolean {
+  // A `code_unchanged` residency pointer is the caller's own copy of the same bytes: it serves
+  // exactly what its code would (a re-pack of an answered task must stay answered).
+  if (!hasServedCode(surface)) return false;
+  const outer = parsePackLineRange(surface.range);
+  if (outer !== undefined && line >= outer[0] && line <= outer[1]) {
+    const inHole = (surface.remaining_ranges ?? []).some((window) => {
+      const hole = parsePackLineRange(window);
+      return hole === undefined || (line >= hole[0] && line <= hole[1]);
+    });
+    if (!inHole) return true;
+  }
+  return (surface.appended_windows ?? []).some((window) => {
+    const bounds = parsePackLineRange(window.range);
+    return bounds !== undefined && line >= bounds[0] && line <= bounds[1];
+  });
+}
+
 /** True when `relPath` lies at or under the ancestor directory `dir` (both workspace-relative POSIX). An empty `dir` scopes to the whole workspace (no filtering). */
 function isUnderAncestor(relPath: string, dir: string): boolean {
   if (dir === "") return true;
@@ -12411,7 +12782,7 @@ async function lightAnswerVerdict(
     if (!stat.isFile()) return { skip: "not-a-file" };
     if (stat.size > LIGHT_ANSWER_MAX_BYTES) return { skip: "over-bytes" };
     // served-bytes: readServedText (the serve policy's verdict; never served from here)
-    const verdict = readServedText(fs.readFileSync(real));
+    const verdict = readServedText(readFileForRequest(real));
     if (verdict.kind !== "clean") return { skip: "not-clean-text" };
     text = verdict.text;
   } catch {
@@ -12480,7 +12851,7 @@ function lightAnswerSubjectElsewhere(workspace: string, relPath: string, names: 
       const stat = fs.statSync(file.absPath);
       if (!stat.isFile() || stat.size > 2 * 1024 * 1024) continue;
       // served-bytes: not-served (TL_EFF_LIGHT_ANSWER applicability scan: only tested for a subject name's whole-identifier occurrence; the light path serves the one target file through readServedText, never these)
-      content = fs.readFileSync(file.absPath, "utf8");
+      content = readFileForRequest(file.absPath).toString("utf8");
     } catch {
       continue;
     }
@@ -14568,7 +14939,16 @@ export function explicitCodeIdentifiers(query: string): string[] {
 export function explicitCodeIdentifierEntries(query: string): Array<{ readonly token: string; readonly framedOnly: boolean }> {
   const unstripped = maskCitationFormatFields(maskEvaluationInputRecords(query));
   const cleaned = stripPathSpans("", unstripped);
-  const matches = cleaned.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) ?? [];
+  const tokenMatches = [...cleaned.matchAll(/[A-Za-z_$][A-Za-z0-9_$]*/g)];
+  // 2026-10-29 (first-hop field report): a dotted member chain the request names
+  // (`res.redirect`, `Foo.prototype.bar`, requestAnchors.ts) is ONE explicit
+  // identifier, not the two prose words `res` and `redirect` the casing rules
+  // below see. It joins at its place in the request. A chain the workspace
+  // defines nowhere (`os.path.join`) stays a guess: `memberOnlyExplicitIdentifiers`.
+  const pendingChains = anchorChainsOf(query)
+    .map((raw) => ({ raw, at: cleaned.indexOf(raw) }))
+    .filter((chain) => chain.at >= 0)
+    .sort((a, b) => a.at - b.at);
   const backticked = new Set(
     [...cleaned.matchAll(/`([A-Za-z_$][A-Za-z0-9_$]*)`/g)]
       .map((match) => match[1]!.toLowerCase()),
@@ -14589,7 +14969,18 @@ export function explicitCodeIdentifierEntries(query: string): Array<{ readonly t
   const framedSpelling = new Map(declarationFramedNames(unstripped).map((name) => [name.toLowerCase(), name] as const));
   const seen = new Set<string>();
   const out: Array<{ readonly token: string; readonly framedOnly: boolean }> = [];
-  for (const token of matches) {
+  const admitChainsUpTo = (position: number): void => {
+    while (pendingChains.length > 0 && pendingChains[0]!.at <= position) {
+      const chain = pendingChains.shift()!.raw;
+      const chainKey = chain.toLowerCase();
+      if (PROTOCOL_IDENTIFIERS.has(chainKey) || seen.has(chainKey)) continue;
+      seen.add(chainKey);
+      out.push({ token: chain, framedOnly: false });
+    }
+  };
+  for (const tokenMatch of tokenMatches) {
+    const token = tokenMatch[0];
+    admitChainsUpTo(tokenMatch.index ?? 0);
     const key = token.toLowerCase();
     const codeShaped = token.includes("_")
       || token.includes("$")
@@ -14609,6 +15000,7 @@ export function explicitCodeIdentifierEntries(query: string): Array<{ readonly t
     seen.add(key);
     out.push({ token: framedOnly ? framedSpelling.get(key)! : token, framedOnly });
   }
+  admitChainsUpTo(Number.POSITIVE_INFINITY);
   return out;
 }
 
@@ -14633,6 +15025,9 @@ function memberOnlyExplicitIdentifiers(query: string): Set<string> {
       || (/^[A-Z][A-Z0-9_]{2,}$/.test(identifier) && !isProseAcronym(identifier));
     if (!casingShaped) out.add(key);
   }
+  // A dotted chain (`res.redirect`) is never a name by casing: it is a guess
+  // when the workspace defines it nowhere (`os.path.join`).
+  for (const chain of anchorChainsOf(query)) out.add(normIdent(chain));
   return out;
 }
 
@@ -17202,6 +17597,14 @@ function significantQueryTokens(query: string): string[] {
   return tokenizeQuery(stripPathSpans("", query), { minLen: 4, stopWords: CONCERN_STOP_WORDS, mode: "simple" });
 }
 
+/**
+ * A3: the tokens a csv cell may match. One letter shorter than the task pack's
+ * concern tokens, because a table's own codes and names are often that short.
+ */
+export function artifactQueryTokens(query: string): string[] {
+  return tokenizeQuery(stripPathSpans("", query), { minLen: 3, stopWords: CONCERN_STOP_WORDS, mode: "simple" });
+}
+
 // R0 (2026-08-21, W4-A): dedupe case-insensitively but PRESERVE the
 // first-seen original casing on output — matching moduleShapedQueryTokens'
 // established idiom (key = lowercase, pushed value = original). Before this
@@ -17880,6 +18283,177 @@ function rankAbstainCandidates<T extends { path: string; confidence: number }>(c
   });
 }
 
+/**
+ * A candidate the locator / ranking contributed (as opposed to one a closure,
+ * caller, counterexample or recovery mechanism added, or widened in place, with
+ * its own `why`): the only rows `buildAnswerTaskPack` turns into locations once
+ * the request's anchors are served.
+ */
+const LOCATION_ONLY_MIN_BODY_BYTES = 512;
+
+function isLocatorOriginWhy(why: string): boolean {
+  return LOCATOR_ORIGIN_WHYS.has(why)
+    || why.startsWith("answer-query-evidence")
+    || why === "answer-semantic-symbol-focus";
+}
+const LOCATOR_ORIGIN_WHYS: ReadonlySet<string> = new Set([
+  "filename-match", "exact-text", "exact-text:distinctive", "variant-text", "reference", "family-stem",
+  "path-token", "doc-contract-match", "presentation-family", "enum-family", "import-edge",
+  "graph-reference", "graph-importer", "query-symbol",
+]);
+
+/** `why` of the candidate `buildAnswerTaskPack` mints for the declaration of an anchor the request names (anchorFirst.ts). */
+const REQUEST_ANCHOR_DEFINITION_WHY = "request-anchor-definition";
+/** `why` of the candidate minted for an exact-text occurrence of a literal the request quotes or brackets. */
+const REQUEST_LITERAL_WHY = "request-literal";
+
+/** The host side of anchorFirst.ts for this module: file reads and parses through the pack's own cache. */
+function packAnchorIO(workspace: string, cache: FileReadCache | undefined, scopePath?: string, query?: string): AnchorIO {
+  return {
+    workspace,
+    ...(scopePath ? { scopePath } : {}),
+    ...(query !== undefined ? { query } : {}),
+    read: (relPath) => readCached(workspace, relPath, cache),
+    ...(cache !== undefined
+      ? { parsedSymbols: async (text: string, lang: string, relPath: string) => cache.parsedSymbols(text, lang, relPath) }
+      : {}),
+    isDeclarationShaped: (text, identifier) => isDeclarationShapedMatchText(text, identifier),
+  };
+}
+
+/**
+ * The anchors the request names, looked up in the workspace: the declaration
+ * of each identifier / dotted member it defines and the exact occurrences of
+ * each literal. Remembered per (workspace, query) for the readiness gate.
+ */
+async function resolveRequestAnchorsForPack(
+  args: TaskPackArgs,
+  query: string,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<AnchorResolution> {
+  const anchors = requestAnchorsOf(query);
+  const subjectLiterals = subjectLiteralsIfEnabled(query);
+  if (anchors.identifiers.length === 0 && subjectLiterals.length === 0) {
+    return { definitions: [], literalHits: [], definedIds: [] };
+  }
+  const io = packAnchorIO(workspace, cache, args.path, query);
+  const defined = anchors.identifiers.length > 0
+    ? await resolveAnchorDefinitions(io, anchors.identifiers)
+    : { definitions: [], literalHits: [], definedIds: [] };
+  const literalHits = subjectLiterals.length > 0 ? await resolveAnchorLiterals(io, subjectLiterals) : [];
+  const resolution: AnchorResolution = { ...defined, literalHits };
+  rememberAnchorResolution(workspace, query, resolution);
+  return resolution;
+}
+
+/** Where a request's named declaration lives (see `withNamedDeclarationLead`). */
+interface NamedDeclaration {
+  readonly path: string;
+  readonly startLine: number;
+}
+
+/**
+ * A generic first pack names an anchor the workspace defines in exactly one implementation file
+ * (`chooseDefinitions` leaves out a name several declare): the pack serves that declaration's body
+ * and its row leads the evidence. The selection decides everything else, exactly as it did:
+ *  - a selected candidate that already covers the whole declaration stays as it is;
+ *  - one that starts inside it and stops short only has its range extended to the declaration's
+ *    end (its `why`, confidence and requiredness are kept);
+ *  - with none, the declaration joins the END of the selection as context (no `required`), and the
+ *    selection's last candidate gives way if the surface count is at its cap.
+ * The row moves first only after the pack is decided (`moveNamedDeclarationFirst`): a reorder, no
+ * new decision. Only a first, pathless pack of a `generic` request is touched: seeded packs,
+ * replays, and every other profile are not.
+ */
+async function withNamedDeclarationLead(
+  selected: readonly ImpactCandidate[],
+  args: TaskPackArgs,
+  query: string,
+  workspace: string,
+  cache: FileReadCache,
+  profile: TaskProfile,
+): Promise<{ candidates: ImpactCandidate[]; declaration?: NamedDeclaration }> {
+  const unchanged = { candidates: [...selected] };
+  if (profile !== "generic" || !anchorFirstEnabled()) return unchanged;
+  if ((args.paths?.length ?? 0) > 0 || args.path || args.symbol || args.taskQueryRefReplay === true) return unchanged;
+  let resolution: AnchorResolution;
+  try {
+    resolution = await resolveRequestAnchorsForPack(args, query, workspace, cache);
+  } catch {
+    return unchanged;
+  }
+  const definition = resolution.definitions.find((entry) => entry.implementation);
+  if (definition === undefined) return unchanged;
+  const [lead] = requestAnchorCandidates({ definitions: [definition], literalHits: [], definedIds: [definition.id] });
+  if (lead === undefined) return unchanged;
+  const declaration: NamedDeclaration = { path: definition.path, startLine: definition.startLine };
+  const boundsOf = (candidate: ImpactCandidate): [number, number] => {
+    const bounds = parsePackLineRange(candidate.range);
+    return [bounds?.[0] ?? candidate.line, bounds?.[1] ?? candidate.line];
+  };
+  const covering = selected.find((candidate) => {
+    if (candidate.path !== definition.path) return false;
+    const [from, to] = boundsOf(candidate);
+    return from <= definition.startLine && to >= definition.startLine;
+  });
+  if (covering !== undefined) {
+    const [from, to] = boundsOf(covering);
+    if (to >= definition.endLine) return { candidates: [...selected], declaration };
+    const extended: ImpactCandidate = { ...covering, range: `${from}-${definition.endLine}` };
+    return { candidates: selected.map((candidate) => (candidate === covering ? extended : candidate)), declaration };
+  }
+  // The declaration is context, not a write frontier: no minted `required`.
+  const { required: _mintedRequired, ...context } = lead;
+  if (selected.length < MAX_SURFACES_DISTINCT) return { candidates: [...selected, context], declaration };
+  // At the cap, the last candidate that is not required gives way; a selection that is all
+  // required (an edit's write frontier) is left exactly as it was.
+  const yieldAt = selected.map((candidate) => candidate.required === true).lastIndexOf(false);
+  if (yieldAt < 0) return unchanged;
+  const kept = selected.filter((_, index) => index !== yieldAt).slice(0, MAX_SURFACES_DISTINCT - 1);
+  return { candidates: [...kept, context], declaration };
+}
+
+/** The named declaration's row (see `withNamedDeclarationLead`) leads the pack's evidence: a reorder, after everything else was decided. */
+function moveNamedDeclarationFirst(result: TaskPackResult, declaration: NamedDeclaration | undefined): void {
+  if (declaration === undefined) return;
+  const surfaces = result.surfaces as TaskPackSurface[] | undefined;
+  if (surfaces === undefined) return;
+  const at = surfaces.findIndex((surface) => {
+    if (surface.path !== declaration.path || !hasServedCode(surface)) return false;
+    const bounds = parsePackLineRange(surface.range);
+    return bounds !== undefined && bounds[0] <= declaration.startLine && bounds[1] >= declaration.startLine;
+  });
+  if (at <= 0) return;
+  const [lead] = surfaces.splice(at, 1);
+  surfaces.unshift(lead!);
+}
+
+/** The candidates an anchor resolution mints: declarations first, then literal windows. */
+function requestAnchorCandidates(resolution: AnchorResolution): ImpactCandidate[] {
+  const definitions: ImpactCandidate[] = resolution.definitions.map((definition) => ({
+    path: definition.path,
+    line: definition.startLine,
+    range: `${definition.startLine}-${definition.endLine}`,
+    symbol: definition.symbol,
+    surface: classifySurface(definition.path),
+    why: REQUEST_ANCHOR_DEFINITION_WHY,
+    confidence: 0.99,
+    required: true,
+  }));
+  const literals: ImpactCandidate[] = resolution.literalHits.map((hit) => ({
+    path: hit.path,
+    line: hit.line,
+    range: `${hit.startLine}-${hit.endLine}`,
+    ...(hit.symbol !== undefined ? { symbol: hit.symbol } : {}),
+    surface: classifySurface(hit.path),
+    why: REQUEST_LITERAL_WHY,
+    confidence: 0.95,
+    required: true,
+  }));
+  return [...definitions, ...literals];
+}
+
 export interface RankedAnswerEvidenceCandidate {
   candidate: ImpactCandidate;
   score: number;
@@ -17897,6 +18471,18 @@ export interface RankedAnswerEvidenceCandidate {
    * one it did, no matter how the two compare on ordinary lexical score.
    */
   explicitNamedPath?: boolean;
+  /**
+   * 2026-10-29 (first-hop field report): this entry is the DECLARATION of an
+   * identifier or dotted member the request names (`res.redirect`), minted by
+   * `buildAnswerTaskPack` from the workspace itself (anchorFirst.ts), never
+   * re-focused by the ranking below. The closing sort puts it ahead of
+   * everything, `explicitNamedPath` included.
+   */
+  anchorDefinition?: boolean;
+  /** An exact-text occurrence of a literal the request quotes or brackets (`[default: (unlimited)]`). */
+  anchorLiteral?: boolean;
+  /** (anchor definitions only) the locator's own candidate for this file would have ranked as the named identifier too. */
+  locatorAlsoExact?: boolean;
 }
 
 export function isNonImplementationAnswerCandidate(candidate: ImpactCandidate): boolean {
@@ -17966,7 +18552,19 @@ function requiresRelatedAnswerContext(query: string): boolean {
 
 function answerEvidencePathPenalty(candidate: ImpactCandidate, query: string): number {
   if (/\b(?:test|tests|spec|fixture|bench|benchmark)\b/i.test(query)) return 0;
-  return isNonImplementationAnswerCandidate(candidate) ? 3 : 0;
+  if (isNonImplementationAnswerCandidate(candidate)) return 3;
+  // 2026-10-29 (first-hop field report): a change/release log or docs/ page
+  // mentions almost every identifier of a project on some line, so a lexical
+  // ranker puts History.md ahead of the code that implements what a behaviour
+  // question asks about (express "How does res.redirect work?"). Rank it behind
+  // the implementation unless the question names it ("what changed in
+  // History.md for 5.0").
+  if (
+    isLowValueDocPath(candidate.path)
+    && (BEHAVIOR_QUERY_RE.test(query) || isAnswerIntentQuery(query))
+    && !queryNamesDocPath(query, candidate.path)
+  ) return 3;
+  return 0;
 }
 
 function answerBuilderOwnershipBonus(candidate: ImpactCandidate, query: string): number {
@@ -18190,6 +18788,14 @@ export async function rankAnswerEvidenceCandidates(
   const queryTokens = tokenizeForEpoch(query);
   const focusedPaths = new Set<string>();
   const ranked: RankedAnswerEvidenceCandidate[] = [];
+  // A request anchor's declaration takes its file's focus; a locator candidate for the same file
+  // that would itself have ranked as the named identifier is remembered on the anchor's entry
+  // (`locatorAlsoExact`), so the decision state a located exact identifier earns is not mistaken for
+  // the one a RECOVERED one earns (see `buildAnswerTaskPack`'s `recoveredExactAnswer`).
+  const noteShadowedExact = (candidatePath: string): void => {
+    const entry = ranked.find((item) => item.anchorDefinition === true && item.candidate.path === candidatePath);
+    if (entry !== undefined) entry.locatorAlsoExact = true;
+  };
   // WP-I (eval-0929 §5/§8): paths the question names EXPLICITLY (a path
   // string, e.g. "In src/service.ts, ...") — see `RankedAnswerEvidenceCandidate
   // .explicitNamedPath`'s own doc for why this is checked once, after the
@@ -18203,6 +18809,40 @@ export async function rankAnswerEvidenceCandidates(
   const framed = new Set(framedCodeNamesIn(query).map((name) => name.toLowerCase()));
 
   for (const candidate of candidates) {
+    // 2026-10-29: a request anchor's declaration / literal window is the answer's
+    // subject as the workspace itself located it — it keeps its range and is not
+    // re-focused. The same file's other candidates (a locator hit on a sibling
+    // symbol) are dropped by `focusedPaths` like any other focused path.
+    if (candidate.why === REQUEST_ANCHOR_DEFINITION_WHY) {
+      if (focusedPaths.has(candidate.path) && ranked.some((entry) => entry.anchorDefinition === true && entry.candidate.path === candidate.path && entry.candidate.range === candidate.range)) continue;
+      focusedPaths.add(candidate.path);
+      // Ranked among its fellows by the score the ordinary ranking gives the same declaration (its
+      // focus score plus the query-evidence score of its file), above everything else: two anchors
+      // in two files stay distinguishable, which `isStrongRecoveredAnswerCandidate` reads.
+      const anchorContent = readCached(workspace, candidate.path, cache);
+      const anchorFocus = anchorContent === undefined ? undefined : await selectAnchorFocus(anchorContent, candidate.path, query, cache);
+      const anchorEvidence = anchorContent === undefined ? undefined : selectQueryEvidence(anchorContent, query, { path: candidate.path });
+      const focusScore = anchorFocus === undefined ? 0
+        : [anchorFocus.best, ...anchorFocus.runnerUps].find((item) => item.name === candidate.symbol && item.range === candidate.range)?.score ?? 0;
+      ranked.push({
+        candidate: { ...candidate, handle: undefined },
+        score: 100 + focusScore + (anchorEvidence?.score ?? 0) - answerEvidencePathPenalty(candidate, query),
+        exactIdentifier: true,
+        strongEvidence: true,
+        anchorDefinition: true,
+      });
+      continue;
+    }
+    if (candidate.why === REQUEST_LITERAL_WHY) {
+      ranked.push({
+        candidate: { ...candidate, handle: undefined },
+        score: 50,
+        exactIdentifier: false,
+        strongEvidence: true,
+        anchorLiteral: true,
+      });
+      continue;
+    }
     const content = readCached(workspace, candidate.path, cache);
     const focus = content === undefined ? undefined : await selectAnchorFocus(content, candidate.path, query, cache);
     const evidence = content === undefined
@@ -18227,7 +18867,10 @@ export async function rankAnswerEvidenceCandidates(
           })[0]
         : exactFocuses[0];
     if (exactFocus !== undefined) {
-      if (focusedPaths.has(candidate.path)) continue;
+      if (focusedPaths.has(candidate.path)) {
+        if (true) noteShadowedExact(candidate.path);
+        continue;
+      }
       focusedPaths.add(candidate.path);
       const startLine = Number.parseInt(exactFocus.range.split("-", 1)[0] ?? "1", 10);
       ranked.push({
@@ -18395,7 +19038,10 @@ export async function rankAnswerEvidenceCandidates(
           ?? containing[0];
       }
       if (evidenceFocus !== undefined) {
-        if (focusedPaths.has(candidate.path)) continue;
+        if (focusedPaths.has(candidate.path)) {
+          if (namesExplicit(evidenceFocus.name)) noteShadowedExact(candidate.path);
+          continue;
+        }
         focusedPaths.add(candidate.path);
         const startLine = Number.parseInt(evidenceFocus.range.split("-", 1)[0] ?? "1", 10);
         const exactIdentifier = namesExplicit(evidenceFocus.name);
@@ -18424,7 +19070,10 @@ export async function rankAnswerEvidenceCandidates(
       // internal why-vocabulary), keep that anchor instead of reporting a
       // symbol-less range.
       if (candidate.symbol !== undefined && hasStrongLocatorAnchor(candidate, queryTokens)) {
-        if (focusedPaths.has(candidate.path)) continue;
+        if (focusedPaths.has(candidate.path)) {
+          if (candidate.symbol !== undefined && namesExplicit(candidate.symbol)) noteShadowedExact(candidate.path);
+          continue;
+        }
         focusedPaths.add(candidate.path);
         ranked.push({
           candidate: { ...candidate, confidence: Math.max(candidate.confidence, 0.9) },
@@ -18463,7 +19112,10 @@ export async function rankAnswerEvidenceCandidates(
       && focus.best.kind !== "function" && focus.best.kind !== "method" && focus.best.kind !== "class"
       && hasStrongLocatorAnchor(candidate, queryTokens)
     ) {
-      if (focusedPaths.has(candidate.path)) continue;
+      if (focusedPaths.has(candidate.path)) {
+        if (candidate.symbol !== undefined && namesExplicit(candidate.symbol)) noteShadowedExact(candidate.path);
+        continue;
+      }
       focusedPaths.add(candidate.path);
       ranked.push({
         candidate: { ...candidate, confidence: Math.max(candidate.confidence, 0.9) },
@@ -18474,7 +19126,10 @@ export async function rankAnswerEvidenceCandidates(
       continue;
     }
     if (focus !== undefined) {
-      if (focusedPaths.has(candidate.path)) continue;
+      if (focusedPaths.has(candidate.path)) {
+        if (namesExplicit(focus.best.name)) noteShadowedExact(candidate.path);
+        continue;
+      }
       focusedPaths.add(candidate.path);
       const startLine = Number.parseInt(focus.best.range.split("-", 1)[0] ?? "1", 10);
       const exactIdentifier = namesExplicit(focus.best.name);
@@ -18515,7 +19170,9 @@ export async function rankAnswerEvidenceCandidates(
     if (entry.exactIdentifier && namedPaths.has(entry.candidate.path)) entry.explicitNamedPath = true;
   }
   return ranked.sort((a, b) =>
-    Number(b.explicitNamedPath === true) - Number(a.explicitNamedPath === true)
+    Number(b.anchorDefinition === true) - Number(a.anchorDefinition === true)
+    || Number(b.anchorLiteral === true) - Number(a.anchorLiteral === true)
+    || Number(b.explicitNamedPath === true) - Number(a.explicitNamedPath === true)
     || Number(b.exactIdentifier) - Number(a.exactIdentifier)
     || b.score - a.score
     || b.candidate.confidence - a.candidate.confidence
@@ -21169,7 +21826,7 @@ async function findDeclaredCallableAmong(
   // surface).
   const anchorPaths = [...new Set([
     ...selected
-      .filter((c) => c.why === "answer-explicit-symbol-focus" || c.why === "answer-explicit-identifier-recovery")
+      .filter((c) => c.why === "answer-explicit-symbol-focus" || c.why === "answer-explicit-identifier-recovery" || c.why === REQUEST_ANCHOR_DEFINITION_WHY)
       .map((c) => c.path),
     ...namedPaths,
     ...priorFocalPaths,
@@ -28724,7 +29381,9 @@ const COLON_INTRODUCES_READ_REQUEST = "(?!\\s*:\\s*(?:please\\s+)?(?:explain|des
 // reached a certified read-only `act.answer`. One declaration now lives in
 // `requestItems.ts` (see `MUTATION_VERBS_EN` there) and both predicates read it.
 const REQUESTED_MUTATION_EN_RE = new RegExp(
-  `(?:^|[\\n.!?;:]\\s*|\\bthen\\s+)(?:[①②③④⑤⑥⑦⑧⑨⑩]|\\(?\\d{1,2}[.)])?\\s*(?:please\\s+)?(?:using\\b[^,\\n]{0,80},\\s*)?(?:${MUTATION_VERBS_EN})\\b${COLON_INTRODUCES_READ_REQUEST}`
+  // A "." opens a clause only when whitespace (or the end of the text) follows it: the dot of a
+  // member access (`Context.forward`, `res.set`, `cache.update`) is not a sentence end.
+  `(?:^|[\\n!?;:]\\s*|\\.(?:\\s+|$)|\\bthen\\s+)(?:[①②③④⑤⑥⑦⑧⑨⑩]|\\(?\\d{1,2}[.)])?\\s*(?:please\\s+)?(?:using\\b[^,\\n]{0,80},\\s*)?(?:${MUTATION_VERBS_EN})\\b${COLON_INTRODUCES_READ_REQUEST}`
   + `|\\b(?:please|must|should|need(?:s)?\\s+to|want(?:s)?\\s+(?:you\\s+)?to|can\\s+you|could\\s+you|would\\s+you)\\b[^.!?\\n]{0,100}\\b(?:${MUTATION_VERBS_EN})\\b${COLON_INTRODUCES_READ_REQUEST}`,
   "i",
 );
@@ -28753,6 +29412,25 @@ const PROPAGATION_INTENT_JA: readonly string[] = [
 export { hasOpenUniverseIntent, isAdditiveEnumIntent };
 
 /**
+ * 2026-10-29: a bare 「どう<動詞>…？」 question (「どう判定する？」「どう扱う？」「どう決まる？」) asks how
+ * something behaves; none of the word markers above covered it, so it bound `generic`. A sentence
+ * that contains 「どう」 followed by a verb and ends with ？ or ? counts. Planning forms ask what to
+ * DO (「どうすれば」「どうしたら」「どうやったら」「どうすべき」, and a bare 「どうする？」) and do not.
+ * The defect-symptom guardrail (§14) is a separate check and is untouched.
+ */
+const JA_DOU_PLANNING_RE = /どう(?:すれば|したら|やれば|やったら|すべき|しよう|しましょう|したい|しても|すると|でも|ぞ|か(?![らな]))/u;
+const JA_DOU_BARE_ACT_QUESTION_RE = /どう(?:する|しますか|しろ)\s*[？?]\s*$/u;
+const JA_SENTENCE_SPLIT_RE = /(?<=[。！!？?])\s*|\n+/u;
+function hasJaInterrogativeDou(query: string): boolean {
+  return query.slice(0, SHAPE_SCAN_MAX_CHARS).split(JA_SENTENCE_SPLIT_RE).some((sentence) => {
+    const text = sentence.trim();
+    if (!/[？?]$/u.test(text)) return false;
+    if (JA_DOU_BARE_ACT_QUESTION_RE.test(text) || JA_DOU_PLANNING_RE.test(text)) return false;
+    return /どう[^\s、。，,！!？?）)」』]/u.test(text);
+  });
+}
+
+/**
  * True when `query` reads as an explain/answer request AND carries no
  * edit-intent marker at all. Deliberately conservative — a query naming
  * BOTH an answer marker and an edit marker ("explain then fix the bug") is
@@ -28768,6 +29446,7 @@ function hasAnswerIntentMarker(query: string): boolean {
     || ANSWER_INTENT_EN_RE.test(query)
     || ANSWER_INTENT_JA.some((m) => query.includes(m))
     || ANSWER_INTENT_JA_NOUN_RE.test(query)
+    || hasJaInterrogativeDou(query)
     || hasWhQuestionSentence(query)
     || hasComputationRequest(query)
     || hasAnalysisIntentMarker(query);
@@ -29107,6 +29786,8 @@ const MIXED_INTENT_MUTATION_EN_RE = new RegExp(
   // finite forms: "I'd like it to BE set to 5" and "make sure it GETS set" are
   // requests (review, 2026-10-02).
   + `(?<!\\b(?:is|are|was|were)\\s)`
+  // …and not the member of an access (`Context.forward`, `cache.update`): that verb names a member.
+  + `(?<![A-Za-z0-9_$)\\]]\\.)`
   + `(?<!\\b(?:which|what|who|whom|how)\\b[^.!?\\n]{0,24})`
   + `\\b(?:${MUTATION_VERBS_EN})\\b\\s+\\S`,
   "i",
@@ -29225,10 +29906,32 @@ function hasMixedIntentMutationMarkerJa(text: string): boolean {
  * still tested as well, which can only ADD matches (a verb whose object sits
  * across a boundary), never remove one: the predicate is an OR over clauses.
  */
+/**
+ * 2026-10-29: "How does res.send choose the Content-Type and generate the ETag?" asks how a
+ * subject BEHAVES; its coordinated "generate" is the subject's predicate, not an imperative.
+ * A sentence that opens "how / what / why does|do|did <subject> …" and ends with "?", with
+ * no I / we / you / let's subject and no modal, is a description request: it carries no
+ * requested mutation. The next sentence is judged on its own ("How does X work? Fix it."
+ * still carries "Fix it"), and a sentence that opens any other way (an imperative
+ * "Explain X and change it to 5.") is untouched.
+ */
+const DESCRIPTIVE_INTERROGATIVE_OPENING_EN_RE = new RegExp(`${SHAPE_LEAD_IN}(?:how|what|why)\\s+(?:does|do|did)\\s+(?!(?:i|we|you)\\b)\\S`, "i");
+const FIRST_OR_SECOND_PERSON_EN_RE = /\b(?:i|we|you|let['’]?s|please)\b/i;
+function isDescriptiveInterrogative(sentence: string): boolean {
+  return /\?\s*$/u.test(sentence)
+    && DESCRIPTIVE_INTERROGATIVE_OPENING_EN_RE.test(sentence)
+    && !MODAL_WORD_EN_RE.test(sentence)
+    && !FIRST_OR_SECOND_PERSON_EN_RE.test(sentence)
+    && !WH_SUGGESTION_OPENING_EN_RE.test(sentence);
+}
+function withoutDescriptiveInterrogatives(text: string): string {
+  return text.split(SHAPE_SENTENCE_SPLIT_RE).filter((sentence) => !isDescriptiveInterrogative(sentence)).join("\n");
+}
+
 function hasMixedIntentMutationMarkerEn(query: string): boolean {
   // In Japanese prose, "add 関数" names a declaration; the Latin name is
   // not an English imperative. Keep requested edits elsewhere in the query.
-  const prose = query.replace(/\b[A-Za-z_$][\w$]*\s*(?=(?:関数|メソッド|クラス)(?:[をのがは]|について|\s|[。、]|$))/gu,
+  const prose = withoutDescriptiveInterrogatives(query).replace(/\b[A-Za-z_$][\w$]*\s*(?=(?:関数|メソッド|クラス)(?:[をのがは]|について|\s|[。、]|$))/gu,
     name => " ".repeat(name.length));
   if (MIXED_INTENT_MUTATION_EN_RE.test(prose)) return true;
   return splitIntoLeadClauses(prose, { splitCoordinators: true })
@@ -29376,7 +30079,8 @@ function hasInterrogativeAnswerMarker(query: string): boolean {
     || hasWhQuestionSentence(query)
     || hasComputationRequest(query)
     || ANSWER_INTENT_JA.some((m) => query.includes(m))
-    || ANSWER_INTENT_JA_NOUN_RE.test(query);
+    || ANSWER_INTENT_JA_NOUN_RE.test(query)
+    || hasJaInterrogativeDou(query);
 }
 
 /**
@@ -31509,7 +32213,7 @@ export function capExtraEvidenceRelativeToNamedPaths(
       // or vocabulary-only hit — so exempting them here is the identical bar
       // `namedPaths.includes`/`required===true` already apply to a
       // literally-named file, extended to a literally-named IDENTIFIER.
-      if (surf.why === "answer-explicit-symbol-focus" || surf.why === "answer-explicit-identifier-recovery") continue;
+      if (surf.why === "answer-explicit-symbol-focus" || surf.why === "answer-explicit-identifier-recovery" || surf.why === REQUEST_ANCHOR_DEFINITION_WHY) continue;
       // 2026-10-06 (semantic-frontier `flag` case, after the review's P1-4
       // fix): a facet-closure window (`closure:<facet> …` — a call site, a
       // focal body, a constant it reads) closes a facet the QUESTION asked
@@ -40395,7 +41099,7 @@ const SALIENT_WORD_EVIDENCE_STEM_MIN = 4;
  * ["cache","test","ts"], "HTTPServer" -> ["HTTP","Server"]. Never reorders
  * or drops letters within a word.
  */
-function splitIdentifierWords(text: string): string[] {
+const splitIdentifierWords = boundedTextMemo((text: string): readonly string[] => {
   const words: string[] = [];
   for (const run of text.match(/[A-Za-z]+/gu) ?? []) {
     const cut = run
@@ -40406,7 +41110,7 @@ function splitIdentifierWords(text: string): string[] {
     }
   }
   return words;
-}
+});
 
 /**
  * A light, general (never dictionary-based) single-pass suffix strip, one
@@ -40490,13 +41194,18 @@ function surfaceEvidencesSalientWord(surface: TaskPackSurface, word: string): bo
   if (text.toLowerCase().includes(stem)) return true;
   const wordStem = lightStem(word);
   if (wordStem.length < SALIENT_WORD_EVIDENCE_STEM_MIN) return false;
-  const tokens = splitIdentifierWords(surface.path).concat(splitIdentifierWords(text));
-  return tokens.some((token) => {
-    if (isSalientWordEvidenceExcludedToken(token)) return false;
-    const tokenStem = lightStem(token);
-    return tokenStem.length >= SALIENT_WORD_EVIDENCE_STEM_MIN && tokenStem === wordStem;
-  });
+  return salientEvidenceStems(surface.path).has(wordStem) || salientEvidenceStems(text).has(wordStem);
 }
+
+const salientEvidenceStems = boundedTextMemo((text: string): ReadonlySet<string> => {
+  const stems = new Set<string>();
+  for (const token of splitIdentifierWords(text)) {
+    if (isSalientWordEvidenceExcludedToken(token)) continue;
+    const tokenStem = lightStem(token);
+    if (tokenStem.length >= SALIENT_WORD_EVIDENCE_STEM_MIN) stems.add(tokenStem);
+  }
+  return stems;
+});
 
 /**
  * TL_IDENTIFIER_GROUNDING (2026-09-20): true when `word` occurs in the SOURCE
@@ -40977,6 +41686,17 @@ function docAnchorsEligible(itemText: string, surface: TaskPackSurface): boolean
  * decides per OCCURRENCE and so cannot hand back a per-line projection).
  */
 function concernCodeOnlyText(text: string, language: string | undefined): string {
+  let memo = concernCodeOnlyTextByLanguage.get(language);
+  if (memo === undefined) {
+    memo = boundedTextMemo((source) => deriveConcernCodeOnlyText(source, language));
+    concernCodeOnlyTextByLanguage.set(language, memo);
+  }
+  return memo(text);
+}
+
+const concernCodeOnlyTextByLanguage = new Map<string | undefined, (text: string) => string>();
+
+function deriveConcernCodeOnlyText(text: string, language: string | undefined): string {
   const parts: string[] = [];
   const lines = text.split(/\r\n|\r|\n/);
   let inBlockComment = false;
@@ -41172,13 +41892,15 @@ function unservedRemainderCarriesMissingTerm(
     .filter((variant) => variant.length > 0 && !containsJapanese(variant));
   if (variants.length === 0) return false;
   const codeLines = concernCodeOnlyLines(lines, languageForPath(relPath));
+  // One text, split into words once: no word spans a line break, so this is the same answer as asking line by line.
+  const unserved: string[] = [];
   for (const piece of pieces) {
     for (let n = Math.max(1, piece.start); n <= Math.min(piece.end, lines.length); n += 1) {
-      const code = codeLines[n - 1] ?? "";
-      if (code.trim().length > 0 && variants.some((variant) => textHasWordVariant(code, variant))) return true;
+      unserved.push(codeLines[n - 1] ?? "");
     }
   }
-  return false;
+  const unservedCode = unserved.join("\n");
+  return variants.some((variant) => textHasWordVariant(unservedCode, variant));
 }
 
 interface ConcernCoverageVerdict {
@@ -44698,6 +45420,8 @@ function buildFacetReadiness(
   if (workspace === undefined || profile !== "answer") return undefined;
   // Same two terminal proof shapes `buildRequestItemReadiness` leaves alone.
   if (result.create_target !== undefined || result.literal_source_absence !== undefined) return undefined;
+  // A table's rows have settled it: "何件ある" is no value of a callable to go and find.
+  if (csvLookupClosedUniverse(workspace)) return undefined;
   const requirements = extractFacetRequirements(query);
   const plan = facetPlanFor(facetPlanWorkspaceKey(workspace), query, (relPath) => {
     const content = readCached(workspace, relPath);
@@ -45028,17 +45752,17 @@ const FACET_NEXT_DEFAULT_CEILING = 24576;
  * for in batches sized to the ceiling (`mergeFacetGap`'s `mapBatch`: up to
  * FACET_NEXT_MAX_TARGETS windows, each priced as the row it will ship, within the
  * ceiling less the envelope): the Copilot CLI's 18,432 B, where the batches were
- * measured. Below it they are asked for MAX_REQUEST_ITEM_BATCH at a time within
- * three quarters of the ceiling, measured in source bytes — except for the
- * follow-up a pack that serves a structure map issues (`servesStructureMap`).
+ * measured. Below it a map-shaped answer's windows are batched the same way
+ * (`mergeFacetGap`), and any other request's stay MAX_REQUEST_ITEM_BATCH at a time
+ * within three quarters of the ceiling, measured in source bytes. What stays tied
+ * to this tier is which first page is a map (`structureMapForAnswer`).
  */
 const FACET_NEXT_MAP_BATCH_MIN_CEILING_BYTES = 18 * 1024;
 
 /**
- * Whether the pack in progress runs under a ceiling from which a map's owed
- * windows are served in batches (`FACET_NEXT_MAP_BATCH_MIN_CEILING_BYTES`).
- * Every pack without a ceiling does. `structureMapForAnswer` admits only a page
- * that holds the map's skeleton below it.
+ * Whether the pack in progress runs under a ceiling at or above the tier
+ * (`FACET_NEXT_MAP_BATCH_MIN_CEILING_BYTES`). Every pack without a ceiling does.
+ * `structureMapForAnswer` admits only a page that holds the map's skeleton below it.
  */
 function mapContinuationBatched(): boolean {
   return (activePackByteCeiling() ?? FACET_NEXT_DEFAULT_CEILING) >= FACET_NEXT_MAP_BATCH_MIN_CEILING_BYTES;
@@ -45076,11 +45800,12 @@ function mergeFacetGap(
   const keyOf = (target: { path: string; range?: string }): string => `${target.path}\u0000${target.range ?? ""}`;
   const seen = new Set(baseTargets.map(keyOf));
   const targets = [...baseTargets];
-  // A pack that serves a structure map asks for its owed windows in batches under any
-  // ceiling (`structureMapForAnswer` admitted the page expecting it). The bounded
-  // served-pack record carries that hint through every same-query follow-up.
-  const mapBatch = answerTask && effStructureMapEnabled() && asksForStructureMap(query)
-    && (mapContinuationBatched() || servesStructureMap(surfaces) || structureMapChainWasServed(workspace, query));
+  // A map-shaped answer asks for its owed windows in batches under any ceiling. Below
+  // FACET_NEXT_MAP_BATCH_MIN_CEILING_BYTES a type too large for the map's skeleton is
+  // walked member by member, and whole windows within a share of the ceiling, doc
+  // comments counted, came back as pages of 1.7 to 9.6 KB under VS Code's 14,336 B: nine
+  // replies for T03 where batches priced as the rows they ship take seven (2026-11-02).
+  const mapBatch = answerTask && effStructureMapEnabled() && asksForStructureMap(query);
   const tinyWindows = mapBatch || effStructureMapEnabled() && asksForStructureMap(query)
     && mapContinuationBatched()
     && facets.openTargets.every(target => {
@@ -45521,6 +46246,30 @@ function buildReadinessObligations(
         obligations.push(sameNameIdentifierObligation(sameNameSubject, identifierServed));
         continue;
       }
+      // 2026-10-29 (first-hop field report): an identifier or dotted member the
+      // request names AND the workspace defines (`res.redirect`, `MODEL_PRICES`,
+      // `computeTotal`) is proved only by a served row that shows its DECLARATION —
+      // a call site, a mention or a neighbouring symbol of the same file proves
+      // nothing about what the name is. A name the workspace does not define keeps
+      // the rules below.
+      const anchorDefinitions = workspace !== undefined
+        ? anchorDefinitionsFor(packAnchorIO(workspace, undefined), query, identifier)
+        : [];
+      if (anchorDefinitions.length > 0) {
+        const definitionRows = identifierServed.filter((surface) =>
+          anchorDefinitions.some((definition) => surface.path === definition.path && surfaceServesLine(surface, definition.startLine)));
+        obligations.push({
+          id: `identifier:${identifier}`,
+          kind: "explicit-identifier",
+          status: definitionRows.length > 0 ? "proved" : "uncovered",
+          required: true,
+          evidence: definitionRows.map(readinessEvidence),
+          reason: definitionRows.length > 0
+            ? `explicit identifier ${identifier} is proved by a served row showing its declaration`
+            : `explicit identifier ${identifier} is declared at ${anchorDefinitions.map((definition) => `${definition.path}:${definition.startLine}-${definition.endLine}`).join(", ")}, which no served row shows`,
+        });
+        continue;
+      }
       const exactEvidence = exactIdentifierEvidence(identifierServed, identifier);
       const semanticEvidence = result.answer_resolution
         && normIdent(result.answer_resolution.requested_identifier) === normIdent(identifier)
@@ -45730,7 +46479,7 @@ function buildReadinessObligations(
   // A quantifier names an open universe, not a single identifier fact.  A-5
   // expands it into concrete direct dependencies; until then it is deliberately
   // undischargeable so an exact-location answer cannot falsely close it.
-  if (hasOpenUniverseIntent(query) && !isAdditiveEnumIntent(query)) {
+  if (hasOpenUniverseIntent(query) && !isAdditiveEnumIntent(query) && !csvLookupClosedUniverse(workspace)) {
     const kind = /enum|列挙/.test(query) ? "enum-variants"
       : /callers|呼び出し元/.test(query) ? "all-callers"
       : /references|参照/.test(query) ? "all-references"
@@ -46526,12 +47275,15 @@ function computeWorkspaceInventoryState(workspace: string): WorkspaceInventorySt
   const complete = files.length <= MAX_WORKSPACE_STATE_INVENTORY_FILES;
   const inventory = complete ? files : files.slice(0, MAX_WORKSPACE_STATE_INVENTORY_FILES);
   const records: Array<[string, number]> = [];
+  const rootReal = resolveReal(workspace);
+  // The native resolver, as resolveReal's on Windows: the JS one takes an lstat per path segment there.
+  const realOf = process.platform === "win32" ? fs.realpathSync.native : fs.realpathSync;
   for (const relPath of inventory) {
     const abs = safeResolve(relPath, workspace);
     if (abs === undefined) continue;
     try {
-      const real = fs.realpathSync(abs);
-      if (!isWithin(real, resolveReal(workspace))) continue;
+      const real = realOf(abs);
+      if (!isWithin(real, rootReal)) continue;
       const stat = fs.statSync(real);
       records.push([relPath, stat.size]);
     } catch {
@@ -46561,7 +47313,7 @@ function evidenceFileState(workspace: string, relPath: string): string | undefin
       return `large:${stat.size}:${Math.trunc(stat.mtimeMs)}`;
     }
     // served-bytes: not-served (content sha only)
-    return shaOfBytes(fs.readFileSync(real));
+    return shaOfBytes(readFileForRequest(real));
   } catch {
     return undefined;
   }
@@ -46684,7 +47436,14 @@ const UNCOVERED_IDENTIFIER_FIND_MAX = 5;
 function uncoveredIdentifierFindCall(
   result: TaskPackResult,
   obligations: readonly TaskReadinessObligation[],
+  query?: string,
+  workspace?: string,
 ): ContinuationCall | undefined {
+  // 2026-10-29: an uncovered anchor the workspace defines is read at its
+  // declaration's own span — the `find` below is the fallback for a name whose
+  // declaration is not known.
+  const definitionRead = query === undefined || workspace === undefined ? undefined : anchorDefinitionGap(obligations, query, workspace);
+  if (definitionRead !== undefined) return definitionRead.next_call;
   if (result.coverage === "complete") return undefined;
   const served = codeTaskPackSurfaces(result.surfaces).filter(hasServedCode);
   const verifiedAbsent = new Set(verifiedAbsentIdentifiersFor(result).map(normIdent));
@@ -46695,7 +47454,8 @@ function uncoveredIdentifierFindCall(
     if (obligation.kind !== "explicit-identifier") continue;
     if (!obligation.id.startsWith("identifier:")) continue;
     const identifier = obligation.id.slice("identifier:".length);
-    if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(identifier)) continue;
+    // A dotted member the request names (`res.redirect`) is one literal to find.
+    if (!/^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$/u.test(identifier)) continue;
     const key = normIdent(identifier);
     if (seen.has(key) || verifiedAbsent.has(key)) continue;
     if (exactIdentifierEvidence(served, identifier).length > 0) continue;
@@ -46712,6 +47472,8 @@ function buildCapabilityGaps(
   obligations: readonly TaskReadinessObligation[],
   nextCall: ContinuationCall | undefined,
   awaitingUserInput: boolean,
+  query?: string,
+  workspace?: string,
 ): TaskCapabilityGap[] | undefined {
   const uncovered = obligations.filter((obligation) => obligation.status !== "proved").map((obligation) => obligation.id);
   const gaps: TaskCapabilityGap[] = [];
@@ -46762,7 +47524,7 @@ function buildCapabilityGaps(
     // call. The wire projection of a gap is `code` + `refs` (§4.4), so this
     // costs no response bytes — the projector reads it to replace the dead
     // same-handle zoom it would otherwise emit as `decision.discover.next`.
-    const identifierFind = uncoveredIdentifierFindCall(result, obligations);
+    const identifierFind = uncoveredIdentifierFindCall(result, obligations, query, workspace);
     gaps.push({
       kind: "ambiguous-target",
       recoverable: true,
@@ -47256,6 +48018,127 @@ function computeUndeclaredIdentifierReadCall(
   return undefined;
 }
 
+/** Longest declaration a definition read asks for in one target. */
+const ANCHOR_DEFINITION_READ_MAX_LINES = 400;
+/**
+ * …and the most source BYTES of it one read asks for. The read exists to put the declaration in
+ * front of the caller (the obligation is proved by its first line); a declaration that cannot be
+ * delivered in one page under a byte ceiling (a 160-branch function under an 8 KiB budget) would
+ * come back as a bodyless row again and again, so its head is read and the rest is the body's
+ * own obligation (`behavior-body`, the facet windows), which pages.
+ */
+const ANCHOR_DEFINITION_READ_MAX_BYTES = 3200;
+/** A definition read always asks for at least this many lines of the declaration. */
+const ANCHOR_DEFINITION_READ_MIN_LINES = 8;
+/** Targets a single anchor-definition read carries. */
+const ANCHOR_DEFINITION_READ_MAX_TARGETS = 3;
+
+/**
+ * 2026-10-29: the ONE ranged read that fetches the declaration of every
+ * still-uncovered anchor obligation (`identifier:<X>` for an X the request
+ * names and the workspace defines) — `targets:[{path, range}]` over the
+ * declaration's own span, query-bearing so the response re-enters the pack
+ * with a decision. Never a name search: that returns the call sites the
+ * obligation exists to see past.
+ */
+function anchorDefinitionGap(
+  obligations: readonly TaskReadinessObligation[],
+  query: string,
+  workspace: string,
+): { next_call: ContinuationCall; ids: string[] } | undefined {
+  const targets: Array<{ path: string; range: string }> = [];
+  const ids: string[] = [];
+  for (const obligation of obligations) {
+    if (obligation.status === "proved" || obligation.kind !== "explicit-identifier" || !obligation.id.startsWith("identifier:")) continue;
+    const io = packAnchorIO(workspace, undefined);
+    const definition = anchorDefinitionsFor(io, query, obligation.id.slice("identifier:".length))[0];
+    if (definition === undefined) continue;
+    let last = Math.min(definition.endLine, definition.startLine + ANCHOR_DEFINITION_READ_MAX_LINES - 1);
+    const text = io.read(definition.path);
+    if (text !== undefined) {
+      const lines = text.split(/\r?\n/);
+      let bytes = 0;
+      let end = definition.startLine - 1;
+      for (let index = definition.startLine - 1; index < last; index++) {
+        bytes += Buffer.byteLength(lines[index] ?? "", "utf8") + 1;
+        if (bytes > ANCHOR_DEFINITION_READ_MAX_BYTES && index + 1 - definition.startLine >= ANCHOR_DEFINITION_READ_MIN_LINES) break;
+        end = index;
+      }
+      last = Math.max(definition.startLine, Math.min(last, end + 1));
+    }
+    targets.push({ path: definition.path, range: `${definition.startLine}-${last}` });
+    ids.push(obligation.id);
+    if (targets.length >= ANCHOR_DEFINITION_READ_MAX_TARGETS) break;
+  }
+  if (targets.length === 0) return undefined;
+  return { next_call: { tool: "tl_read_file", arguments: { query, targets, content: "auto" } }, ids };
+}
+
+/**
+ * 2026-10-29: stamps what the anchor obligations say about this pack — the
+ * definition read that closes the uncovered ones (`request_item_gap`, which
+ * `canonicalDecision.ts`'s `unservedRequestItemZoom` turns into `discover`
+ * before the certificate is consulted) and `anchor_closure`, whether every
+ * anchor the workspace defines is proved by a served declaration (read by
+ * `canonicalDecision.ts` to stop proposing document / candidate zooms once the
+ * named subject is answered). Re-run with every contract rebuild: the stamps
+ * always describe the latest obligations.
+ */
+function stampAnchorObligations(
+  result: TaskPackResult,
+  obligations: readonly TaskReadinessObligation[],
+  query: string,
+  workspace: string | undefined,
+  profile: TaskProfile,
+): void {
+  if (profile !== "answer" || workspace === undefined) return;
+  const io = packAnchorIO(workspace, undefined);
+  const anchorObligations = obligations.filter((obligation) =>
+    obligation.kind === "explicit-identifier"
+    && obligation.id.startsWith("identifier:")
+    && anchorDefinitionsFor(io, query, obligation.id.slice("identifier:".length)).length > 0);
+  const ownGap = (gap: TaskPackResult["request_item_gap"]): boolean =>
+    gap !== undefined && gap.ids.length > 0 && gap.ids.every((id) => id.startsWith("identifier:"));
+  if (anchorObligations.length === 0) {
+    delete result.anchor_closure;
+    if (ownGap(result.request_item_gap)) delete result.request_item_gap;
+    return;
+  }
+  const uncovered = anchorObligations.filter((obligation) => obligation.status !== "proved");
+  // Closure claims the NAMED SUBJECT is answered, so zoom proposals (a document page, a candidate
+  // bundle) can stop. It does not hold while the pack still has an open obligation of any kind (the
+  // callers of a second subject, a constant a request item names) or is still a candidate list: those
+  // zooms are the continuation.
+  const settled = obligations.every((obligation) => obligation.status === "proved")
+    && result.coverage_reason !== "candidate-list"
+    && result.route?.action !== "confirm_candidates";
+  result.anchor_closure = {
+    satisfied: uncovered.length === 0 && settled && isAnswerIntentQuery(query),
+    ids: anchorObligations.map((obligation) => obligation.id),
+  };
+  const gap = anchorDefinitionGap(uncovered, query, workspace);
+  if (gap === undefined) {
+    if (ownGap(result.request_item_gap)) delete result.request_item_gap;
+    return;
+  }
+  const existing = ownGap(result.request_item_gap) ? undefined : result.request_item_gap;
+  const existingTargets = (existing?.next_call.arguments as { targets?: unknown } | undefined)?.targets;
+  if (existing === undefined || !Array.isArray(existingTargets)) {
+    result.request_item_gap = gap;
+    return;
+  }
+  const ownTargets = (gap.next_call.arguments as { targets: Array<{ path: string; range: string }> }).targets;
+  const keyOf = (target: { path: string; range?: string }): string => `${target.path}\u0000${target.range ?? ""}`;
+  const own = new Set(ownTargets.map(keyOf));
+  result.request_item_gap = {
+    next_call: {
+      ...existing.next_call,
+      arguments: { ...existing.next_call.arguments, targets: [...ownTargets, ...(existingTargets as Array<{ path: string; range?: string }>).filter((target) => !own.has(keyOf(target)))] },
+    },
+    ids: [...gap.ids, ...existing.ids],
+  };
+}
+
 function nextCallForUnresolved(
   result: TaskPackResult,
   obligations: readonly TaskReadinessObligation[],
@@ -47280,6 +48163,10 @@ function nextCallForUnresolved(
   }
   const identifier = unresolved.id.startsWith("identifier:") ? unresolved.id.slice("identifier:".length) : undefined;
   if (identifier) {
+    // 2026-10-29: an anchor the request names and the workspace defines is
+    // fetched by its declaration's own span, not searched for by name.
+    const anchorRead = workspace === undefined ? undefined : anchorDefinitionGap([unresolved], query, workspace);
+    if (anchorRead !== undefined) return anchorRead.next_call;
     // WP-O (eval-0929 §8): an open same-name subject names the declaration
     // the question means (or every declaration, when ambiguous) as a ranged,
     // query-bearing read — never a name search that returns its call sites.
@@ -47785,6 +48672,7 @@ export function buildTaskExecutionContract(
   if (requestItemGap !== undefined) {
     result.request_item_gap = requestItemGap;
   }
+  stampAnchorObligations(result, obligations, query, workspace, profile);
   // DESIGN-v0.15 R1: see `TaskPackResult.request_item_absences`'s own doc
   // comment for the wire path this feeds (`buildCapabilityGaps`, gated to a
   // `discover` decision by D-4).
@@ -48077,7 +48965,7 @@ export function buildTaskExecutionContract(
   // not retain the continuation-only surface as a conventional contract
   // obligation. Treat that typed witness as an established ledger proof, not
   // as a shortcut around the normal theorem/risk/route gates below.
-  const ledgerEstablished = literalAbsenceClosedWorld || literalSourceUniverse || (hasOpenUniverseIntent(query)
+  const ledgerEstablished = literalAbsenceClosedWorld || literalSourceUniverse || csvLookupClosedUniverse(workspace) || (hasOpenUniverseIntent(query)
     ? ledgerCertificate !== undefined
     : workspace === undefined
       || taskContractDigest(workspace) === undefined
@@ -48489,7 +49377,7 @@ export function buildTaskExecutionContract(
           : "no-grounded-call-remains"
     : undefined;
   const evidenceModel = buildDecisionEvidenceModel(terminalAction, obligations, falsification, risk);
-  const capabilityGaps = buildCapabilityGaps(result, blockingObligations, nextCall, awaitingUserInput);
+  const capabilityGaps = buildCapabilityGaps(result, blockingObligations, nextCall, awaitingUserInput, query, workspace);
   // -------------------------------------------------------------------------
   // P2-4 (2026-09-08, v0.14.1 hands-on report): THE SERVED-TERMINAL GRANT IS
   // CERTIFIABLE — WHICH IS WHAT MAKES ruling 6's STEP 1 REACHABLE.
@@ -50972,7 +51860,7 @@ function surfaceFileIdentity(workspace: string, relPath: string): { sha: string;
     if (!isWithin(real, resolveReal(workspace))) return undefined;
     if (fs.statSync(real).size > MAX_FINGERPRINT_FILE_BYTES) return undefined;
     // served-bytes: not-served (surface fingerprint: sha + line count only)
-    const text = fs.readFileSync(real, "utf8");
+    const text = readFileForRequest(real).toString("utf8");
     const lines = text.split("\n");
     // A trailing newline yields a final empty element that is not a line.
     const totalLines = lines.length > 0 && lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
@@ -50991,7 +51879,7 @@ function surfaceFileSha(workspace: string, relPath: string): string | undefined 
     const size = fs.statSync(real).size;
     if (size > MAX_FINGERPRINT_FILE_BYTES) return undefined;
     // served-bytes: not-served (surface fingerprint: sha only)
-    return shaOfText(fs.readFileSync(real, "utf8"));
+    return shaOfText(readFileForRequest(real).toString("utf8"));
   } catch {
     return undefined;
   }
@@ -51012,7 +51900,7 @@ function sourceBodyCapsuleForSurface(
     // Read once at capsule construction: both the digest and exact source slice
     // are from the same file snapshot. A later comparison re-reads it.
     // served-bytes: not-served (source capsule proof: exact-prefix comparison + sha only; the capsule keeps the already-served surf.code, never these bytes)
-    const source = fs.readFileSync(real, "utf8");
+    const source = readFileForRequest(real).toString("utf8");
     return makeSourceBodyCapsule({
       path: surface.path,
       handle: surface.handle,
@@ -51075,7 +51963,7 @@ function surfaceFileLineCount(workspace: string, relPath: string): number | unde
     if (!isWithin(real, resolveReal(workspace))) return undefined;
     if (fs.statSync(real).size > MAX_FINGERPRINT_FILE_BYTES) return undefined;
     // served-bytes: not-served (surface fingerprint: line count only)
-    return countLines(fs.readFileSync(real, "utf8"));
+    return countLines(readFileForRequest(real).toString("utf8"));
   } catch {
     return undefined;
   }
@@ -51510,7 +52398,7 @@ function recordPackServedRanges(
       if (!isWithin(real, resolveReal(workspace))) continue;
       if (fs.statSync(real).size > MAX_FINGERPRINT_FILE_BYTES) continue;
       // served-bytes: not-served (served-range ledger capture: sha + span accounting only)
-      text = fs.readFileSync(real, "utf8");
+      text = readFileForRequest(real).toString("utf8");
     } catch {
       continue;
     }
@@ -56409,11 +57297,25 @@ export function applyPackDedupe(
   if (context?.sizePreview !== true) sourceCapsulePrior(cacheKey);
   const prior = lastPackBlocksByWorkspace.get(cacheKey) ?? [];
   const running: PackedBlockFingerprint[] = prior.map((f) => ({ ...f, fromPriorPack: true }));
+  // 2026-10-29 (field report: measurementEngine.ts 337-401 shipped twice in one
+  // response): the same lines of the same file reach a pack under different
+  // handles (a locator symbol handle and a `kind:"range"` upsert) or rendered
+  // with different comment elision, so the handle+hash match below misses
+  // them. Within ONE pack, the second body for an identical path and range
+  // adds nothing the first did not send.
+  const servedSpanInPack = new Set<string>();
 
   for (const surf of result.surfaces) {
     if (surf.code === undefined) continue;
     if (exempt?.(surf) === true) continue;
     const hash = shaOfText(surf.code);
+    const spanKey = `${surf.path}\0${surf.range}`;
+    if (servedSpanInPack.has(spanKey)) {
+      dedupedSurfaceBody.set(surf, surf.code);
+      surf.code_unchanged = `${surf.handle} — duplicate of an earlier surface in this pack`;
+      surf.code = undefined;
+      continue;
+    }
     const match = running.find((f) => f.handle === surf.handle && f.range === surf.range && f.hash === hash);
     if (match) {
       // A different request can reuse the same handle while making that body
@@ -56425,7 +57327,10 @@ export function applyPackDedupe(
       const provenSameTask = match.taskBinding !== undefined
         && taskBinding !== undefined
         && match.taskBinding === taskBinding;
-      if (match.fromPriorPack && surf.required === true && !provenSameTask) continue;
+      if (match.fromPriorPack && surf.required === true && !provenSameTask) {
+        servedSpanInPack.add(spanKey);
+        continue;
+      }
       // W4: preserve the real body server-side (identity-keyed) so proof passes
       // stay deterministic across identical re-calls; the response still ships
       // only the compact pointer below.
@@ -56438,6 +57343,7 @@ export function applyPackDedupe(
       continue;
     }
     running.push({ handle: surf.handle, range: surf.range, hash, fromPriorPack: false, taskBinding });
+    servedSpanInPack.add(spanKey);
   }
 }
 
@@ -57961,7 +58867,7 @@ function attachSingleSiteUniqueMatchFastPath(
 
 /** No-install verification guidance shared by every "not runnable" verdict. */
 const VERIFY_NO_INSTALL_SUGGESTION =
-  "verify by reviewing the diff against served evidence; do not install dependencies unless the task explicitly requires running tests";
+  "tests cannot run here: say so when you report; do not install dependencies unless the task explicitly requires running tests";
 
 /**
  * A C/C++ surface set's verdict comes from the SAME host probe the edit-time
@@ -59637,7 +60543,7 @@ async function dedupeTrimAndPersist(
   // serves (a post-exit inline would ship content beside an "ask the user"
   // contract). No-op for artifact_build (it bundles its own sections) and for
   // any pack whose request named no artifact.
-  attachPrefetchedArtifactSections(result, workspace);
+  attachPrefetchedArtifactSections(result, workspace, profile);
   if (
     effectiveQuery.length > 0
     && shouldBuildTaskChangeContract(effectiveQuery, result, profile)
@@ -61185,6 +62091,12 @@ async function dedupeTrimAndPersist(
     { trimmed },
     opts?.args !== undefined ? { args: opts.args, captureTarget: idempotent ?? trimmed } : undefined,
   );
+  // 2026-10-29 (first-hop field report): the task's exploration spend against
+  // TASK_EXPLORATION_MAX_HOPS / _MAX_BYTES, plus which served surfaces the
+  // request names. Stamped LAST, on the pack that ships; the exit fence
+  // (`enforceCanonicalTaskDecisionAtExit`) re-derives the decision from it, so
+  // an exhausted budget stops proposing document pages without touching a body.
+  stampExplorationState(returned, workspace, effectiveQuery);
   return returned;
 }
 
@@ -61398,9 +62310,26 @@ function shrinkArtifactSections(
       .filter((item) => item.bytes < current)
       .sort((a, b) => b.bytes - a.bytes)[0];
     if (smaller === undefined) continue;
+    const before = entry.section;
     entry.section = smaller.candidate;
     entry.content_completeness = "partial";
-    entry.note = "artifact body reduced to fit the pack byte budget; fetch the full section with next";
+    if ("sheet" in before && "sheet" in smaller.candidate) {
+      // This cut may have dropped rows the entry's `next` already steps over.
+      const rest = plainCsvRemainder(before, smaller.candidate, csvRowsOf(entry.remaining_sections));
+      if (rest !== undefined) {
+        entry.remaining_sections = [`rows ${rest}`];
+        entry.next = {
+          tool: "tl_read_file",
+          arguments: { mode: "artifact", ...(entry.handle !== undefined ? { handle: entry.handle } : { path: entry.path }), ...csvRowsSelector(entry.path, rest) },
+        };
+        entry.note = plainCsvCutNote(before, smaller.candidate, " (pack byte budget)");
+        changed = true;
+        continue;
+      }
+    }
+    entry.note = "sheet" in smaller.candidate && smaller.candidate.query_window !== undefined
+      ? queryWindowSectionNote(smaller.candidate)
+      : "artifact body reduced to fit the pack byte budget; fetch the full section with next";
     if (entry.next === undefined) {
       entry.next = { tool: "tl_read_file", arguments: { mode: "artifact", path: entry.path } };
     }

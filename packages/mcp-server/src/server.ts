@@ -16,7 +16,7 @@ import { existsSync, statSync, lstatSync, readdirSync, readFileSync, realpathSyn
 import * as path from "path";
 import { createHash, randomBytes } from "crypto";
 import { deriveServerBuildId, deriveServerPackageVersion } from "./util/serverBuild.js";
-import { optionalVerificationTestHandles, clarifyOptionalVerificationTests } from "./protocol/verificationReads.js";
+import { optionalVerificationTestHandles, clarifyOptionalVerificationTests, shortenKitWhenTestsCannotRun, testHandlesOverReadBudget } from "./protocol/verificationReads.js";
 import { GO_REVIEW_TEXT_BYTES, goPostEditReview, joinPostEditNotes } from "./goReturnedLocalReview.js";
 
 import { getFileSkeleton, isSkeletonizableLanguage } from "./tools/getFileSkeleton.js";
@@ -71,7 +71,7 @@ import {
   virtualArchivePath,
 } from "./tools/archive.js";
 import { admitArchiveTreeCursor, buildArchiveTreePage, type ArchiveTreeAdmission, type ArchiveTreeRequest } from "./tools/archiveTreePage.js";
-import { admitTaskPackBudget, autoBoundTaskProfile, buildTaskPack, canServeCachedTaskPackReceipt, clearPackDedupeForWorkspace, concernAnchorTokens, concernHarvestText, filterConcernQueryEntries, recordReadOnlyServedRangedServe, repairSuppressedNextCall, stagePackFingerprintBinding, readonlyAnswerBatchPlan, publishTaskPackAuxiliaryEnumPool } from "./features/task-pack/readCodeTaskPack.js";
+import { admitTaskPackBudget, artifactQueryTokens, autoBoundTaskProfile, buildTaskPack, canServeCachedTaskPackReceipt, clearPackDedupeForWorkspace, concernAnchorTokens, concernHarvestText, filterConcernQueryEntries, recordReadOnlyServedRangedServe, repairSuppressedNextCall, stagePackFingerprintBinding, readonlyAnswerBatchPlan, publishTaskPackAuxiliaryEnumPool } from "./features/task-pack/readCodeTaskPack.js";
 import {isAuxiliaryEnumSurface} from "./features/task-pack/auxiliaryEnumContextIntegration.js";
 import { appendAdvisoryLine, structureMapElsewhereLineIn } from "./features/task-pack/structureMapElsewhere.js";
 import {currentRequestSignal} from "./util/requestCancellation.js";
@@ -453,6 +453,13 @@ import {
 import { walkCodeFiles, runWithWalkRequestScope, ARTIFACT_EXTS } from "./tools/walkRepo.js";
 import { classifySurface, deriveTokenVariants } from "./util/impact.js";
 import { callWorkspace, handleTable, runWithCallWorkspace, runWithDeclaredWorkspace, setHandlePersistence, shaOfText, shaOfBytes, shortSha, type HandleEntry } from "./util/handles.js";
+import {
+  emptyReadBaseline,
+  measureReadBaseline,
+  settleSymbolBaselines,
+  type ReadBaselineMeasurement as UsageReadBaselineMeasurement,
+} from "./usage-baseline/readBaseline.js";
+import { servedWindowsOfResultText } from "./usage-baseline/servedWindows.js";
 // PI-09 (v0.10 alpha.2) explicit state: purpose-bound handles over the
 // per-workspace persistent store. See state/stateHandles.ts's header for the
 // three namespaces and why `context` issuance is deliberately absent.
@@ -476,6 +483,7 @@ import { stateStoreFor } from "./state/stateStore.js";
 import { expandTaskAliasArguments, expandTaskHandle, projectTaskAliasBody, taskAliasLaneMismatch } from "./state/taskHandleAliases.js";
 import {finalizeSourceCapsules, runWithSourceCapsuleCall, sourceCapsulePrior} from "./features/task-pack/sourceCapsuleCallScope.js";
 import { isCurrentSingleEditHandle, repairEditTaskIdEcho } from "./state/editTaskInputRepair.js";
+import { ensureWireTokenizerLoaded } from "./protocol/codec/tokenizerResolver.js";
 import { hydrateReadCallContinuation, omitConfiguredRootCwdOnNext, projectAuthenticatedReadBatchReplay, projectReadCallContinuations, projectReadCallCursorAliasesOnNext, type ReadCallReplayAuthorization } from "./protocol/readCallContinuation.js";
 import { withReadCallDispatch } from "./state/readCallDispatch.js";
 import {withReadCallBatchQueue,finishReadCallBatchMember,reuseReadCallBatchSiblingNext} from "./state/readCallBatchGroup.js";
@@ -497,11 +505,16 @@ import { portableToolDefinition } from "./protocol/portableAdvertisement.js";
 // office/csv.ts is pure and dependency-free (unlike office/xlsx.ts, which is
 // dynamic-imported to defer exceljs), so a static import here costs nothing at
 // cold start and lets the csv artifact/auto helpers below call it directly.
-import { csvTable, decodeCsvBytes, type CsvTableResult } from "./office/csv.js";
+import { csvPageModel, csvTable, decodeCsvBytes, type CsvTableResult } from "./office/csv.js";
+import { chooseCsvRowPage, csvQueryWindow, csvRowCostBytes, rowsOverlappingWindows } from "./office/csvWindow.js";
+import { resolveSnapshot, takeSnapshot, type SnapshotFailure } from "./state/snapshotStore.js";
+import { selectSparseRows } from "./office/sparseSelect.js";
+import { applyHostCountedCodec, hostCounterActive } from "./protocol/codec/hostSelect.js";
+import { chooseCsvPage, CSV_PAGE_MAX_ROWS, csvPageReserve, csvRowSpansAsWindows, csvRowWindowHeld } from "./state/artifactReadRequest.js";
 import { prepareOfficeDocument } from "./office/decrypt.js";
 import { resolveCredentialRef } from "./security/credentials.js";
 import { editArtifact } from "./write/artifactEdit.js";
-import { assertSemanticFrontierV2FlagConsistency, batchHintsEnabled, cwdNearMissEnabled, decisionInvariantStrictEnabled, deltaContextEnabled, effAutofollowEnabled, effEditDietEnabled, effFindPhraseEnabled, effLenientEditEnabled, effSlimEditEnabled, effTolerantInputEnabled, effWideFindEnabled, findSmallBodiesEnabled, leanCallsEnabled, leanSchemaEnabled, minimalToolsEnabled, portableToolsEnabled, reasoningIrV2Enabled, receiptCoverageEnabled, reserveSmallWindowsEnabled, taskHandleRecoveryEnabled } from "./util/flags.js";
+import { artifactQueryWindowEnabled, readSnapshotEnabled, sparseSelectEnabled, assertSemanticFrontierV2FlagConsistency, batchHintsEnabled, cwdNearMissEnabled, decisionInvariantStrictEnabled, deltaContextEnabled, effAutofollowEnabled, effEditDietEnabled, effFindPhraseEnabled, effLenientEditEnabled, effSlimEditEnabled, effTolerantInputEnabled, effWideFindEnabled, findSmallBodiesEnabled, leanCallsEnabled, leanSchemaEnabled, minimalToolsEnabled, portableToolsEnabled, reasoningIrV2Enabled, receiptCoverageEnabled, reserveSmallWindowsEnabled, taskHandleRecoveryEnabled } from "./util/flags.js";
 // W-WIRE-2A (DESIGN-v0.15-sf-turn-economy.md §2 / W-LEDGER): the pure
 // per-path-ledger coverage decision, bridged into the production read paths
 // below. See coverageReceipt.ts's own header for the honesty contract this
@@ -516,9 +529,9 @@ import { deriveIrTaskRef, recordReasoningIrV2ClosureFromEdit, recordReasoningIrV
 import { deriveCanonicalTaskDecision, discoveryBundleNext, enforceCanonicalTaskDecisionAtExit } from "./features/task-pack/canonicalDecision.js";
 import type { TaskPackResult } from "./features/task-pack/model.js";
 import { projectLeanExecutionContract } from "./util/leanExecutionContract.js";
-import { recordReadMode, recordHandleEdit, recordPathSearchEdit, recordSingleEditCompletion, recordEditsBatchUsed, recordSingleFindCompletion, otherActiveRoots, recordConcernTokens, recordReadPath, getReadPaths, hasUnreadSiblingNoteFired, markUnreadSiblingNoteFired, recordEditedPath, getEditedPaths, getConcernTokens, guardExecutionDiscovery, noteDiscoveryServedNoBytes, guardExecutionEdit, recordExecutionContract, recordCandidateListPack, clearCandidateListPack, recordExecutionEditResult, recordCertifiedDecision, recordCreatedEditAdmissibility, getExecutionFence, takePreparedHandleAdvisory, noteTaskHandleHandedOut, rekeyExecutionFenceCertificate, runWithSessionLane, isClosureSatisfied, recordClosureReport, markClosureSatisfied, clearClosureSatisfied, wasFullyServed, unservedVerificationPaths, markVerificationPathsServed, isVerificationSurfaceServed, markVerificationSurfaceServed, verificationKitEntrySent, markVerificationKitEntriesSent, holdServerEditAuthoredLines, recordServedRange, servedRangeReceipt, markRangeContinuationWatched, servedRangeStaleness, acknowledgeRangeStaleness, mintedRangedContinuationWindows, beginServeCall, repeatedEditRefusalAdvisory, artifactRangeReceipt, recordArtifactServedRange, taskQueryRef, rememberTaskQuery, resolveTaskQueryRef, resolveTaskQueryRefBinding, resolveTaskQueryRefHandle, resolveTaskQueryRefSurfaceRoles, attachTaskQueryRefBinding, clearTaskQueryRef, claimServerBuildAnnouncement, registerServerBuildId, servedRangeCoverage, deltaLedgerStatus, unservedLineCount, recordFullServeCompleteness, CREATE_BODY_PLACEHOLDER, EDIT_REPLACE_PLACEHOLDER, EDIT_SEARCH_PLACEHOLDER, READ_BACK_RANGE_PLACEHOLDER, servedClusterCount, servedClusterRanges, isHandleShippedInThisLane, recordReadFamilySingleTargetCall, tokenizeForEpoch, type RequestElisionProbe, type ServedRangeLedgerReceipt, noteSymbolWindow, servedRangeUnheldLines } from "./state/session.js";
+import { recordReadMode, recordHandleEdit, recordPathSearchEdit, recordSingleEditCompletion, recordEditsBatchUsed, recordSingleFindCompletion, otherActiveRoots, recordConcernTokens, recordReadPath, getReadPaths, hasUnreadSiblingNoteFired, markUnreadSiblingNoteFired, recordEditedPath, getEditedPaths, getConcernTokens, guardExecutionDiscovery, noteDiscoveryServedNoBytes, guardExecutionEdit, recordExecutionContract, recordCandidateListPack, clearCandidateListPack, recordExecutionEditResult, recordCertifiedDecision, recordCreatedEditAdmissibility, getExecutionFence, takePreparedHandleAdvisory, EPOCH_REPEAT_ADVISORY, noteTaskHandleHandedOut, rekeyExecutionFenceCertificate, runWithSessionLane, isClosureSatisfied, recordClosureReport, markClosureSatisfied, clearClosureSatisfied, wasFullyServed, unservedVerificationPaths, markVerificationPathsServed, isVerificationSurfaceServed, markVerificationSurfaceServed, verificationKitEntrySent, markVerificationKitEntriesSent, holdServerEditAuthoredLines, recordServedRange, servedRangeReceipt, markRangeContinuationWatched, servedRangeStaleness, acknowledgeRangeStaleness, mintedRangedContinuationWindows, beginServeCall, repeatedEditRefusalAdvisory, artifactRangeReceipt, recordArtifactServedRange, taskQueryRef, rememberTaskQuery, resolveTaskQueryRef, resolveTaskQueryRefBinding, resolveTaskQueryRefHandle, resolveTaskQueryRefSurfaceRoles, attachTaskQueryRefBinding, clearTaskQueryRef, claimServerBuildAnnouncement, registerServerBuildId, servedRangeCoverage, deltaLedgerStatus, unservedLineCount, recordFullServeCompleteness, CREATE_BODY_PLACEHOLDER, EDIT_REPLACE_PLACEHOLDER, EDIT_SEARCH_PLACEHOLDER, READ_BACK_RANGE_PLACEHOLDER, servedClusterCount, servedClusterRanges, isHandleShippedInThisLane, recordReadFamilySingleTargetCall, tokenizeForEpoch, type RequestElisionProbe, type ServedRangeLedgerReceipt, noteSymbolWindow, servedRangeUnheldLines } from "./state/session.js";
 import { capPendingRenderedExtent } from "./state/session.js";
-import { buildVerificationManifest, verificationBodyIdentity, verificationDependencyNote, identifierTokens, KIT_NOTE_MAX_BYTES, type BodyMarker } from "./util/verificationPack.js";
+import { buildVerificationManifest, verificationBodyIdentity, verificationDependencyNote, identifierTokens, mineEditSignals, KIT_NOTE_MAX_BYTES, type BodyMarker, type EditHunkText } from "./util/verificationPack.js";
 import { attachClosure, computeClosureStateSafe, CLOSURE_SATISFIED_NOTE } from "./util/closureTracking.js";
 import { getFunctionalValidationObligation, clearFunctionalValidationObligation, forgetExecutedNext, hasExecutedNextBoundOrUnbound, hasPrescribedSearchTerm, normalizeContractLane, recordExecutedLocate, recordExecutedNext, recordExecutedSearch, recordExecutedSearchResult, recordPrescribedSearchTerms, recordServedBytes, recordServedWindow, stashIndependentRangeStalenessNote, consumeIndependentRangeStalenessNote, type ExecutedSearchAbsence, type ExecutedSearchHit } from "./util/packServeLog.js";
 import { currentSessionLane, laneScopedKey } from "./util/laneKey.js";
@@ -530,6 +543,7 @@ import {
   pageEnvelopeReserve,
   appendReadRequestTarget,
   choosePage,
+  ledgerCoverage,
   fixPage,
   mintReadCursor,
   openParentReadRequest,
@@ -541,6 +555,7 @@ import {
   resolveReadCursor,
   stagedFromResolution,
   windowStrings,
+  type PageChoice,
   subtractWindows,
   wireLineCostBytes,
   wireWindowsCostBytes,
@@ -624,7 +639,7 @@ import {
   type SchemaNode,
   type UnknownPropertyViolation,
 } from "./validation/requestShape.js";
-import { MCP_LANGS, TOOL_SURFACE_VALUES, isToolSurface, renamedToolName, type LineWindow, type McpLang, type RefusalCode, type TaskDecision, type TaskExecutionContract, type TaskProfileRequest, type TaskRef, type TaskVerifyObligation, type ToolCall, type ToolSurface } from "@tokenlighten/types";
+import { HANDLE_WIRE_PREFIXES, MCP_LANGS, TOOL_SURFACE_VALUES, isToolSurface, renamedToolName, type LineWindow, type McpLang, type RefusalCode, type TaskDecision, type TaskExecutionContract, type TaskProfileRequest, type TaskRef, type TaskVerifyObligation, type ToolCall, type ToolSurface } from "@tokenlighten/types";
 import {
   createUsageRecorder,
   estimateTokensFromBytes,
@@ -719,6 +734,7 @@ import {
 // by the read-cursor resume so an inherited `budget.tokens` sizes a page the
 // same way an inherited `budget.bytes` does — DESIGN-v0.15 §5.2.
 import { assertStartupBudgetsAreSane, bindToResponseCeiling, estimateBytesFromTokens } from "./protocol/budget/wireBudget.js";
+import { measureResponseBytes } from "./protocol/budget/measure.js";
 // FIX-A3 (2026-09-21): the SAME Symbol a shed rung reads off `ShedContext.args`
 // (`readBatch.ts`'s rungs 4/6) to keep echoing `content:"full"` across a
 // minted continuation — see `RANGE_CONTENT_FULL_MARKER`'s own doc comment in
@@ -1004,6 +1020,9 @@ function uniqueMatchRefusalInScope(opts: {
   return {
     ok: false,
     reason: "search-not-unique",
+    detail: count === 0
+      ? "unique-match precondition failed: the search string has no match in the handle range (exactly one is required)"
+      : "the search string matches more than one location in the handle range — add surrounding context to make it unique",
     ...(matches.length > 0 ? { matches } : {}),
   };
 }
@@ -4608,6 +4627,7 @@ const READ_FULL_CAP_BYTES_ALLOW_FULL = 131072;
 function csvArtifactShape(
   table: CsvTableResult,
   identity: { path: string; handle: string; sha: string },
+  queryWindow?: { note?: string; selectedBy?: "query" | "sparse"; snapshot?: { handle: string; takenAtMs: number }; source?: Record<string, unknown>; rowSpans?: Array<{ range: string; file_range: string; rows: number }>; counts?: { total: number; scanned: number; shown: number } },
 ): Record<string, unknown> {
   return {
     mode: "artifact",
@@ -4623,7 +4643,12 @@ function csvArtifactShape(
     total_columns: table.total_columns,
     dialect: table.dialect,
     warnings: table.warnings,
-    ...(table.note ? { note: table.note } : {}),
+    ...(queryWindow?.note !== undefined ? { note: queryWindow.note } : table.note ? { note: table.note } : {}),
+    ...(queryWindow?.selectedBy !== undefined ? { selected_by: queryWindow.selectedBy } : {}),
+    ...(queryWindow?.rowSpans !== undefined ? { row_spans: queryWindow.rowSpans } : {}),
+    ...(queryWindow?.counts !== undefined ? { counts: queryWindow.counts } : {}),
+    ...(queryWindow?.snapshot !== undefined ? { snapshot: { handle: queryWindow.snapshot.handle, taken_at_ms: queryWindow.snapshot.takenAtMs } } : {}),
+    ...(queryWindow?.source !== undefined ? { source: queryWindow.source } : {}),
     ...(table.fileLineRange !== undefined ? { file_range: table.fileLineRange } : {}),
   };
 }
@@ -4783,6 +4808,240 @@ export function bookCsvArtifactServeForTest(
   table: CsvTableResult,
 ): void {
   bookCsvArtifactServe(workspace, filePath, fileSha, totalLines, table);
+}
+
+/**
+ * A3 (TL_ARTIFACT_QUERY_WINDOW): the contiguous rows a query points at, as the
+ * first page of a read request over the WHOLE table.
+ *
+ * `undefined` means "keep the ordinary head", and it is the answer for every case
+ * this cannot do honestly: a file with rows it could not scan or address, a query
+ * with no usable token, no matching row, a match too common to locate anything, or
+ * a budget too small for the matching row. Selectors never reach this: an explicit
+ * range, columns or row cap is the caller's own scope and is served as asked.
+ *
+ * Q does not shrink because the order changed: `limit.next` walks every other row
+ * through the store, the `note` says the view is partial, and S is credited only
+ * from what the finalized payload carries (`shippedWindowsByPath`), after the
+ * ledger booking below has been corroborated by the same payload.
+ */
+function serveCsvQueryWindow(
+  bytes: Uint8Array,
+  ext: string,
+  identity: { path: string; handle: string; sha: string },
+  booking: { workspace: string; totalLines: number; forceServe: boolean },
+  query: string,
+  args: Record<string, unknown>,
+  responseCeiling: number | undefined,
+): { shape: Record<string, unknown> } | { noDataRows: true } | { floorBytes: number } | undefined {
+  const context = protocolCallContext();
+  if (context === undefined) return undefined;
+  const model = csvPageModel(bytes, { ext });
+  if (model === undefined) return undefined;
+  if (model.rows.length === 0) return { noDataRows: true };
+  const declaredBytes = typeof args["maxBytes"] === "number" ? args["maxBytes"] : undefined;
+  const declaredTokens = typeof args["maxTokens"] === "number" ? args["maxTokens"] : undefined;
+  const budget = Math.min(
+    mustFetchReadBudget(READ_SYMBOL_CAP_BYTES),
+    declaredBytes ?? Number.POSITIVE_INFINITY,
+    estimateBytesFromTokens(declaredTokens) ?? Number.POSITIVE_INFINITY,
+    responseCeiling ?? Number.POSITIVE_INFINITY,
+  );
+  const cwd = typeof args["cwd"] === "string" ? args["cwd"] : undefined;
+  const measuredCwd = cwd ?? context.continuationWorkspace ?? booking.workspace;
+  // Only the opening page carries the note and `selected_by`, so they are its own
+  // reserve; widest row numbers, because the window is not chosen yet.
+  const room = budget
+    - csvPageReserve(identity.path, model.columns, measuredCwd)
+    - measureResponseBytes(`,"selected_by":"query","note":${JSON.stringify(csvQueryWindowNote(`${model.rows.length}-${model.rows.length}`, model.rows.length))}`)
+    - (readSnapshotEnabled() ? SNAPSHOT_RESERVE_BYTES : 0);
+  const tokens = artifactQueryTokens(query);
+  const anchored = csvQueryWindow(model, tokens, room, CSV_PAGE_MAX_ROWS);
+  if (anchored === undefined) {
+    // The query does locate a row, and a budget the caller declared is what keeps it
+    // out: name the budget that serves it. The ordinary head could only be refused
+    // here, with no floor to retry at, and would not contain that row anyway.
+    if (declaredBytes === undefined && declaredTokens === undefined) return undefined;
+    const located = csvQueryWindow(model, tokens, Number.POSITIVE_INFINITY, 1);
+    return located === undefined ? undefined : { floorBytes: budget - room + csvRowCostBytes(model.rows[located.anchorIdx]!) };
+  }
+  let window: { readonly startIdx: number; readonly endIdx: number } = anchored;
+  const requested = csvRowSpansAsWindows(model);
+  // A repeat of the same query must move forward: when the row it points at is already
+  // held in this lane, the page is the first rows still owed instead. A forced serve
+  // asked for the bytes again, and gets them.
+  const held = booking.forceServe ? [] : ledgerCoverage(booking.workspace, identity.path, identity.sha);
+  let located = true;
+  if (csvRowWindowHeld(model, { startIdx: anchored.anchorIdx, endIdx: anchored.anchorIdx + 1 }, held)) {
+    // Next to the match first, since that is where the question points, then anywhere.
+    const owed = subtractWindows(requested, held);
+    const ahead = subtractWindows(owed, [{ start: 1, end: model.dataSpans[anchored.anchorIdx]![0] }]);
+    const page = chooseCsvRowPage(model, ahead.length > 0 ? ahead : owed, room, CSV_PAGE_MAX_ROWS);
+    if (!page.ok) return undefined;
+    window = page.window;
+    located = false;
+  }
+  const first = model.firstDataRow + window.startIdx;
+  const last = model.firstDataRow + window.endIdx - 1;
+  const table = csvTable(bytes, { ext, range: `${first}-${last}`, maxRows: window.endIdx - window.startIdx });
+  if (!table.ok || table.fileLineRange === undefined) return undefined;
+  const snapshotFormat = ext === "tsv" ? "tsv" : "csv";
+  const snapshot = readSnapshotEnabled()
+    ? takeSnapshot({ workspaceRoot: booking.workspace, lane: currentSessionLane(), path: identity.path, sourceSha: identity.sha, format: snapshotFormat, bytes })
+    : undefined;
+
+  const lane = currentSessionLane();
+  const taskHandle = typeof args["task_handle"] === "string" ? args["task_handle"] : undefined;
+  const staged = openReadRequest({
+    workspaceRoot: booking.workspace,
+    ...(lane !== "" ? { lane } : {}),
+    ...(taskHandle !== undefined ? { taskHandle } : {}),
+    // What a stale cursor's restart re-issues: this same request, not a task pack.
+    originalInput: { targets: [{ path: identity.path }], select: { kind: ext }, query },
+    ...(declaredBytes !== undefined || declaredTokens !== undefined
+      ? { budget: { ...(declaredBytes !== undefined ? { bytes: declaredBytes } : {}), ...(declaredTokens !== undefined ? { tokens: declaredTokens } : {}) } }
+      : {}),
+    forceServeOrigin: booking.forceServe,
+    echo: {
+      ...(cwd !== undefined ? { cwd } : {}),
+      ...(lane !== "" ? { lane } : {}),
+      ...(taskHandle !== undefined ? { taskHandle } : {}),
+    },
+    targets: [{
+      path: identity.path,
+      sha: identity.sha,
+      totalLines: Math.max(booking.totalLines, model.dataSpans[model.dataSpans.length - 1]?.[1] ?? 0),
+      representation: { content: "full", comments: "keep" },
+      requested,
+      artifact: { kind: ext === "tsv" ? "tsv" : "csv" },
+      ...(snapshot !== undefined ? { snapshot: { handle: snapshot.handle } } : {}),
+    }],
+  });
+  if (staged === undefined) return undefined;
+  context.readRequest = staged;
+  // Not gated on `located`: a task pack's window may already hold one match, and this view is what reaches the others.
+  const sparse = sparseSelectEnabled() && snapshot !== undefined
+    ? csvSparseView(bytes, ext, model, tokens, room, booking, identity, snapshot, held)
+    : undefined;
+  if (sparse !== undefined) return { shape: sparse };
+  bookCsvArtifactServe(booking.workspace, identity.path, identity.sha, booking.totalLines, table);
+  const servedAll = window.endIdx - window.startIdx === model.rows.length;
+  const note = servedAll
+    ? `served all ${model.rows.length} data rows`
+    : located
+      ? csvQueryWindowNote(table.range, model.rows.length)
+      : `served rows ${table.range} of ${model.rows.length} data rows: the row the query points at was already served in this lane, so these are the next rows owed. A partial view, so these rows alone show neither that a value is absent nor that the table is complete. limit.next returns the other rows`;
+  return {
+    shape: csvArtifactShape({ ...table, truncated: !servedAll }, identity, {
+      note,
+      ...(located ? { selectedBy: "query" as const } : {}),
+      ...(snapshot !== undefined ? { snapshot, source: { status: "current" } } : {}),
+    }),
+  };
+}
+
+/** What a snapshot's handle and the source status add to a response, at their widest. */
+const SNAPSHOT_RESERVE_BYTES = 600;
+/** What each run of a sparse view adds to a response, at its widest. */
+const SPARSE_RUN_RESERVE_BYTES = 72;
+const SPARSE_MAX_RUNS = 8;
+
+/**
+ * B2b: the first response as several runs of rows. `undefined` keeps the contiguous
+ * window: one run has nothing to gain from the extra labels, and a view whose rows
+ * are all already held would not move the request forward.
+ *
+ * Each run is read through `csvTable`, so its rows and positions are exactly what an
+ * ordinary read of that range returns. Q is unchanged and D still pages through the
+ * cursor, in file order, while `snapshot.handle` reaches any hidden run directly.
+ */
+function csvSparseView(
+  bytes: Uint8Array,
+  ext: string,
+  model: NonNullable<ReturnType<typeof csvPageModel>>,
+  tokens: readonly string[],
+  room: number,
+  booking: { workspace: string; totalLines: number; forceServe: boolean },
+  identity: { path: string; handle: string; sha: string },
+  snapshot: { handle: string; takenAtMs: number },
+  held: readonly LineWindow[],
+): Record<string, unknown> | undefined {
+  const selection = selectSparseRows(model, tokens, room - SPARSE_MAX_RUNS * SPARSE_RUN_RESERVE_BYTES - 48, SPARSE_MAX_RUNS);
+  if (selection === undefined || selection.runs.length < 2) return undefined;
+  if (selection.runs.every((run) => csvRowWindowHeld(model, run, held))) return undefined;
+  const tables: CsvTableResult[] = [];
+  for (const run of selection.runs) {
+    const table = csvTable(bytes, { ext, range: `${model.firstDataRow + run.startIdx}-${model.firstDataRow + run.endIdx - 1}`, maxRows: run.endIdx - run.startIdx });
+    if (!table.ok || table.fileLineRange === undefined) return undefined;
+    tables.push(table);
+  }
+  for (const table of tables) bookCsvArtifactServe(booking.workspace, identity.path, identity.sha, booking.totalLines, table);
+  const combined: CsvTableResult = {
+    ...tables[0]!,
+    range: tables.map((table) => table.range).join(","),
+    rows: tables.flatMap((table) => table.rows),
+    truncated: true,
+    warnings: [],
+  };
+  delete combined.fileLineRange;
+  delete combined.note;
+  return csvArtifactShape(combined, identity, {
+    note: `a partial view: ${selection.shown} of ${model.rows.length} data rows in ${tables.length} separate runs, chosen by query relevance, unusual values and variety. Rows left out are not less important, and these rows show neither that a value is absent nor that the table is complete. row_spans maps rows to positions. limit.next returns the other rows; before editing, read the exact range`,
+    selectedBy: "sparse",
+    rowSpans: tables.map((table) => ({ range: table.range, file_range: table.fileLineRange!, rows: table.rows.length })),
+    counts: { total: model.rows.length, scanned: selection.scanned, shown: selection.shown },
+    snapshot,
+    source: { status: "current" },
+  });
+}
+
+/** B1: why a snapshot handle cannot be served, in the shape every read refusal takes. Never a fallback to the current file. */
+function snapshotUnavailable(reason: SnapshotFailure): ReturnType<typeof toolStructuredError> {
+  return toolStructuredError({
+    ok: false,
+    code: "snapshot-unavailable",
+    field: "handle",
+    error: "this snapshot cannot be served",
+    detail: `${reason}; the bytes it held are not available here, and the current file was not read in its place. Re-read the file for its current content`,
+    retry: "none",
+  });
+}
+
+/**
+ * B1: a range of the revision a snapshot holds, through the same `csvTable` as any
+ * read. It books the served-range ledger only when the file on disk still has that
+ * revision: rows of a moved file are not the current text, so they must not ground an
+ * edit or answer a later read of the file.
+ */
+async function serveSnapshotExpansion(
+  token: string,
+  workspace: string,
+  args: Record<string, unknown>,
+): Promise<ReturnType<typeof toolOk> | ReturnType<typeof toolStructuredError>> {
+  const resolved = resolveSnapshot(token, workspace, currentSessionLane());
+  if (!resolved.ok) return snapshotUnavailable(resolved.reason);
+  const { data, bytes } = resolved;
+  // A handle names its own path. Silently preferring one of two would answer a question nobody asked.
+  if (typeof args["path"] === "string" && args["path"] !== data.path) return snapshotUnavailable("invalid");
+  const range = typeof args["range"] === "string" ? args["range"] : undefined;
+  const maxRows = typeof args["maxRows"] === "number" ? args["maxRows"] : undefined;
+  const table = csvTable(bytes, { ext: data.format, ...(range !== undefined ? { range } : {}), ...(maxRows !== undefined ? { maxRows } : {}) });
+  if (!table.ok) return snapshotUnavailable("corrupt");
+  // served-bytes: not-served (hashed only, to say whether the source moved; the rows come from the snapshot)
+  const currentBytes = await readBytesSafe(data.path, workspace);
+  const currentSha = currentBytes === null ? undefined : shaOfBytes(currentBytes);
+  const moved = currentSha !== data.source_sha;
+  if (!moved) bookCsvArtifactServe(workspace, data.path, data.source_sha, countLines(decodeCsvBytes(bytes)), table);
+  declareKind("read.artifact");
+  return toolOk(csvArtifactShape(table, { path: data.path, handle: token, sha: data.source_sha }, {
+    snapshot: { handle: token, takenAtMs: data.taken_at_ms },
+    source: currentSha === undefined ? { status: "missing" } : moved ? { status: "moved", current_sha: shortSha(currentSha) } : { status: "current" },
+  }));
+}
+
+
+function csvQueryWindowNote(range: string, totalRows: number): string {
+  return `served rows ${range} of ${totalRows} data rows, chosen by query relevance rather than from the top of the file; a partial view, so these rows alone show neither that a value is absent nor that the table is complete. limit.next returns the other rows`;
 }
 
 /**
@@ -9202,7 +9461,13 @@ function buildVerificationBodyDetailed(
   // touched — sharper than the manifest's edited-file-content proxy — so the
   // relevance gate drops zero-overlap kit surfaces (the measured T09
   // createApp.ts fetch) without guessing from whole-file tokens.
-  const changedIdentifiers = editArgs !== undefined ? identifiersFromEditArgs(editArgs) : [];
+  // 2026-10-29 (click/core.py report): only the removed and added LINES count
+  // (context lines quoted on both sides are not the change), string literals
+  // ride along, and a test naming one of them is a candidate even when it never
+  // spells the edited module.
+  const { identifiers: changedIdentifiers, literals: changedLiterals } = editArgs !== undefined
+    ? verificationSignalsFromEditArgs(editArgs)
+    : { identifiers: [], literals: [] };
   const manifest = buildVerificationManifest(workspace, edited, {
     // K3a: the edit-attachment path is where consecutive identical kits were
     // measured riding back-to-back responses — dedupe applies HERE only.
@@ -9211,6 +9476,7 @@ function buildVerificationBodyDetailed(
     // when the PATH's python3 cannot run them — the edit kit only.
     pythonSyntaxCheck: true,
     ...(changedIdentifiers.length > 0 ? { changedIdentifiers } : {}),
+    ...(changedLiterals.length > 0 ? { changedLiterals } : {}),
   });
   // Mark the CURRENT set covered either way — a later edit adding a new file
   // re-qualifies via the unserved check above.
@@ -9591,6 +9857,12 @@ function kitTestEntryRunnable(kit: Record<string, unknown>): boolean {
   return record["deps_installed"] === true && typeof record["test_entry"] === "string" && record["test_entry"].length > 0;
 }
 
+/** The kit names a test command and reports its dependencies missing. */
+function kitTestsCannotRun(kit: Record<string, unknown>): boolean {
+  const toolchain = kit["toolchain"];
+  return toolchain !== null && typeof toolchain === "object" && (toolchain as Record<string, unknown>)["deps_installed"] === false;
+}
+
 function labelKitBodies(
   workspace: string,
   kit: Record<string, unknown>,
@@ -9673,16 +9945,27 @@ function labelKitBodies(
   // handles stay listed; mock headers, link sets and missing includes, which
   // a standalone compile needs, still ride the batched call.
   const testHandles = optionalVerificationTestHandles(
-    out, kitTestEntryRunnable(kit) && isCliCodingHost(resolvedClientId()),
+    // A test that cannot run here is not read to verify anything, on any host.
+    out, (kitTestEntryRunnable(kit) && isCliCodingHost(resolvedClientId())) || kitTestsCannotRun(kit),
     new Set(namedKitPaths(kit).map(candidate => candidate.path)),
     new Set([...mockHandles, ...linkHandles, ...includeHandles, ...namedHandles]),
   );
+  // 2026-10-29 (click/core.py report): whatever test source remains to read is
+  // bounded too. The surfaces are in relevance order and the budget is spent in
+  // it; a test past VERIFICATION_TEST_READ_BUDGET_BYTES keeps its path and handle
+  // in the kit but is not asked for, and the kit's test_entry is the check.
+  const overBudgetTests = testHandlesOverReadBudget(
+    out,
+    new Set(namedKitPaths(kit).map(candidate => candidate.path)),
+    new Set([...testHandles, ...mockHandles, ...linkHandles, ...includeHandles, ...namedHandles]),
+  );
+  const unbatchedTests = new Set([...testHandles, ...overBudgetTests]);
   // Kit SPEND priority is the batch order: mock headers (no cheaper source),
   // then link_set (already sources-before-paired-headers), then the
   // missing-include headers a standalone compile needs, then surfaces.
   // Dedup keeps the highest-priority occurrence of a shared handle.
   const batched: string[] = [];
-  for (const handle of [...mockHandles, ...linkHandles, ...includeHandles, ...namedHandles, ...surfaceHandles.filter((h) => !testHandles.has(h))]) {
+  for (const handle of [...mockHandles, ...linkHandles, ...includeHandles, ...namedHandles, ...surfaceHandles.filter((h) => !unbatchedTests.has(h))]) {
     if (batched.includes(handle)) continue;
     batched.push(handle);
     if (batched.length >= VERIFICATION_NEXT_CALL_MAX_HANDLES) break;
@@ -9701,8 +9984,8 @@ function labelKitBodies(
       note: "one call serves every required body-less entry below",
     };
   }
-  clarifyOptionalVerificationTests(out, testHandles, batched);
-  return out;
+  clarifyOptionalVerificationTests(out, unbatchedTests, batched);
+  return kitTestsCannotRun(kit) ? shortenKitWhenTestsCannotRun(out, testHandles) : out;
 }
 
 export function attachVerificationAdvisory(
@@ -9710,11 +9993,10 @@ export function attachVerificationAdvisory(
   manifest: { toolchain?: { deps_installed?: boolean; verify_note?: string } },
 ): Record<string, unknown> {
   const verifyNote = verificationDependencyNote(manifest);
-  return {
-    ...result,
-    verification: manifest,
-    ...(verifyNote !== undefined ? { verify_note: verifyNote } : {}),
-  };
+  if (verifyNote === undefined) return { ...result, verification: manifest };
+  // The reply's own `verify_note` says it; the kit need not say it again.
+  const { verify_note: _promoted, ...toolchain } = manifest.toolchain ?? {};
+  return { ...result, verification: { ...manifest, toolchain }, verify_note: verifyNote };
 }
 
 /**
@@ -9998,6 +10280,42 @@ export function identifiersFromEditArgs(args: Record<string, unknown>): string[]
     }
   }
   return [...out];
+}
+
+/**
+ * 2026-10-29 (click/core.py report): what the verification kit should look for
+ * in a test — the identifiers and string literals on the lines this edit
+ * removed or added (mineEditSignals), not every token of both hunks. A hunk
+ * usually quotes context lines on both sides to anchor its search text; those
+ * made a one-line fix look like it touched the whole neighbourhood. A
+ * range-addressed item (`content`, no `search`) contributes its new lines only,
+ * and a `create` item contributes nothing: a new file's tokens are not a change
+ * to existing behaviour. Separate from `identifiersFromEditArgs`, whose
+ * whole-hunk tokens still feed Rule B's unread-note specificity.
+ */
+export function verificationSignalsFromEditArgs(args: Record<string, unknown>): { identifiers: string[]; literals: string[] } {
+  const hunks: EditHunkText[] = [];
+  const take = (entry: Record<string, unknown>): void => {
+    if (entry["create"] === true) return;
+    const search = typeof entry["search"] === "string" ? entry["search"] : undefined;
+    const replace = typeof entry["replace"] === "string" ? entry["replace"] : undefined;
+    const content = search === undefined && replace === undefined && typeof entry["content"] === "string"
+      ? entry["content"]
+      : undefined;
+    if (search === undefined && replace === undefined && content === undefined) return;
+    hunks.push({
+      ...(search !== undefined ? { search } : {}),
+      ...(replace !== undefined ? { replace } : {}),
+      ...(content !== undefined ? { content } : {}),
+    });
+  };
+  const edits = args["edits"];
+  if (Array.isArray(edits)) {
+    for (const entry of edits) if (isRecordLike(entry)) take(entry);
+  } else {
+    take(args);
+  }
+  return mineEditSignals(hunks);
 }
 
 function editHunksByPath(args: Record<string, unknown>): Map<string, Array<{ search?: string; replace?: string }>> {
@@ -10470,7 +10788,12 @@ async function attachAppliedReadback(
       // A nonzero brace delta is the read-back's own safety signal (it makes
       // the projector ship the full post-edit slice), so it keeps the window.
       const postText = lines.join("\n");
-      const echoTexts = sentArgs !== undefined && (delta === undefined || delta === 0)
+      // So does an edit that removes lines: what it left is the seam around them,
+      // which it did not send, and solvers read it back in a turn of their own
+      // (code-fix probe, 2026-11-02: 3 of 3 runs without the window, 1 of 3 with it).
+      const removesLines = ownHunks.some((hunk) => typeof hunk.search === "string" && typeof hunk.replace === "string"
+        && hunk.replace.split("\n").length < hunk.search.split("\n").length);
+      const echoTexts = sentArgs !== undefined && (delta === undefined || delta === 0) && !removesLines
         ? postEditEchoTexts(sentArgs, result, workspace, f.path, distinctPaths.size === 1, postText)
         : undefined;
       const echo = echoTexts !== undefined;
@@ -14195,6 +14518,16 @@ function requestElisionProbe(
   };
 }
 
+/** The csv/tsv path and kind this canonical target and `select` ask for, when `select.kind` agrees with the file's extension. */
+function csvQueryWindowTarget(target: Record<string, unknown>, select: unknown): { path: string; kind: "csv" | "tsv" } | undefined {
+  const path = target["path"];
+  const kind = select !== null && typeof select === "object" ? (select as Record<string, unknown>)["kind"] : undefined;
+  if (typeof path !== "string" || (kind !== "csv" && kind !== "tsv")) return undefined;
+  if (!path.toLowerCase().endsWith(`.${kind}`)) return undefined;
+  for (const selector of ["range", "ranges", "symbol", "handle"]) if (target[selector] !== undefined) return undefined;
+  return { path, kind };
+}
+
 function stageReadRequestForServe(input: {
   workspace: string;
   relPath: string;
@@ -14778,7 +15111,17 @@ function projectCanonicalRequest(canonical: string, input: Record<string, unknow
       if (args["content"] === "full") {
         Object.defineProperty(args, RANGE_CONTENT_FULL_INPUT, { value: true, enumerable: true, configurable: true });
       }
-      if (args["query"] !== undefined || args["qref"] !== undefined) {
+      // A3: the one spelling that asks for rows rather than a task pack -- one csv/tsv
+      // target, a query, and `select.kind` naming it. It is what the window's own
+      // restart and a pack's csv `next` emit. Without the flag it stays a task pack.
+      const csvWindowTarget = args["query"] !== undefined && targets.length === 1 && artifactQueryWindowEnabled()
+        ? csvQueryWindowTarget(targets[0]!, select)
+        : undefined;
+      if (csvWindowTarget !== undefined) {
+        args["path"] = csvWindowTarget.path;
+        args["kind"] = csvWindowTarget.kind;
+        args["mode"] = "artifact";
+      } else if (args["query"] !== undefined || args["qref"] !== undefined) {
         args["paths"] = targets.map(legacyPathTarget);
         Object.defineProperty(args, LEGACY_PATHS_INTERNAL_HANDLE_INPUT, { value: true, enumerable: true, configurable: true });
         args["mode"] = "task_pack";
@@ -15261,8 +15604,12 @@ function heldBatchWindowEntry(
   const totalLines = countLines(fileText);
   const end = Math.min(totalLines, start + countLines(slice.content) - 1);
   const fileSha = shaOfText(fileText);
-  const held = servedRangeReceipt(workspace, filePath, fileSha, start, end, totalLines, elided, keepComments);
+  // A rendering that elides nothing shows every line, so it is owed each as bytes:
+  // a block an earlier pack only disclosed is not held for it (code-fix probe, 2026-11-01).
+  const held = servedRangeReceipt(workspace, filePath, fileSha, start, end, totalLines, elided, keepComments || elided.length === 0);
   if (held === undefined) return undefined;
+  // What was elided was disclosed, not served, so the sentence below must not cover it.
+  const elidedNote = elided.length === 0 ? "" : `; comment lines ${elided.map(([first, last]) => `${first}-${last}`).join(",")} stay elided, select.comments:"keep" serves them`;
   return {
     path: slice.path,
     // The window this entry answers, as the read normalized it (`full` and
@@ -15280,7 +15627,7 @@ function heldBatchWindowEntry(
       complete: held.complete,
     },
     note: `lines ${slice.range} were served earlier this session and are unchanged`
-      + `${held.served_by !== undefined ? ` (${held.served_by})` : ""}; task.force_serve:true resends them`,
+      + `${held.served_by !== undefined ? ` (${held.served_by})` : ""}; task.force_serve:true resends them${elidedNote}`,
   };
 }
 
@@ -15874,6 +16221,11 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // cursor adds is memory of the ORIGINAL request, which `emit.ts`'s tail
       // turns back into the one canonical `limit.next`.
       // -----------------------------------------------------------------------
+      // B1: a snapshot handle in `targets[].handle` addresses the revision it holds. No
+      // other route may see this token: it is not a file handle.
+      if (readSnapshotEnabled() && typeof args["handle"] === "string" && args["handle"].startsWith(HANDLE_WIRE_PREFIXES.snapshot)) {
+        return serveSnapshotExpansion(args["handle"], workspace, args);
+      }
       const rawCursor = args["cursor"];
       if (typeof rawCursor === "string" && rawCursor !== "") {
         delete args["cursor"];
@@ -15915,7 +16267,37 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // 正準nextを返す" — the restart `next` is the request's own canonical
         // original input, never a narrowed slice of it.
         const cursorContents = new Map<string, string>();
+        // A3: a csv target's revision is its BYTES' hash (the ledger's key), and its
+        // pages are row runs, so it reads and chooses through its own model.
+        const cursorCsvModels = new Map<string, NonNullable<ReturnType<typeof csvPageModel>>>();
+        // B1: the targets whose source moved and whose pages come from a snapshot instead.
+        const cursorSnapshots = new Map<string, { token: string; bytes: Uint8Array; takenAtMs: number; currentSha?: string }>();
         for (const target of staged.state.targets) {
+          if (target.artifact !== undefined) {
+            // served-bytes: not-served (csv/tsv container bytes: csvPageModel owns the decode)
+            const csvBytes = await readBytesSafe(target.path, workspace);
+            const csvModel = csvBytes !== null && shaOfBytes(csvBytes) === target.sha
+              ? csvPageModel(csvBytes, { ext: target.artifact.kind })
+              : undefined;
+            if (csvModel !== undefined) {
+              cursorCsvModels.set(target.path, csvModel);
+              continue;
+            }
+            if (target.snapshot !== undefined) {
+              const held = resolveSnapshot(target.snapshot.handle, workspace, cursorLane);
+              const heldModel = held.ok && held.data.source_sha === target.sha ? csvPageModel(held.bytes, { ext: target.artifact.kind }) : undefined;
+              if (held.ok && heldModel !== undefined) {
+                cursorCsvModels.set(target.path, heldModel);
+                cursorSnapshots.set(target.path, {
+                  token: target.snapshot.handle,
+                  bytes: held.bytes,
+                  takenAtMs: held.data.taken_at_ms,
+                  ...(csvBytes !== null ? { currentSha: shaOfBytes(csvBytes) } : {}),
+                });
+                continue;
+              }
+            }
+          }
           // served-bytes: readServedText
           // AB1 (round 11): every later page of this request is SERVED from
           // `cursorContents`. The sha equality below binds those bytes to the
@@ -15926,9 +16308,12 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           // `cursor-stale` on page 2, and made this route the one place a
           // future decode change could reintroduce raw bytes behind a matching
           // sha. One policy at both ends.
-          // served-bytes: readServedText
-          const cursorVerdict = await servedTextForRoute(target.path, workspace);
-          const text = cursorVerdict === null || cursorVerdict.kind === "undecodable" ? null : cursorVerdict.text;
+          let text: string | null = null;
+          if (target.artifact === undefined) {
+            // served-bytes: readServedText
+            const cursorVerdict = await servedTextForRoute(target.path, workspace);
+            text = cursorVerdict === null || cursorVerdict.kind === "undecodable" ? null : cursorVerdict.text;
+          }
           if (text === null || shaOfText(text) !== target.sha) {
             // eval-0929 §3/§7 (TL-06 follow-up): this refusal's restart `next`
             // re-reads this path's `range`/`content` through the ordinary
@@ -16110,11 +16495,14 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           const rowOverhead = defaultResponseByteCeiling === undefined
             ? 0
             : pageRowOverhead(staged.state.targets.find((entry) => entry.remaining.length > 0)?.path ?? "");
-          let choice = choosePage(staged.state, linesOf, cursorBudget, cursorMeasuredCwd, rowOverhead);
+          const chooseAt = (bytes: number): PageChoice => cursorCsvModels.size > 0
+            ? chooseCsvPage(staged.state, (path) => cursorCsvModels.get(path), bytes, (path) => cursorCsvModels.get(path)?.columns ?? [], cursorMeasuredCwd, cursorSnapshots.size > 0 ? SNAPSHOT_RESERVE_BYTES : 0)
+            : choosePage(staged.state, linesOf, bytes, cursorMeasuredCwd, rowOverhead);
+          let choice = chooseAt(cursorBudget);
           // Materialize an indivisible line for the final wire fitter, which
           // returns a bounded terminal refusal if it cannot fit the ceiling.
           if (!choice.ok && choice.reason === "budget-below-minimum" && cursorCeilingBinds) {
-            choice = choosePage(staged.state, linesOf, choice.requiredMinBytes, cursorMeasuredCwd, rowOverhead);
+            choice = chooseAt(choice.requiredMinBytes);
           }
           if (!choice.ok && choice.reason === "budget-below-minimum") {
             return toolStructuredError({
@@ -16194,15 +16582,56 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         delete args["handles"];
         delete args["symbol"];
         args["path"] = pagePath;
-        if (pageWindows.length === 1) {
-          args["range"] = `${pageWindows[0]!.start}-${pageWindows[0]!.end}`;
+        const pageCsvModel = cursorCsvModels.get(pagePath);
+        if (pageCsvModel !== undefined) {
+          // A3: the same whole rows the page was fixed on, through the artifact route,
+          // so the page books and corroborates exactly as an explicit range does.
+          const pageRows = rowsOverlappingWindows(pageCsvModel, pageWindows);
+          if (pageRows === undefined) {
+            return toolStructuredError({
+              ok: false,
+              code: "cursor-invalid",
+              field: "cursor",
+              error: "this read cursor names no servable page",
+              detail: "unknown; restart the original request",
+              retry: "call",
+            });
+          }
+          const pageRange = `${pageCsvModel.firstDataRow + pageRows.startIdx}-${pageCsvModel.firstDataRow + pageRows.endIdx - 1}`;
+          const pageSnapshot = cursorSnapshots.get(pagePath);
+          if (pageSnapshot !== undefined) {
+            // B1: the old revision's rows, labelled as such, and nothing booked: `S` comes
+            // from this payload's `file_range`, and D stays in the old revision's lines.
+            const pageKind = staged.state.targets.find((target) => target.path === pagePath)?.artifact?.kind ?? "csv";
+            const pageTable = csvTable(pageSnapshot.bytes, { ext: pageKind, range: pageRange, maxRows: pageRows.endIdx - pageRows.startIdx });
+            if (!pageTable.ok) return snapshotUnavailable("corrupt");
+            staged.page = cursorPage;
+            const snapshotContext = protocolCallContext();
+            if (snapshotContext !== undefined) snapshotContext.readRequest = staged;
+            declareKind("read.artifact");
+            return toolOk(csvArtifactShape(pageTable, { path: pagePath, handle: pageSnapshot.token, sha: staged.state.targets.find((target) => target.path === pagePath)!.sha }, {
+              snapshot: { handle: pageSnapshot.token, takenAtMs: pageSnapshot.takenAtMs },
+              source: pageSnapshot.currentSha === undefined ? { status: "missing" } : { status: "moved", current_sha: shortSha(pageSnapshot.currentSha) },
+            }));
+          }
+          args["range"] = pageRange;
+          args["maxRows"] = pageRows.endIdx - pageRows.startIdx;
+          args["kind"] = staged.state.targets.find((target) => target.path === pagePath)?.artifact?.kind;
           delete args["ranges"];
+          delete args["query"];
+          args["mode"] = "artifact";
+          mode = "artifact";
         } else {
-          args["ranges"] = windowStrings(pageWindows);
-          delete args["range"];
+          if (pageWindows.length === 1) {
+            args["range"] = `${pageWindows[0]!.start}-${pageWindows[0]!.end}`;
+            delete args["ranges"];
+          } else {
+            args["ranges"] = windowStrings(pageWindows);
+            delete args["range"];
+          }
+          args["mode"] = "slice";
+          mode = "slice";
         }
-        args["mode"] = "slice";
-        mode = "slice";
         // finding 12: record THIS call's own fixed page so the emit tail's
         // settle can clip its `S` contribution to what the finalized wire
         // body actually ships, instead of trusting `cursorPage.windows`
@@ -16666,8 +17095,13 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // dispatcher. The prepared-task fence can withhold a repeated slice, but
       // it cannot decide a whole-file complement (or a force_serve recovery)
       // without consulting the served-range ledger there.
+      // A3: the `next` a pack's csv window hands out walks rows the pack does not hold.
+      // Each call moves forward, so it is no repeat for the loop brake to answer.
+      const csvQueryWindowCall = mode === "artifact" && typeof args["query"] === "string" && artifactQueryWindowEnabled()
+        && resolvedPath !== undefined && /\.(?:csv|tsv)$/iu.test(resolvedPath);
       const executionGuard = args["force_serve"] === true
         || (mode !== "full" && forceContentServe)
+        || csvQueryWindowCall
         ? { allowed: true as const }
         : guardExecutionDiscovery(
             workspace,
@@ -17289,12 +17723,11 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           // rule uniformly across every item of the batch.
           const itemDisplay = (keepComments || rangeContentFullMarker)
             ? { content: sliceResult.data.content, note: undefined as string | undefined, elided: [] as Array<[number, number]> }
-            : elideDocCommentsForDisplay(
-                sliceResult.data.content,
-                languageForPath(hPath),
-                false,
-                sliceResult.data.assembled ? 1 : rangeStartLine(sliceResult.data.range),
-              );
+            : sliceResult.data.assembled
+              ? elideDocCommentsForDisplay(sliceResult.data.content, languageForPath(hPath), false, 1)
+              // A window the caller named renders like the single-target read:
+              // one that is mostly a comment block keeps it (code-fix probe, 2026-11-01).
+              : elideDocCommentsForExplicitWindow(sliceResult.data.content, languageForPath(hPath), rangeStartLine(sliceResult.data.range), countLines(hContent));
           // SHOULD-FIX 57: a `stripped` serve is STATED here too — this item
           // carries a `sha`, and that sha is over the stripped text.
           const itemNote = [sliceResult.data.note, itemDisplay.note, nulStrippedNoteText(hVerdict)]
@@ -17946,12 +18379,9 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           // do.
           const itemDisplay = (keepComments || rangeContentFullMarker)
             ? { content: sliceResult.data.content, note: undefined as string | undefined, elided: [] as Array<[number, number]> }
-            : elideDocCommentsForDisplay(
-                sliceResult.data.content,
-                languageForPath(resolvedEntry.path),
-                false,
-                sliceResult.data.assembled ? 1 : rangeStartLine(sliceResult.data.range),
-              );
+            : sliceResult.data.assembled
+              ? elideDocCommentsForDisplay(sliceResult.data.content, languageForPath(resolvedEntry.path), false, 1)
+              : elideDocCommentsForExplicitWindow(sliceResult.data.content, languageForPath(resolvedEntry.path), rangeStartLine(sliceResult.data.range), countLines(content));
           const itemNote = [sliceResult.data.note, itemDisplay.note, nulStrippedNoteText(verdict)]
             .filter(Boolean).join("; ") || undefined;
 
@@ -20696,6 +21126,34 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             return toolOk(csvArtifactShape(table, identity));
           }
 
+          const csvQuery = typeof args["query"] === "string" ? args["query"] : undefined;
+          if (csvQuery !== undefined && artifactQueryWindowEnabled()) {
+            const csvWindow = serveCsvQueryWindow(bytes, ext, identity, { workspace, totalLines: csvTotalLines, forceServe: forceContentServe }, csvQuery, args, defaultResponseByteCeiling);
+            if (csvWindow !== undefined && "shape" in csvWindow) return toolOk(csvWindow.shape);
+            if (csvWindow !== undefined && "floorBytes" in csvWindow) {
+              return toolStructuredError({
+                ok: false,
+                code: "budget-below-minimum",
+                field: "budget",
+                error: "this budget cannot hold the row the query located plus its envelope",
+                detail: "raise budget.bytes to at least required_min_bytes and re-issue the same call",
+                required_min_bytes: csvWindow.floorBytes,
+                retry: "call",
+              });
+            }
+            // A table with no data rows has nothing to serve and nothing to continue, and
+            // the csv form requires content: say that, rather than fail its required set.
+            if (csvWindow !== undefined) {
+              return toolStructuredError({
+                ok: false,
+                code: "invalid-input",
+                field: "query",
+                error: `${artifactPath} has no data rows to search`,
+                detail: "the file is empty or holds only a header; read it without select.kind to see its text",
+                retry: "none",
+              });
+            }
+          }
           const csvOut = serveBoundedCsvArtifact(bytes, ext, identity, { workspace, totalLines: csvTotalLines, forceServe: forceContentServe });
           if (csvOut === undefined) return toolError(`Could not parse csv/tsv: ${artifactPath}`, { code: "read-error" });
           return toolOk(csvOut);
@@ -26246,6 +26704,10 @@ function rootMismatchNote(resolvedRoot: string): string | undefined {
 async function callToolUninstrumented(name: string, args: Record<string, unknown>) {
   const canonical = name;
 
+  // A1: the emit funnel counts synchronously, so an opted-in tokenizer loads here.
+  // Free unless TL_WIRE_TOKENIZER asks for one, and it never throws.
+  await ensureWireTokenizerLoaded();
+
   // protocol v1 (D1/D4/D6/§2.6): ONE funnel, one envelope. Every response the
   // three advertised tools emit on the default path leaves through here, which
   // is what makes "a payload without `v` is not a protocol-v1 payload" (§1.2)
@@ -26539,10 +27001,12 @@ function recorder(): UsageRecorder {
   return usageRecorder;
 }
 
-interface ReadBaselineMeasurement {
-  tokens: number | null;
-  uncreditedPaths: string[];
-}
+// v0.16.4: the baseline is what a NATIVE read of the same files/ranges would
+// return, not the whole-file size of every requested path — see
+// usage-baseline/readBaseline.ts. A whole-file read keeps the file's size
+// (credited once per path per lane); a ranged, symbol or handle-slice read is
+// credited only its range/served-symbol bytes and recorded as "range-bytes".
+type ReadBaselineMeasurement = UsageReadBaselineMeasurement;
 
 const creditedReadPathsByLane = new Map<string, Set<string>>();
 
@@ -26550,7 +27014,7 @@ function readBaselineMeasurement(
   canonical: string,
   args: Readonly<Record<string, unknown>>,
 ): ReadBaselineMeasurement {
-  if (canonical !== "tl_read_file") return { tokens: null, uncreditedPaths: [] };
+  if (canonical !== "tl_read_file") return emptyReadBaseline();
   let workspace: string;
   try {
     workspace = resolveWorkspaceRoot(
@@ -26558,57 +27022,58 @@ function readBaselineMeasurement(
       activeRoot,
     );
   } catch {
-    return { tokens: null, uncreditedPaths: [] };
+    return emptyReadBaseline();
   }
-  const requested: string[] = [];
-  if (typeof args["path"] === "string") requested.push(args["path"]);
-  if (Array.isArray(args["paths"])) {
-    for (const item of args["paths"]) {
-      if (typeof item === "string") requested.push(item);
-      else if (
-        item
-        && typeof item === "object"
-        && !Array.isArray(item)
-        && typeof (item as Record<string, unknown>)["path"] === "string"
-      ) {
-        requested.push((item as Record<string, string>)["path"]!);
-      }
-    }
+  try {
+    return measureReadBaseline({
+      workspace,
+      args,
+      credited: creditedReadPathsByLane.get(sessionLaneOf(args as Record<string, unknown>)),
+      resolveHandle: (handle) => {
+        const entry = handleTable.get(handle);
+        return entry !== undefined && entry.workspaceRoot === workspace
+          ? { path: entry.path, range: entry.range, symbol: entry.symbol }
+          : undefined;
+      },
+      handleOverrides: (args as Record<PropertyKey, unknown>)[HANDLE_OVERRIDES_INPUT] as
+        | Array<Record<string, unknown> | undefined>
+        | undefined,
+    });
+  } catch {
+    // Usage measurement runs outside the call's try block and must never alter its outcome.
+    return emptyReadBaseline();
   }
+}
 
-  const lane = sessionLaneOf(args as Record<string, unknown>);
-  const credited = creditedReadPathsByLane.get(lane) ?? new Set<string>();
-  let bytes = 0;
-  let measured = 0;
-  const uncreditedPaths: string[] = [];
-  for (const requestedPath of new Set(requested)) {
-    const absolute = path.resolve(workspace, requestedPath);
-    const relative = path.relative(workspace, absolute);
-    if (
-      relative === ".."
-      || relative.startsWith(`..${path.sep}`)
-      || path.isAbsolute(relative)
-    ) {
-      continue;
-    }
-    try {
-      const stat = statSync(absolute);
-      if (!stat.isFile()) continue;
-      measured++;
-      const key = process.platform === "win32"
-        ? path.normalize(absolute).toLowerCase()
-        : path.normalize(absolute);
-      if (credited.has(key)) continue;
-      bytes += stat.size;
-      uncreditedPaths.push(key);
-    } catch {
-      // Missing and virtual/archive paths simply have no measurable baseline.
-    }
+/** Estimated native-read tokens for a (settled) baseline measurement; null = none. */
+function readBaselineTokens(measurement: ReadBaselineMeasurement): number | null {
+  return measurement.bytes === null ? null : estimateTokensFromBytes(measurement.bytes);
+}
+
+/**
+ * A symbol read's baseline is the symbol window the response SERVED, known only
+ * once the result exists. A result that declares no window settles it to 0
+ * bytes rather than the whole file.
+ */
+function settleReadBaselineSymbols(
+  measurement: ReadBaselineMeasurement,
+  args: Readonly<Record<string, unknown>>,
+  result: { content: Array<{ text: string }> },
+): ReadBaselineMeasurement {
+  if (measurement.pendingSymbols.length === 0) return measurement;
+  try {
+    const workspace = resolveWorkspaceRoot(
+      typeof args["cwd"] === "string" ? args["cwd"] : undefined,
+      activeRoot,
+    );
+    return settleSymbolBaselines(
+      measurement,
+      workspace,
+      servedWindowsOfResultText(result.content[0]?.text),
+    );
+  } catch {
+    return { ...measurement, pendingSymbols: [] };
   }
-  return {
-    tokens: measured > 0 ? estimateTokensFromBytes(bytes) : null,
-    uncreditedPaths,
-  };
 }
 
 function commitReadBaseline(
@@ -27405,6 +27870,14 @@ export async function callTool(
     finishReadCallBatchMember(continuationWorkspace,initialLane,batchCursor,dispatch,
       reply.isError !== true && finalBody?.["kind"] === "read.task_pack" && finalBody["profile"] === "answer"
       && (finalDecision === "discover" || finalDecision === "act.answer"));
+    // B6: the one asynchronous stage after the funnel. It re-spells a settled reply, so
+    // nothing above can see the difference, and any failure sends it as it stood.
+    if (hostCounterActive() && reply.isError !== true && reply.content.length === 1) {
+      const spelled = await applyHostCountedCodec(reply.content[0]!.text, resolvedClientId(), continuationWorkspace, {
+        ...(currentRequestSignal() !== undefined ? { signal: currentRequestSignal()! } : {}),
+      });
+      if (spelled !== reply.content[0]!.text) return { ...reply, content: [{ ...reply.content[0]!, text: spelled }] };
+    }
     return reply;
   } catch (error) {
     finishReadCallBatchMember(continuationWorkspace,initialLane,batchCursor,dispatch,false);
@@ -27748,14 +28221,18 @@ export function mergeAutofollowReplies(firstPack: Record<string, unknown>, secon
     for (const key of AUTOFOLLOW_CARRIED_MEMBERS) {
       if (firstPack[key] !== undefined && second[key] === undefined) carried[key] = firstPack[key];
     }
-    // One line of the discover pack's `advisory` is kept: the structure map's note on a type's
+    // Two lines of the discover pack's `advisory` are kept: the structure map's note on a type's
     // members in other files (structureMapElsewhere.ts), which belongs to the pack that served the
-    // map and would go with it. Any other advisory goes with its pack, as it always has.
-    const mapNote = typeof firstPack["advisory"] === "string" ? structureMapElsewhereLineIn(firstPack["advisory"]) : undefined;
-    if (mapNote !== undefined) {
-      const own = typeof second["advisory"] === "string" ? second["advisory"] : undefined;
-      if (own === undefined || structureMapElsewhereLineIn(own) === undefined) carried["advisory"] = appendAdvisoryLine(own, mapNote);
-    }
+    // map and would go with it, and the epoch-repeat advisory (state/session.ts), which is about
+    // the CALL: the discover pack took it when it was built, and the follow-up has none to take
+    // (replay corpus v016t5). Any other advisory goes with its pack, as it always has.
+    const firstAdvisory = typeof firstPack["advisory"] === "string" ? firstPack["advisory"] : undefined;
+    const ownAdvisory = typeof second["advisory"] === "string" ? second["advisory"] : undefined;
+    let advisory = ownAdvisory;
+    const mapNote = firstAdvisory !== undefined ? structureMapElsewhereLineIn(firstAdvisory) : undefined;
+    if (mapNote !== undefined && (advisory === undefined || structureMapElsewhereLineIn(advisory) === undefined)) advisory = appendAdvisoryLine(advisory, mapNote);
+    if (firstAdvisory?.includes(EPOCH_REPEAT_ADVISORY) === true && advisory?.includes(EPOCH_REPEAT_ADVISORY) !== true) advisory = appendAdvisoryLine(advisory, EPOCH_REPEAT_ADVISORY);
+    if (advisory !== ownAdvisory) carried["advisory"] = advisory;
     return {
       ...second,
       ...(plan !== undefined ? { plan } : {}),
@@ -28166,8 +28643,7 @@ async function callToolTraced(
     // Attestation/route tracing is observability only and must never alter an MCP outcome.
   }
   const startedAt = performance.now();
-  const baselineMeasurement = readBaselineMeasurement(canonical, args);
-  const baselineTokens = baselineMeasurement.tokens;
+  let baselineMeasurement = readBaselineMeasurement(canonical, args);
   // R1: declared outside the try so BOTH failure exits — an `isError` result
   // and a thrown one — can withdraw the in-flight pre-record made below.
   let inFlight: { workspace: string; lane: string; taskBinding?: string } | undefined;
@@ -28288,6 +28764,9 @@ async function callToolTraced(
       );
     }
     if (!outcomeIsError) commitReadBaseline(baselineMeasurement, args);
+    baselineMeasurement = outcomeIsError
+      ? { ...baselineMeasurement, pendingSymbols: [] }
+      : settleReadBaselineSymbols(baselineMeasurement, args, result);
     try {
       if (
         canonical === "tl_read_file"
@@ -28300,8 +28779,8 @@ async function callToolTraced(
           outcome: outcomeIsError ? "error" : "ok",
           durationMs: performance.now() - startedAt,
           responseBytes: modelVisibleBytes(result),
-          baselineTokens,
-          baselineMethod: baselineTokens === null ? null : "file-bytes",
+          baselineTokens: readBaselineTokens(baselineMeasurement),
+          baselineMethod: baselineMeasurement.method,
           writeEnabled: ALLOW_WRITE,
           // V13: same task_ref on a query's first call and every qref
           // continuation of it — see the hoisted `dispatchQueryRef` doc above.
@@ -28329,8 +28808,8 @@ async function callToolTraced(
           outcome: "error",
           durationMs: performance.now() - startedAt,
           responseBytes: 0,
-          baselineTokens,
-          baselineMethod: baselineTokens === null ? null : "file-bytes",
+          baselineTokens: readBaselineTokens(baselineMeasurement),
+          baselineMethod: baselineMeasurement.method,
           writeEnabled: ALLOW_WRITE,
           // V13: the thrown-dispatch failure exit — same `dispatchQueryRef`
           // as the success-path record above, so a failed call still

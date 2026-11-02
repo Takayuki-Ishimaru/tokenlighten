@@ -236,6 +236,43 @@ function parseMachineInstall(value: unknown): MachineInstallInfo | null {
   };
 }
 
+/**
+ * This extension manages the VS Code definition, so "configured" here means
+ * VS Code specifically. A CLI that reports per-client results (`clientStatus`,
+ * v0.16.4+) answers a top-level `configured` for ANY registered client (a
+ * Claude Code- or Codex-only workspace is configured too), so the VS Code
+ * verdict is read from `clientStatus.vscode`; a malformed entry fails closed.
+ * An older CLI has no `clientStatus` and its top-level `configured` already is
+ * VS Code's.
+ */
+function vscodeVerdict(
+  result: Record<string, unknown>,
+): { configured: boolean; writeEnabled: boolean; usageLoggingEnabled: boolean } | null {
+  const notConfigured = { configured: false, writeEnabled: false, usageLoggingEnabled: false };
+  const perClient = result["clientStatus"] !== undefined;
+  let source: unknown = result;
+  if (perClient) {
+    const byClient = result["clientStatus"];
+    source = byClient && typeof byClient === "object" && !Array.isArray(byClient)
+      ? (byClient as Record<string, unknown>)["vscode"]
+      : undefined;
+    // VS Code is not one of the clients this workspace was set up for.
+    if (source === undefined) return notConfigured;
+  }
+  const entry = source && typeof source === "object" && !Array.isArray(source)
+    ? source as Record<string, unknown>
+    : undefined;
+  if (entry === undefined || typeof entry["configured"] !== "boolean") {
+    return perClient ? notConfigured : null;
+  }
+  if (!entry["configured"]) return notConfigured;
+  const { writeEnabled, usageLoggingEnabled } = entry;
+  if (typeof writeEnabled !== "boolean" || typeof usageLoggingEnabled !== "boolean") {
+    return perClient ? notConfigured : null;
+  }
+  return { configured: true, writeEnabled, usageLoggingEnabled };
+}
+
 function parseStatusProbe(
   stdout: string,
   root: string,
@@ -248,16 +285,19 @@ function parseStatusProbe(
       result["schemaVersion"] !== 1
       || typeof result["workspaceRoot"] !== "string"
       || typeof result["configured"] !== "boolean"
-      || result["configured"] === true
-        && (typeof result["writeEnabled"] !== "boolean"
-          || typeof result["usageLoggingEnabled"] !== "boolean")
       || canonicalWorkspacePath(result["workspaceRoot"])
         !== canonicalWorkspacePath(root)
     ) {
       return null;
     }
+    const verdict = vscodeVerdict(result);
+    if (verdict === null) return null;
     return {
-      ...(result as unknown as StatusProbeResult),
+      schemaVersion: 1,
+      workspaceRoot: result["workspaceRoot"],
+      configured: verdict.configured,
+      writeEnabled: verdict.writeEnabled,
+      usageLoggingEnabled: verdict.usageLoggingEnabled,
       machineInstall: parseMachineInstall(result["machine_install"]),
     };
   } catch {

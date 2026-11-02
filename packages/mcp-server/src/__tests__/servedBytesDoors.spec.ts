@@ -77,6 +77,7 @@ const READ_PRIMITIVES = [
   "readFileSafeOpt",
   "readBytesSafe",
   "readFileSync",
+  "readFileForRequest",
   "readServedTextSafe",
   "readServedText",
   "servedTextOrUndefined",

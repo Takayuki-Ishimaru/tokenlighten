@@ -240,7 +240,8 @@ export function actFloorHolds(candidate: ShedPayload, _kind: Kind, original?: Sh
           workspace?: { inventory_complete?: boolean };
         }
       : undefined;
-    if (!answerFloorHolds(usableEvidenceView(candidate), certificate)) return false;
+    const plan = candidate["plan"];
+    if (!answerFloorHolds(usableEvidenceView(candidate), certificate, isRecord(plan) ? plan["artifact_sections"] : undefined)) return false;
     // WP-H (eval-0929 §5/§8): the check above is `decisionWire.ts`'s stated
     // NECESSARY condition only — "at least one usable entry" — which a shed
     // that removes ONE cited body while another, uncited one survives still

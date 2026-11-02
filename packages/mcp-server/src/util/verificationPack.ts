@@ -293,6 +293,12 @@ const MIN_EDIT_IDENTIFIER_TOKENS = 3;
 // K3: bounded LRU-ish cache of the last kit fingerprint served per workspace.
 const KIT_DEDUPE_CACHE_MAX_WORKSPACES = 32;
 const SCAN_FILE_CAP_BYTES = 64 * 1024;
+// Symbol-only candidate scan (tests that name the change but not the edited
+// module): at most this many bytes of test text tokenised per kit, on top of
+// the per-file SCAN_FILE_CAP_BYTES. 64 files at the per-file cap; a repository
+// with more test text than that keeps its name-matched tests and loses only
+// the symbol-only ones past the cap.
+const SYMBOL_SCAN_TOTAL_BYTES_CAP = 4 * 1024 * 1024;
 const MAX_SURFACES = 6;
 const MAX_LINK_SET = 8;
 const MAX_PAIRED_HEADERS = 6;
@@ -427,15 +433,151 @@ export function identifierTokens(content: string): Set<string> {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Edit-signal mining (2026-10-29 click/core.py field report). The relevance
+// gate used to judge tests against the identifiers of the WHOLE edited file
+// whenever the edit supplied fewer than MIN_EDIT_IDENTIFIER_TOKENS of its own,
+// and admitted a test only if its text contained the edited file's basename or
+// stem as a bare substring. For a one-line change in a 3,000-line `core.py`
+// that admitted every test that merely imports `click.core` and left out the
+// one test (`test_options.py`) that asserts the changed behaviour, because it
+// never spells the module name at all. The edit itself says what it touched:
+// the identifiers and string literals on its removed and added lines.
+// ---------------------------------------------------------------------------
+
+/** One edit item's text: search/replace, or the `content` a range edit swapped in. */
+export interface EditHunkText {
+  search?: string;
+  replace?: string;
+  /** Replacement lines of a range-addressed item; the removed lines are not in the request. */
+  content?: string;
+}
+
+/** What one edit changed, as tokens a candidate test can be scanned for. */
+export interface EditSignals {
+  identifiers: string[];
+  literals: string[];
+}
+
+const MAX_MINED_IDENTIFIERS = 128;
+const MAX_MINED_LITERALS = 24;
+/** Shorter quoted text ("id", "utf-8") occurs in nearly every test and proves nothing. */
+const MIN_LITERAL_CHARS = 6;
+const MAX_LITERAL_CHARS = 160;
+const MAX_HUNK_LINES_MINED = 400;
+const STRING_LITERAL_RE = /"((?:[^"\\\r\n]|\\.)+)"|'((?:[^'\\\r\n]|\\.)+)'|`((?:[^`\\\r\n]|\\.)+)`/g;
+
+function stringLiterals(line: string): string[] {
+  const out: string[] = [];
+  for (const match of line.matchAll(STRING_LITERAL_RE)) {
+    const text = (match[1] ?? match[2] ?? match[3] ?? "").trim();
+    if (text.length >= MIN_LITERAL_CHARS && text.length <= MAX_LITERAL_CHARS && /[A-Za-z]/.test(text)) out.push(text);
+  }
+  return out;
+}
+
+/**
+ * The lines an item removed or added. A line identical on both sides (context
+ * the agent quoted to anchor the search text) is not a change. Order-insensitive
+ * multiset difference, so a line that merely moved is not a change either.
+ * A range item carries only its new lines: the removed ones are not in the request.
+ */
+function changedLinesOf(hunk: EditHunkText): string[] {
+  const split = (text: string | undefined): string[] =>
+    text === undefined ? [] : text.split(/\r?\n/).slice(0, MAX_HUNK_LINES_MINED).map((line) => line.trim()).filter((line) => line.length > 0);
+  if (hunk.search === undefined && hunk.replace === undefined) return split(hunk.content);
+  const removed = new Map<string, number>();
+  for (const line of split(hunk.search)) removed.set(line, (removed.get(line) ?? 0) + 1);
+  const changed: string[] = [];
+  for (const line of split(hunk.replace)) {
+    const left = removed.get(line) ?? 0;
+    if (left > 0) removed.set(line, left - 1);
+    else changed.push(line);
+  }
+  for (const [line, count] of removed) for (let i = 0; i < count; i++) changed.push(line);
+  return changed;
+}
+
+/**
+ * Identifiers and string literals on the removed and added lines of an edit —
+ * the tokens a test must contain to be exercising THIS change rather than the
+ * module it lives in. Bounded; empty when the edit touched no qualifying token
+ * (the caller then keeps the whole-file proxy of collectChangedIdentifiers).
+ */
+export function mineEditSignals(hunks: Iterable<EditHunkText>): EditSignals {
+  const identifiers = new Set<string>();
+  const literals = new Set<string>();
+  for (const hunk of hunks) {
+    for (const line of changedLinesOf(hunk)) {
+      if (identifiers.size < MAX_MINED_IDENTIFIERS) {
+        for (const token of identifierTokens(line)) {
+          if (identifiers.size >= MAX_MINED_IDENTIFIERS) break;
+          identifiers.add(token);
+        }
+      }
+      if (literals.size < MAX_MINED_LITERALS) {
+        for (const literal of stringLiterals(line)) {
+          if (literals.size >= MAX_MINED_LITERALS) break;
+          literals.add(literal);
+        }
+      }
+    }
+  }
+  return { identifiers: [...identifiers], literals: [...literals] };
+}
+
+/**
+ * An identifier specific enough that a test containing it is plausibly about
+ * the edit: a compound name (`show_default`, `getUser`), not a plain word
+ * (`value`, `Context`) nor a dunder (`__init__`) that every test mentions.
+ */
+function isDistinctiveIdentifier(token: string): boolean {
+  if (token.length < 5 || /^__\w+__$/.test(token)) return false;
+  return /[A-Za-z0-9]_+[A-Za-z0-9]/.test(token) || /[a-z][A-Z]/.test(token);
+}
+
+function isWordChar(ch: string): boolean {
+  return ch !== "" && /[a-z0-9_]/.test(ch);
+}
+
+/**
+ * Token-boundary containment of a module needle (`core.py`, `core`) in
+ * lowercased test text: `from click.core import`, `import core`, `./core`,
+ * `core.py` match; `score`, `hardcore`, `core_utils`, `corex` do not.
+ */
+function mentionsModuleToken(lowerText: string, needle: string): boolean {
+  let from = 0;
+  for (;;) {
+    const at = lowerText.indexOf(needle, from);
+    if (at < 0) return false;
+    if (!isWordChar(at === 0 ? "" : lowerText[at - 1]!) && !isWordChar(lowerText[at + needle.length] ?? "")) return true;
+    from = at + 1;
+  }
+}
+
+/**
+ * Does a test's lowercased text name the edited module? Token-boundary for
+ * Python, Node and the other module-per-file families. Native C/C++ and Go keep
+ * the substring match: a C module's functions carry its stem as a prefix
+ * (`os_mutex_lock` in `os_mutex.c`) and Go pairs tests by package, so the stem
+ * inside a longer identifier is how those languages refer to the file.
+ */
+function nameMentions(lowerText: string, needle: string, editedRel: string): boolean {
+  const ext = path.posix.extname(editedRel).toLowerCase();
+  return NATIVE_EXTS.has(ext) || GO_SURFACE_EXTS.has(ext)
+    ? lowerText.includes(needle)
+    : mentionsModuleToken(lowerText, needle);
+}
+
 /**
  * K2: identifiers this edit actually touched. Uses the caller's explicit set
- * when supplied (e.g. a future call site mining search/replace hunk text);
- * otherwise falls back to this same-session proxy — the edited files' own
- * CURRENT (post-edit) content — since buildVerificationManifest runs after
- * the edit lands and only ever receives edited rel paths from its existing
- * callers (server.ts attachVerification, readCodeTaskPack.ts construct-
- * receiver). Bounded the same way every other small-file scan in this module
- * is (SCAN_FILE_CAP_BYTES).
+ * when supplied (server.ts mines the edit's removed and added lines via
+ * mineEditSignals); otherwise falls back to this same-session proxy — the
+ * edited files' own CURRENT (post-edit) content — since
+ * buildVerificationManifest runs after the edit lands and only ever receives
+ * edited rel paths from its other callers (readCodeTaskPack.ts construct-
+ * receiver, the closure re-serve). Bounded the same way every other small-file
+ * scan in this module is (SCAN_FILE_CAP_BYTES).
  */
 function collectChangedIdentifiers(
   workspace: string,
@@ -1920,7 +2062,7 @@ const HARNESS_CREATE_NOTE =
 
 /** toolchain.verify_note when the detected test entry cannot actually run yet. */
 const VERIFY_NO_DEPS_NOTE =
-  "this test entry's dependencies are not installed — verify by diff review against the served evidence, not by installing them";
+  "this test entry's dependencies are not installed, so it cannot run here: say so when you report and do not install them. The edit reply already proves what landed; no re-read needed";
 
 /** node only: `deps_installed` omitted because a hoisted install above the workspace root cannot be ruled out. */
 const VERIFY_NOT_DETERMINABLE_NOTE =
@@ -1939,11 +2081,20 @@ export function buildVerificationManifest(
     behaviorAnchors?: readonly string[];
     /**
      * K2 (2026-08-01 verify-kit-diet): explicit identifiers this edit
-     * touched (e.g. mined from search/replace hunk text at a future call
-     * site). Falls back to a same-session proxy — the edited files' own
-     * current content — when omitted; see collectChangedIdentifiers.
+     * touched (server.ts mines them from the removed and added lines of the
+     * edit via mineEditSignals). Falls back to a same-session proxy — the
+     * edited files' own current content — when omitted; see
+     * collectChangedIdentifiers. An explicit set also licenses SYMBOL-ONLY
+     * candidates (a test that names a changed identifier or literal but not
+     * the edited module); the proxy never does, since a whole file's tokens
+     * would admit every test in the project.
      */
     changedIdentifiers?: readonly string[];
+    /**
+     * String literals on the edit's removed and added lines (mineEditSignals).
+     * A test containing one verbatim is a candidate and ranks by it.
+     */
+    changedLiterals?: readonly string[];
     /**
      * K3a (2026-08-01): consecutive-kit dedupe is OPT-IN, enabled only by the
      * edit-response attachment path (server.ts buildVerificationBody) where
@@ -1986,10 +2137,31 @@ export function buildVerificationManifest(
   // K2 (2026-08-01 verify-kit-diet): computed once, used both to rank/filter
   // surfaces below and left inert (relevanceGateActive false) whenever there
   // is too little signal to judge relevance by.
-  const changedIdentifiers = collectChangedIdentifiers(workspace, edited, options.changedIdentifiers);
-  const relevanceGateActive = changedIdentifiers.size >= MIN_EDIT_IDENTIFIER_TOKENS;
+  const changedLiterals = [...new Set(options.changedLiterals ?? [])].filter((literal) => literal.length > 0);
+  const explicitIdentifiers = new Set(options.changedIdentifiers ?? []);
+  // Mined from the edit itself (not the whole-file proxy). Only then may a test
+  // be admitted, or ranked, by what it says about the change.
+  const minedSignals = explicitIdentifiers.size > 0 || changedLiterals.length > 0;
+  const changedIdentifiers = minedSignals
+    ? explicitIdentifiers
+    : collectChangedIdentifiers(workspace, edited, undefined);
+  const distinctiveIdentifiers = new Set([...explicitIdentifiers].filter(isDistinctiveIdentifier));
+  // Native and Go pairing stay exactly as they were: their tests are found by
+  // header/package, and a symbol-only native test would change the harness
+  // build command mined from the surface list. Only Python, Node and the other
+  // module-per-file families get the symbol-driven selection below.
+  const symbolAdmission = minedSignals && edited.some((rel) => {
+    const ext = path.posix.extname(rel).toLowerCase();
+    return !NATIVE_EXTS.has(ext) && !GO_SURFACE_EXTS.has(ext);
+  });
+  // A one-line fix carries few identifiers, but one compound name or a quoted
+  // message is already a precise thing to look for; below that the gate stays
+  // inert (a single incidental plain word false-dropped real tests, K2).
+  const relevanceGateActive = changedIdentifiers.size >= MIN_EDIT_IDENTIFIER_TOKENS
+    || (symbolAdmission && (changedLiterals.length > 0 || distinctiveIdentifiers.size > 0));
+  let symbolScanBytes = 0;
 
-  // ---- referencing tests/mocks (name/stem match, unchanged from v1) ----
+  // ---- referencing tests/mocks (token-boundary name/stem match, plus symbol-only tests) ----
   const needles = new Map<string, string>();
   for (const rel of edited) {
     needles.set(path.posix.basename(rel).toLowerCase(), rel);
@@ -2023,7 +2195,14 @@ export function buildVerificationManifest(
   const ambiguousNodeEdits = new Set(edited.filter(rel =>
     NODE_SURFACE_EXTS.has(path.posix.extname(rel).toLowerCase())
     && (nodeNameCounts.get(path.posix.basename(rel).toLowerCase()) ?? 0) > 1));
-  const matched: Array<{ rel: string; role: "test" | "mock"; bytes: number; refs: string[]; content: string; overlap: number; direct: number }> = [];
+  const matched: Array<{
+    rel: string; role: "test" | "mock"; bytes: number; refs: string[]; content: string;
+    overlap: number; direct: number;
+    /** Distinct changed literals found verbatim, and compound changed identifiers found. */
+    literalHits: number; distinctiveHits: number;
+    /** Admitted by what it says about the change alone, not by naming the edited module. */
+    symbolOnly: boolean;
+  }> = [];
   for (const file of walked) {
     if (editedSet.has(file.rel)) continue;
     if (!editedRoots.has(projectRootOf(file.rel, workspace))) continue;
@@ -2043,7 +2222,8 @@ export function buildVerificationManifest(
     const directRefs = edited.filter(rel =>
       NODE_SURFACE_EXTS.has(path.posix.extname(rel).toLowerCase()) && nodeReferenceMatches(file.rel, content, rel));
     for (const [needle, rel] of needles) {
-      if (lower.includes(needle) && (!ambiguousNodeEdits.has(rel) || directRefs.includes(rel))) refs.add(rel);
+      if (!nameMentions(lower, needle, rel)) continue;
+      if (!ambiguousNodeEdits.has(rel) || directRefs.includes(rel)) refs.add(rel);
     }
     // Short stems (run) were not needles at all. A resolved import is stronger
     // evidence than the four-character fallback threshold.
@@ -2051,17 +2231,55 @@ export function buildVerificationManifest(
     if (goPair) {
       for (const editedRel of goPairEdited) refs.add(editedRel);
     }
-    if (refs.size === 0) continue;
-    // K2: overlap is 0 (never scanned) when the gate is inactive — a pure
-    // no-op that leaves ranking/filtering exactly as before.
+    // K2: overlap is 0 (never scanned) when neither the gate nor ranking needs
+    // it — a pure no-op that leaves ranking/filtering exactly as before.
     let overlap = 0;
-    if (relevanceGateActive) {
-      for (const tok of identifierTokens(content)) if (changedIdentifiers.has(tok)) overlap += 1;
+    let distinctiveHits = 0;
+    let literalHits = 0;
+    let symbolOnly = false;
+    // A test that names the change but not the module (click's test_options.py
+    // asserts show_default output and never spells `core`). Bounded: only test
+    // files of an edited file's own project root (the root check above), under
+    // SCAN_FILE_CAP_BYTES each and SYMBOL_SCAN_TOTAL_BYTES_CAP in all.
+    const symbolCandidate = refs.size === 0 && symbolAdmission && !mock && !goPair
+      && !NATIVE_EXTS.has(path.posix.extname(file.rel).toLowerCase())
+      && symbolScanBytes + file.bytes <= SYMBOL_SCAN_TOTAL_BYTES_CAP;
+    if (refs.size === 0 && !symbolCandidate) continue;
+    if (symbolCandidate) symbolScanBytes += file.bytes;
+    if (symbolCandidate || relevanceGateActive || symbolAdmission) {
+      for (const tok of identifierTokens(content)) {
+        if (!changedIdentifiers.has(tok)) continue;
+        overlap += 1;
+        if (distinctiveIdentifiers.has(tok)) distinctiveHits += 1;
+      }
+      if (symbolAdmission) for (const literal of changedLiterals) if (content.includes(literal)) literalHits += 1;
     }
-    matched.push({ rel: file.rel, role: mock ? "mock" : "test", bytes: file.bytes, refs: [...refs].sort(), content, overlap, direct: directRefs.length });
+    if (symbolCandidate) {
+      if (literalHits === 0 && distinctiveHits === 0) continue;
+      symbolOnly = true;
+      // Attribute the test to the edited files of its own project root: the
+      // edit-response path flattens the mined signals across files, so a finer
+      // attribution would be invented.
+      const testRoot = projectRootOf(file.rel, workspace);
+      for (const rel of edited) if (projectRootOf(rel, workspace) === testRoot) refs.add(rel);
+      if (refs.size === 0) for (const rel of edited) refs.add(rel);
+    }
+    matched.push({
+      rel: file.rel, role: mock ? "mock" : "test", bytes: file.bytes, refs: [...refs].sort(), content,
+      overlap, direct: directRefs.length, literalHits, distinctiveHits, symbolOnly,
+    });
   }
+  // Mined from the edit: rank by how strongly a test speaks to what changed —
+  // a verbatim changed literal and a compound identifier outweigh plain
+  // overlap, and a resolved import (the module's own test, evidence about the
+  // module rather than the change) is worth less than one compound hit. The
+  // old order (module reference first, overlap third) put every test that
+  // imports click.core ahead of the one that asserts the changed output.
+  const signalScore = (entry: (typeof matched)[number]): number =>
+    entry.literalHits * 3 + entry.distinctiveHits * 2 + entry.overlap + (entry.direct > 0 ? 2 : 0);
   matched.sort((a, b) =>
-    b.direct - a.direct
+    (symbolAdmission ? signalScore(b) - signalScore(a) || Number(a.symbolOnly) - Number(b.symbolOnly) : 0)
+    || b.direct - a.direct
     || b.refs.length - a.refs.length
     || b.overlap - a.overlap
     || (a.role === b.role ? 0 : a.role === "test" ? -1 : 1)
@@ -2092,7 +2310,8 @@ export function buildVerificationManifest(
       entry.role === "mock"
       || entry.rel === harnessEntryRel
       || entry.direct > 0
-      || entry.overlap > 0);
+      || entry.overlap > 0
+      || entry.literalHits > 0);
   const selected = relevant.slice(0, MAX_SURFACES);
   const surfacesOmitted = relevant.length - selected.length;
 

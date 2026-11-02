@@ -24,8 +24,9 @@ describe("fixed-cost defaults across client delivery paths", () => {
       await setupWorkspace({ root, launcher, schemaStamp, toolSurface });
       const agents = readFileSync(join(root, "AGENTS.md"), "utf8");
       expect(agents).toContain("## TokenLighten MCP (compact)");
-      expect(agents).toContain("edit.state_unknown");
-      expect(agents).toContain("create:true");
+      // The compact guide leaves the edit phase to the reply's edit_rules.
+      expect(agents).toContain("edit_rules");
+      expect(agents).not.toContain("edit.state_unknown");
       expect(readFileSync(join(root, "CLAUDE.md"), "utf8")).toContain("@AGENTS.md");
       const copilot = readFileSync(join(root, ".github/copilot-instructions.md"), "utf8");
       expect(copilot).toContain("# TokenLighten MCP - GitHub Copilot");

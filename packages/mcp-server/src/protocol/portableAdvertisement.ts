@@ -2,6 +2,8 @@
 // Opt-in advertisement only: dispatch continues to validate ALL_TOOLS.
 // Rare fields arrive in executable next/recovery calls and remain host-valid
 // because every projected object is open. Never infer workspace/task identity.
+import { portableSlimEnabled } from "../util/flags.js";
+
 export interface PortableToolDefinition {
   name: string;
   description: string;
@@ -34,6 +36,40 @@ function pick(record: Record<string, unknown>, keys: readonly string[]): Record<
 }
 function object(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+/**
+ * 2026-11-01: what a model writes itself on the ordinary path, and nothing else.
+ * These bytes are paid in every session whatever it asks (csv probe: the guide and
+ * schemas were the whole of TokenLighten's cost gap). Every object here is open, so
+ * a server-issued `next` or recovery that carries another field stays host-valid,
+ * and dispatch still validates and refuses against the full contract. Listing a
+ * state version only ever led a model to guess one (the note on `casGuard` below).
+ */
+const slimFields: Record<string, readonly string[]> = {
+  tl_read_file: ["cwd", "query", "targets", "task"],
+  tl_edit_file: ["cwd", "edits", "task"],
+  tl_search_files: ["cwd", "action", "queries", "scope", "task"],
+};
+function slimmed(name: string, schema: PortableToolDefinition["inputSchema"]): void {
+  const properties = schema.properties = pick(schema.properties, slimFields[name]!);
+  const task = object(properties["task"]);
+  if (task) {
+    task["properties"] = pick(object(task["properties"]) ?? {}, name === "tl_read_file" ? ["handle", "epoch", "profile"] : ["handle"]);
+    delete object(object(task["properties"])?.["epoch"])?.["description"];
+  }
+  const target = object(object(properties["targets"])?.["items"]);
+  if (target) {
+    target["properties"] = pick(object(target["properties"]) ?? {}, ["path", "handle", "range", "symbol"]);
+    delete target["oneOf"];
+  }
+  const edit = object(object(properties["edits"])?.["items"]);
+  if (edit) {
+    // The item's `anyOf` stays: it is what stopped address-less items (note above `descriptions`).
+    delete edit["oneOf"];
+    edit["properties"] = { ...pick(object(edit["properties"]) ?? {}, ["path", "handle", "search", "replace", "create", "content"]), precondition: { type: "string" } };
+  }
+  const scope = object(properties["scope"]);
+  if (scope) scope["properties"] = pick(object(scope["properties"]) ?? {}, ["path", "regex"]);
 }
 function compact(node: unknown): void {
   if (Array.isArray(node)) { for (const child of node) compact(child); return; }
@@ -99,6 +135,7 @@ export function portableToolDefinition<T extends PortableToolDefinition>(definit
   if (epoch) epoch["description"] = 'Only "new", on the first read of a new user request.';
   const casGuard = object(taskProperties?.["expected_state_version"]);
   if (casGuard) casGuard["description"] = "Only a refusal's actual version; omit otherwise.";
+  if (portableSlimEnabled()) slimmed(definition.name, schema);
   definition.description = descriptions[definition.name]!;
   return definition;
 }

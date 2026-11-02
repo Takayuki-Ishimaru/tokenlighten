@@ -2,6 +2,33 @@
 
 User-facing release highlights for TokenLighten.
 
+## 0.16.4
+
+- Supported CSV questions can return matching rows and whole-table match counts
+  in the first reply. Partial table previews report their actual row ranges and
+  retain continuation to the remaining rows.
+- Named code and literals guide discovery. JavaScript and TypeScript function
+  assignments and getter-style accessors are available as symbols. English and
+  Japanese explanation requests are recognized more reliably.
+- Bug-fix reads and edit replies retain useful function and surrounding context.
+  Requested comments are delivered, and verification suggestions focus on tests
+  related to the change and disclose when they cannot run.
+- Smaller client tool definitions and compact workspace guides reduce repeated
+  context. Edit instructions are supplied when needed. Large reads use client
+  response budgets more effectively and preserve whole source lines.
+- Direct MCP launches use the CLI's WebAssembly memory setting. Search replies
+  disclose skipped regex work and identify oversize-file omissions.
+- Workspace status covers all configured clients; Claude Code-only setup avoids
+  creating Copilot instructions. Usage estimates use equivalent read ranges.
+- Optional reply-selection and CSV/TSV view settings remain off by default.
+  The optional VS Code model token counter passes reply text to the selected
+  provider's counting API only when explicitly configured.
+
+Install the archive or VSIX, refresh workspace setup and reconnect your client.
+The three tools and supported canonical top-level request fields are unchanged
+from v0.16.3. See the
+[v0.16.4 release notes](release-docs/github-release-v0.16.4.md).
+
 ## 0.16.3
 
 - Updated the MCP transport dependency `@hono/node-server` to patched

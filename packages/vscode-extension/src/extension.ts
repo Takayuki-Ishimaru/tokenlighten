@@ -2,6 +2,7 @@
 //
 // extension.ts — activate / deactivate entry point.
 
+import { startHostCounterBridge } from "./hostCounterBridge.js";
 import * as vscode from "vscode";
 import { StatusBarManager } from "./statusBar.js";
 import { WorkspaceWatcher } from "./watcher.js";
@@ -26,6 +27,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // record, an update is told apart from a first install by the state an
   // earlier activation left there (settingsReset.ts).
   registerSettingsResetPrompt(context);
+  // B6: opt-in, and before the MCP provider builds its definitions: they carry its socket.
+  startHostCounterBridge(context);
   statusBar = new StatusBarManager();
   const bar = statusBar;
   context.subscriptions.push({ dispose: () => statusBar?.dispose() });

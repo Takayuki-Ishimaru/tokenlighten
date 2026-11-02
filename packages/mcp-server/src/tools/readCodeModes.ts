@@ -42,6 +42,7 @@ import type {
 } from "@tokenlighten/types";
 import { MCP_LANGS } from "@tokenlighten/types";
 import { canonicalToolCall, protocolCallContext } from "../protocol/envelope.js";
+import { resolveReadReplyCeiling } from "../protocol/codec/clientProfile.js";
 import { wholeOrOpenEndedRange } from "../util/rangeWords.js";
 
 // ---------------------------------------------------------------------------
@@ -1169,6 +1170,12 @@ export function sliceWireEnvelopeBytes(shape: SliceEnvelopeShape): number {
   return measureResponseBytes(JSON.stringify(envelope)) + (shape.extraBytes ?? 0);
 }
 
+/** True when the first line of `text` alone takes more than `maxBytes` bytes. */
+function firstLineExceedsBytes(text: string, maxBytes: number): boolean {
+  const end = text.indexOf("\n");
+  return Buffer.byteLength(end < 0 ? text : text.slice(0, end), "utf8") > maxBytes;
+}
+
 /**
  * The cursor call's identity members as the emit tail will render them: the
  * staged request's own echo when this call staged one (`stageReadRequestForServe`
@@ -1800,7 +1807,13 @@ export async function resolveSlice(
         truncatedAtLineBoundary = true;
         budgetNarrowed = true;
       }
-    } else if (sliceBytes > READ_SYMBOL_CAP_BYTES) {
+    } else if (
+      sliceBytes > READ_SYMBOL_CAP_BYTES
+      // Under a client ceiling a first line wider than the cap is never cut:
+      // the ceiling serves it whole or refuses it (protocol/emit.ts `cap-exceeded`).
+      && !(resolveReadReplyCeiling(protocolCallContext()?.clientId) !== undefined
+        && firstLineExceedsBytes(sliceContent, READ_SYMBOL_CAP_BYTES))
+    ) {
       // Truncate to cap.
       const encoder = Buffer.from(sliceContent, "utf8");
       finalContent = encoder.slice(0, READ_SYMBOL_CAP_BYTES).toString("utf8");

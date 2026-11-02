@@ -43,6 +43,26 @@ paths, source text, tool arguments, or error messages. Summary reads only
 structured usage counters and model ids from local AI logs. Export never uploads.
 `;
 
+/**
+ * What every per-call baseline (and so every "context avoided" figure) is:
+ * the bytes a native, non-TL read of the same files/ranges would have returned.
+ * Shown beside the savings numbers so an estimate is never read as billing.
+ */
+export const BASELINE_NOTE =
+  "estimate of what native reads of the same files/ranges would have returned "
+  + "(whole-file reads at file size, ranged and symbol reads at their range), "
+  + "not billed cost";
+
+/** The `Baseline:` line of the text summary; counts are optional (older producers omit them). */
+export function formatBaselineLine(
+  byMethod: { "file-bytes": number; "range-bytes": number } | undefined,
+): string {
+  const counts = byMethod === undefined
+    ? ""
+    : ` [${byMethod["file-bytes"]} whole-file and ${byMethod["range-bytes"]} ranged/symbol baseline call(s)]`;
+  return `Baseline: ${BASELINE_NOTE}${counts}\n`;
+}
+
 export function formatReductionRange(
   interval: { low: number; high: number } | null,
 ): string {
@@ -147,12 +167,14 @@ export async function runLogs(args: string[]): Promise<void> {
       decomposition.direct_context_saving.provenance.basis =
         "canonical task-grouped baseline minus successful responses in "
         + "baseline-anchored task groups; errors and unanchored task groups "
-        + `excluded (${canonicalSummary.measuredBaselineCalls} baseline-bearing call(s))`;
+        + `excluded (${canonicalSummary.measuredBaselineCalls} baseline-bearing call(s)); `
+        + "the baseline is an estimate of native reads of the same files/ranges, not billed cost";
     }
     const summary = {
       ...canonicalSummary,
       totalResponseBytes,
       method: "file-bytes" as const,
+      baselineNote: BASELINE_NOTE,
       measurementDisplay: buildMeasurementDisplay(decomposition),
       ...(measurementUnavailableReason ? { measurementUnavailableReason } : {}),
     };
@@ -198,6 +220,7 @@ export async function runLogs(args: string[]): Promise<void> {
         + `TL response bytes: ${summary.totalResponseBytes}\n`
         + `TL response tokens: ~${summary.estimatedResponseTokens} (est.)\n`
         + `TL response measurement method: ${summary.method}\n`
+        + formatBaselineLine(summary.measuredBaselineCallsByMethod)
         + `Context avoided: ${summary.measurementDisplay.contextAvoided.tokens === null ? "unavailable" : `${summary.measurementDisplay.contextAvoided.tokens} tokens`} (${summary.measurementDisplay.contextAvoided.status}; basis: ${summary.measurementDisplay.contextAvoided.basis})\n`
         + `Session net: ${summary.measurementDisplay.session.net.tokens === null ? "unavailable" : `${summary.measurementDisplay.session.net.tokens} tokens`} (${summary.measurementDisplay.session.net.status}; basis: ${summary.measurementDisplay.session.net.basis})\n`
         + `By tool: tl_read_file ${summary.byTool.tl_read_file}, `

@@ -32,6 +32,7 @@ import type {
   TokenLightenSetupClient,
   TokenLightenWorkspaceListResult,
   TokenLightenWorkspaceSetupResult,
+  StubTargetId,
   TokenLightenWorkspaceSummary,
   ToolSurface,
 } from "@tokenlighten/types";
@@ -54,6 +55,13 @@ import {
   writeInstallRecord,
 } from "../installHome.js";
 import { configFilePath } from "../paths.js";
+import {
+  createDirectoryMode,
+  createFileMode,
+  existingFileMode,
+  keepExistingFileMode,
+  type FileVisibility,
+} from "../fileMode.js";
 import { wantsHelp } from "../util/helpFlag.js";
 import { resolveMcpBin } from "./mcp.js";
 import { COPILOT_SESSION_CONFIG, COPILOT_SESSION_RUNNER, installCopilotSessionHook } from "../copilotSessionHooks.js";
@@ -70,8 +78,16 @@ Usage:
   tl workspace status [--root DIR] [--json]
   tl workspace list [--json]
 
-Setup creates AI rules and project-scoped MCP settings. Status verifies one
-workspace without changing it. List reports every
+Setup creates AI rules and project-scoped MCP settings. The GitHub Copilot
+guide (.github/copilot-instructions.md) and the Copilot agent file are written
+only when vscode is among the clients (--rules-only also keeps the Copilot
+guide); --clients claude-code or --clients codex create neither. Generated
+project files (.mcp.json, .vscode/*, .codex/config.toml, the guide files) use
+your umask's normal permissions so a team can share them; a file that already
+exists keeps its mode. Registry and other per-user state stay owner-only (0600).
+Status verifies one workspace without changing it: it checks every client the
+last setup registered (vscode, codex, claude-code) and reports configured when
+at least one of them is valid, naming the configured clients. List reports every
 workspace registered by setup on this machine for desktop-wide management.
 TokenLighten write tools and local privacy-preserving usage logging are enabled
 by default on first setup. Updates preserve each client's write permission.
@@ -124,6 +140,14 @@ function assertNotSymlink(target: string): void {
 export interface JsonWriteStyle {
   indent?: string | number;
   trailingNewline?: boolean;
+  /**
+   * Who may read what is written (fileMode.ts). Omitted means "private"
+   * (0600 file, 0700 new directory): the safe default for per-user state and
+   * for user-scope host configs, which can carry other servers' tokens. A
+   * project-shared file passes "shared" and gets the process default mode.
+   * Replacing an existing file always keeps that file's permission bits.
+   */
+  visibility?: FileVisibility;
 }
 
 // Exported so `mcpConfigFile.ts` (DESIGN-v0.14-mcp-only-install.md §4.3
@@ -139,15 +163,18 @@ export function writeJsonAtomic(
   assertNotSymlink(target);
   const parent = dirname(target);
   assertNotSymlink(parent);
-  mkdirSync(parent, { recursive: true, mode: 0o700 });
+  const visibility = style?.visibility ?? "private";
+  mkdirSync(parent, { recursive: true, mode: createDirectoryMode(visibility) });
   const temporary =
     `${target}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   const body = JSON.stringify(value, null, style?.indent ?? 2);
   const trailingNewline = style?.trailingNewline ?? true;
+  const previousMode = existingFileMode(target);
   writeFileSync(temporary, trailingNewline ? `${body}\n` : body, {
     encoding: "utf8",
-    mode: 0o600,
+    mode: createFileMode(visibility),
   });
+  keepExistingFileMode(temporary, previousMode);
   renameSync(temporary, target);
 }
 
@@ -244,7 +271,7 @@ function ensureCopilotSettings(root: string): CopilotInlineResultsReport {
 
   if (!existsSync(target)) {
     try {
-      writeJsonAtomic(root, target, { [COPILOT_SETTINGS_KEY]: COPILOT_RAISED_THRESHOLD_BYTES });
+      writeJsonAtomic(root, target, { [COPILOT_SETTINGS_KEY]: COPILOT_RAISED_THRESHOLD_BYTES }, { visibility: "shared" });
       return { status: "raised", settingsFile: target, thresholdBytes: COPILOT_RAISED_THRESHOLD_BYTES };
     } catch (error) {
       return manualCopilotReport(target, `could not create ${target}: ${error instanceof Error ? error.message : String(error)}`);
@@ -287,6 +314,7 @@ function ensureCopilotSettings(root: string): CopilotInlineResultsReport {
     writeJsonAtomic(root, target, document, {
       indent: detectIndentUnit(raw),
       trailingNewline: raw.length === 0 || raw.endsWith("\n"),
+      visibility: "shared",
     });
   } catch (error) {
     return manualCopilotReport(
@@ -324,6 +352,7 @@ export function removeCopilotThresholdIfManaged(root: string): void {
     writeJsonAtomic(root, target, document, {
       indent: detectIndentUnit(raw),
       trailingNewline: raw.length === 0 || raw.endsWith("\n"),
+      visibility: "shared",
     });
   } catch {
     // Best-effort cleanup only — never block or warn during uninstall.
@@ -439,6 +468,7 @@ function readOwnedCopilotSettings(root: string): Set<string> {
 function writeOwnedCopilotSettings(root: string, owned: ReadonlySet<string>): void {
   const target = copilotGuideRecordPath(root);
   if (owned.size > 0) {
+    // Per-user bookkeeping inside the git-ignored .tokenlighten/: stays 0600.
     writeJsonAtomic(root, target, { schemaVersion: 1, settings: [...owned].sort() });
     return;
   }
@@ -632,8 +662,8 @@ function ensureCopilotGuide(root: string, request: CopilotGuideRequest): { repor
     if (written.length > 0 || removed.length > 0) {
       try {
         writeJsonAtomic(root, target, document, settingsExist
-          ? { indent: detectIndentUnit(raw), trailingNewline: raw.length === 0 || raw.endsWith("\n") }
-          : undefined);
+          ? { indent: detectIndentUnit(raw), trailingNewline: raw.length === 0 || raw.endsWith("\n"), visibility: "shared" }
+          : { visibility: "shared" });
       } catch (error) {
         return manualCopilotGuideResult(target, `could not write ${target}: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -691,6 +721,7 @@ function releaseOwnedCopilotSettings(root: string): string[] {
           writeJsonAtomic(root, target, document, {
             indent: detectIndentUnit(raw),
             trailingNewline: raw.length === 0 || raw.endsWith("\n"),
+            visibility: "shared",
           });
           removed.push(...dropped);
         }
@@ -1046,7 +1077,9 @@ function configureVsCode(
   const servers = objectMember(document, "servers");
   const portable = portableIdentityFor(launcher, "vscode-user", installHomeDefault, platform);
   servers["tokenlighten"] = serverConfig(root, "vscode", portable, schemaStamp, toolSurface, linkTaskPackCeiling, writeEnabled);
-  writeJsonAtomic(root, target, document);
+  // Project-shared (a team may commit it): launcher paths and TOKENLIGHTEN_*
+  // markers only, no secrets, so it gets the process default mode.
+  writeJsonAtomic(root, target, document, { visibility: "shared" });
   return target;
 }
 
@@ -1075,7 +1108,9 @@ function configureClaude(
     alwaysLoad,
     ...serverConfig(root, "claude-code", portable, schemaStamp, toolSurface, false, writeEnabled),
   };
-  writeJsonAtomic(root, target, document);
+  // Project-shared, like .vscode/mcp.json above. Other servers' entries in an
+  // existing .mcp.json may carry tokens, so replacing the file keeps its mode.
+  writeJsonAtomic(root, target, document, { visibility: "shared" });
   return target;
 }
 
@@ -1118,7 +1153,10 @@ function configureCodex(
     },
     enabled: true,
   });
-  writeConfig(target, document);
+  // Project-shared like the JSON configs above: an existing file keeps its
+  // mode; a new file and directory get the process defaults (TokenLighten adds
+  // no secret here; the user-level ~/.codex/config.toml is a different file).
+  writeConfig(target, document, "shared");
   return target;
 }
 
@@ -1189,9 +1227,18 @@ export async function setupWorkspace(options: {
       : ["vscode", "codex", "claude-code"] satisfies TokenLightenSetupClient[];
   const codexConfigCreated = clients.includes("codex") && !existsSync(join(root, ".codex", "config.toml"));
   const copilotSettingsCreated = clients.includes("vscode") && !existsSync(join(root, ".vscode", "settings.json"));
-  const targetIds = clients.includes("vscode")
-    ? ["claude", "copilot", "copilot-agent"]
-    : ["claude", "copilot"];
+  // Which rule files this run writes. CLAUDE.md always; the Copilot guide
+  // (.github/copilot-instructions.md) only when something reads it: the VS Code
+  // client is being configured, or the run configures no client at all
+  // (--rules-only, the VS Code extension's definition-provider mode, where
+  // Copilot is the consumer). `--clients claude-code` or `--clients codex`
+  // must not create a Copilot file. The custom-agent file names this
+  // workspace's own .vscode/mcp.json entry, so it needs the vscode client.
+  const ruleTargets: StubTargetId[] = [
+    "claude",
+    ...(clients.length === 0 || clients.includes("vscode") ? ["copilot" as const] : []),
+    ...(clients.includes("vscode") ? ["copilot-agent" as const] : []),
+  ];
   const setupOutputCandidates = new Set<string>([
     join(root, ".tokenlighten", ".gitignore"),
     ...(clients.length > 0 ? [join(root, "AGENTS.md")] : []),
@@ -1202,7 +1249,7 @@ export async function setupWorkspace(options: {
     ...(clients.includes("vscode") && options.copilotSessionContext !== "keep"
       ? [join(root, COPILOT_SESSION_CONFIG), join(root, COPILOT_SESSION_RUNNER)]
       : []),
-    ...targetIds.flatMap((id) => {
+    ...ruleTargets.flatMap((id) => {
       const file = STUB_TARGET_BY_ID[id]?.file;
       return file ? [join(root, file)] : [];
     }),
@@ -1252,12 +1299,12 @@ export async function setupWorkspace(options: {
   // workspace's own ".vscode/mcp.json" "tokenlighten" server entry — it is
   // only meaningful, and only added here, while THIS run is configuring the
   // vscode client (never for --rules-only, and never for e.g. --clients
-  // codex alone, both of which leave "vscode" out of `clients`).
+  // codex alone, both of which leave "vscode" out of `clients`). The same
+  // `ruleTargets` list drives the created-file tracking above, so uninstall
+  // only ever learns about files this run could have written.
   const rules = await injectAll({
     repoRoot: root,
-    targets: clients.includes("vscode")
-      ? ["claude", "copilot", "copilot-agent"]
-      : ["claude", "copilot"],
+    targets: ruleTargets,
     driftMode: "auto-rewrite",
     profile: effectiveGuideProfile,
     ...(options.toolSurface !== undefined ? { toolSurface: options.toolSurface } : {}),
@@ -1444,14 +1491,47 @@ export type WorkspaceStatusReason =
   | "workspace-missing"
   | "registry-unavailable"
   | "not-registered"
+  /**
+   * @deprecated No longer produced: status inspects every registered client,
+   * not only VS Code. A registry entry that lists no client reports
+   * "no-client-registered".
+   */
   | "vscode-not-registered"
-  | "vscode-config-invalid";
+  /** The workspace is registered, but with no client (a --rules-only setup). */
+  | "no-client-registered"
+  /** VS Code is the only registered client and its .vscode/mcp.json entry is missing or inconsistent. */
+  | "vscode-config-invalid"
+  /** Clients are registered but none has a valid project config (and VS Code is not the only one). */
+  | "client-config-invalid";
+
+/** One registered client's own verdict (`clientStatus` below). */
+export interface WorkspaceClientStatus {
+  /** The client is registered and its project config file carries a TokenLighten entry that matches the registry. */
+  configured: boolean;
+  reason: "ready" | "config-invalid";
+  /** Present when configured: this client's write posture. */
+  writeEnabled?: boolean;
+  /** Present when configured. */
+  usageLoggingEnabled?: boolean;
+}
 
 export interface WorkspaceStatusResult {
   schemaVersion: 1;
   workspaceRoot: string;
+  /**
+   * True when at least one REGISTERED client (vscode, claude-code, codex) has a
+   * valid project config. Before v0.16.4 only VS Code was inspected, so a
+   * Claude Code- or Codex-only workspace always reported false; a consumer that
+   * needs the VS Code answer specifically reads `clientStatus.vscode`.
+   */
   configured: boolean;
   reason: WorkspaceStatusReason;
+  /**
+   * Write posture / usage logging of the headline client when `configured`:
+   * VS Code's if VS Code is configured (unchanged from earlier versions), else
+   * the first configured client's (order: vscode, claude-code, codex). Per-client
+   * values are in `clientStatus`.
+   */
   writeEnabled?: boolean;
   usageLoggingEnabled?: boolean;
   /** Only populated on the `--json` CLI path (`runWorkspace`), not by
@@ -1465,6 +1545,14 @@ export interface WorkspaceStatusResult {
    * Present whenever the workspace root itself could be resolved.
    */
   guidePresent?: boolean;
+  /** Registered clients whose config is valid, in the order vscode, claude-code, codex. Present once the workspace has a registry entry. */
+  configuredClients?: TokenLightenSetupClient[];
+  /**
+   * Verdict per REGISTERED client (a client the last setup did not select has no
+   * key). The VS Code extension reads `clientStatus.vscode?.configured` rather
+   * than the top-level `configured`. Present once the workspace has a registry entry.
+   */
+  clientStatus?: Partial<Record<TokenLightenSetupClient, WorkspaceClientStatus>>;
 }
 
 export function workspacePathsEqual(
@@ -1494,26 +1582,40 @@ function existingWorkspacePathsEqual(left: string, right: string): boolean {
   }
 }
 
-function hasValidVsCodeServer(
+/** Where each client keeps its project-scoped TokenLighten server entry. */
+const CLIENT_CONFIG_FILE: Readonly<Record<TokenLightenSetupClient, string>> = {
+  "vscode": ".vscode/mcp.json",
+  "claude-code": ".mcp.json",
+  "codex": ".codex/config.toml",
+};
+
+/** Canonical reporting order; VS Code first because its values are the headline ones for compatibility. */
+const CLIENT_STATUS_ORDER: readonly TokenLightenSetupClient[] = ["vscode", "claude-code", "codex"];
+
+/** The raw `tokenlighten` server entry in `client`'s project config, or undefined (missing file, symlink, unreadable, wrong shape). */
+function clientServerEntry(root: string, client: TokenLightenSetupClient): unknown {
+  const target = join(root, CLIENT_CONFIG_FILE[client]);
+  if (
+    !existsSync(target)
+    || lstatSync(target).isSymbolicLink()
+    || lstatSync(dirname(target)).isSymbolicLink()
+  ) {
+    return undefined;
+  }
+  if (client === "codex") return getNestedKey(readConfig(target), "mcp_servers.tokenlighten");
+  const servers = readJsonObject(target)[client === "vscode" ? "servers" : "mcpServers"];
+  if (!servers || typeof servers !== "object" || Array.isArray(servers)) return undefined;
+  return (servers as Record<string, unknown>)["tokenlighten"];
+}
+
+function hasValidClientServer(
   root: string,
+  client: TokenLightenSetupClient,
   writeEnabled: boolean,
   usageLoggingEnabled: boolean,
 ): boolean {
-  const target = join(root, ".vscode", "mcp.json");
   try {
-    if (
-      !existsSync(target)
-      || lstatSync(target).isSymbolicLink()
-      || lstatSync(dirname(target)).isSymbolicLink()
-    ) {
-      return false;
-    }
-    const document = readJsonObject(target);
-    const servers = document["servers"];
-    if (!servers || typeof servers !== "object" || Array.isArray(servers)) {
-      return false;
-    }
-    const server = (servers as Record<string, unknown>)["tokenlighten"];
+    const server = clientServerEntry(root, client);
     if (!server || typeof server !== "object" || Array.isArray(server)) {
       return false;
     }
@@ -1529,6 +1631,8 @@ function hasValidVsCodeServer(
     ) {
       return false;
     }
+    // Codex can switch a server off without removing it.
+    if (client === "codex" && raw["enabled"] === false) return false;
     const stringArgs = args as string[];
     const workspaceIndex = stringArgs.indexOf("--workspace");
     const configuredRoot = stringArgs[workspaceIndex + 1];
@@ -1540,7 +1644,7 @@ function hasValidVsCodeServer(
       && workspaceIndex >= 0
       && typeof configuredRoot === "string"
       && existingWorkspacePathsEqual(configuredRoot, root)
-      && variables["TOKENLIGHTEN_CLIENT"] === "vscode"
+      && variables["TOKENLIGHTEN_CLIENT"] === client
       && variables["TOKENLIGHTEN_USAGE_LOG"] === (usageLoggingEnabled ? "on" : "off");
   } catch {
     return false;
@@ -1598,25 +1702,39 @@ export function workspaceStatus(
       guidePresent,
     };
   }
-  if (!entry.clients.includes("vscode")) {
-    return {
-      schemaVersion: 1,
-      workspaceRoot: root,
-      configured: false,
-      reason: "vscode-not-registered",
-      guidePresent,
-    };
+  // Every client the last setup registered is inspected (it used to be VS Code
+  // only, so a claude-code- or codex-only workspace never reported ready).
+  const registered = CLIENT_STATUS_ORDER.filter((client) => entry.clients.includes(client));
+  const clientStatus: Partial<Record<TokenLightenSetupClient, WorkspaceClientStatus>> = {};
+  const configuredClients: TokenLightenSetupClient[] = [];
+  for (const client of registered) {
+    const writeEnabled = entry.writeEnabledByClient?.[client] ?? entry.writeEnabled;
+    if (hasValidClientServer(root, client, writeEnabled, entry.usageLoggingEnabled)) {
+      clientStatus[client] = {
+        configured: true,
+        reason: "ready",
+        writeEnabled,
+        usageLoggingEnabled: entry.usageLoggingEnabled,
+      };
+      configuredClients.push(client);
+    } else {
+      clientStatus[client] = { configured: false, reason: "config-invalid" };
+    }
   }
-  const writeEnabled = entry.writeEnabledByClient?.vscode ?? entry.writeEnabled;
-  if (
-    !hasValidVsCodeServer(root, writeEnabled, entry.usageLoggingEnabled)
-  ) {
+  const headline = configuredClients.includes("vscode") ? "vscode" : configuredClients[0];
+  if (headline === undefined) {
     return {
       schemaVersion: 1,
       workspaceRoot: root,
       configured: false,
-      reason: "vscode-config-invalid",
+      reason: registered.length === 0
+        ? "no-client-registered"
+        : registered.length === 1 && registered[0] === "vscode"
+          ? "vscode-config-invalid"
+          : "client-config-invalid",
       guidePresent,
+      configuredClients,
+      clientStatus,
     };
   }
   return {
@@ -1624,9 +1742,11 @@ export function workspaceStatus(
     workspaceRoot: root,
     configured: true,
     reason: "ready",
-    writeEnabled,
+    writeEnabled: clientStatus[headline]?.writeEnabled ?? entry.writeEnabled,
     usageLoggingEnabled: entry.usageLoggingEnabled,
     guidePresent,
+    configuredClients,
+    clientStatus,
   };
 }
 
@@ -1806,6 +1926,7 @@ export async function runWorkspace(
   if (sub === "status") {
     const result = workspaceStatus(
       valueAfter(rest, "--root") ?? process.cwd(),
+      options.registryPath,
     );
     if (rest.includes("--json")) {
       process.stdout.write(`${JSON.stringify({
@@ -1819,6 +1940,21 @@ export async function runWorkspace(
         ? `TokenLighten is configured for ${result.workspaceRoot}.\n`
         : `TokenLighten is not configured for ${result.workspaceRoot} (${result.reason}).\n`,
     );
+    if (result.configuredClients !== undefined && result.configuredClients.length > 0) {
+      process.stdout.write(`Configured clients: ${result.configuredClients.join(", ")}\n`);
+    }
+    const registeredClients = Object.keys(result.clientStatus ?? {});
+    const unconfigured = Object.entries(result.clientStatus ?? {})
+      .filter(([, status]) => status?.configured === false)
+      .map(([client]) => client);
+    if (unconfigured.length > 0) {
+      // Setup replaces the registry entry's client list, so the repair command
+      // names every registered client, not only the broken ones.
+      process.stdout.write(
+        `Registered but not valid: ${unconfigured.join(", ")} `
+          + `(repair with 'tl workspace setup --clients ${registeredClients.join(",")}')\n`,
+      );
+    }
     if (result.guidePresent === false) {
       process.stdout.write(
         "warning: no TokenLighten-managed guide block found in CLAUDE.md. "

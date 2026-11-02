@@ -16,6 +16,7 @@ import crossSpawn from "cross-spawn";
 import parseSpdxExpression from "spdx-expression-parse";
 import { markdownCell } from "./licenses-format.mjs";
 import { onnxRuntimeLegalFiles } from "./onnxruntime-licenses.mjs";
+import { jsTiktokenLegalFiles } from "./js-tiktoken-licenses.mjs";
 import { MULTILINGUAL_E5_MODEL, E5_MIT_NOTICE } from "../packages/types/dist/modelCatalog.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -155,7 +156,7 @@ function writeThirdPartyNotices(data, outputPath, runtimeIds) {
   const entries = expectedNames.map((name) => {
     const info = data[name];
     const license = asLicenseString(info?.licenses) || "UNKNOWN";
-    const supplemental = onnxRuntimeLegalFiles(name);
+    const supplemental = onnxRuntimeLegalFiles(name) ?? jsTiktokenLegalFiles(name);
     const licenseText = supplemental ? normalizedLegalText(supplemental[0].bytes.toString("utf8"), `${name} upstream license`) : readPackageLegalFile(
       info?.licenseFile,
       info?.path,

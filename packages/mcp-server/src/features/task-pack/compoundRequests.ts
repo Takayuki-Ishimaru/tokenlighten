@@ -91,7 +91,7 @@ interface SubjectContext {
 }
 
 function subjectContext(text: string): SubjectContext {
-  const identifiers = explicitIdentifiersIn(text);
+  const identifiers = explicitIdentifiersIn(text, { memberChains: false });
   // Speculative names from prose frames ("how MAX_RETRIES works") may be
   // useful to focal resolution, but cannot establish an independent subject.
   const callables = callShapedNamesIn(text);

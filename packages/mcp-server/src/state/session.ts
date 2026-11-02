@@ -1575,6 +1575,8 @@ export interface WorkspaceSession {
   // above — see claimServerBuildAnnouncement.
   // -------------------------------------------------------------------------
   serverBuildAnnounced: boolean;
+  /** `edit_rules` has ridden a reply of this session (protocol/editRules.ts). */
+  editRulesAnnounced: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -2097,6 +2099,7 @@ function _emptySession(): WorkspaceSession {
     closureEscalationFired: false,
     // W3 (2026-07-30): see the WorkspaceSession field doc above.
     serverBuildAnnounced: false,
+    editRulesAnnounced: false,
   };
 }
 
@@ -9979,6 +9982,14 @@ function _claimServerBuild(session: WorkspaceSession): boolean {
  */
 export function claimServerBuildAnnouncement(workspaceRoot: string): boolean {
   return _claimServerBuild(getSession(workspaceRoot));
+}
+
+/** True the first time this is called for a workspace; callers attach `edit_rules` only then. */
+export function claimEditRulesAnnouncement(workspaceRoot: string): boolean {
+  const session = getSession(workspaceRoot);
+  if (session.editRulesAnnounced) return false;
+  session.editRulesAnnounced = true;
+  return true;
 }
 
 /** Per-file ledger for WorkspaceSession.verificationManifestPathsServed. */

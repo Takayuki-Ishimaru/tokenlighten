@@ -18,11 +18,15 @@ import * as os from "node:os";
 // So: pin the forks pool (no threads crash), keep module isolation explicit
 // (fresh singletons per file — several specs reset handleTable/session/
 // dedupe-cache defensively and rely on not inheriting a sibling's state), cap
-// forks to two concurrent files so the subprocess storm can't oversubscribe,
+// concurrent files (MAX_FORKS) so the subprocess storm can't oversubscribe,
 // raise the per-test/hook timeouts as a cross-run safety belt (several
 // machines run this suite concurrently, which no single config can cap).
 const CPUS = typeof os.availableParallelism === "function" ? os.availableParallelism() : os.cpus().length;
-const MAX_FORKS = Math.min(2, Math.max(1, Math.floor(CPUS / 2)));
+const TOTAL_MEM_GB = os.totalmem() / 1024 ** 3;
+// 2026-11-01: two files at once took 109 minutes on 12 CPUs. That cap predates
+// `--liftoff-only`, which took a server from about 750 MB to about 220 MB, so it scales
+// with the machine now: half the CPUs, 4 GB per file, at most six files.
+const MAX_FORKS = Math.max(1, Math.min(6, Math.floor(CPUS / 2), Math.floor(TOTAL_MEM_GB / 4)));
 
 export default defineConfig({
   test: {
@@ -30,6 +34,7 @@ export default defineConfig({
     environment: "node",
     // 2026-09-20: same HOME-child fixture cleanup as the ROOT vitest.config.ts
     // (see helpers/homeTempJanitor.setup.ts). Keep the two in sync.
+    globalSetup: ["./src/__tests__/helpers/homeTempStaleSweep.global.ts"],
     setupFiles: ["./src/__tests__/helpers/homeTempJanitor.setup.ts"],
     // 2026-08-01: same explicit HOME authority as the ROOT vitest.config.ts
     // (tests create isolated direct children of HOME; production has no

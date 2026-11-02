@@ -6,6 +6,13 @@ TokenLighten is local-first. Repository indexing and context selection run on th
 
 Your MCP client and chosen AI provider operate under their own configuration and terms. If that client sends repository context to a provider, that request is made by the client—not by TokenLighten. Review your client and provider settings before using them with sensitive repositories.
 
+The optional VS Code setting `tokenlighten.hostTokenCounter.modelFamily`
+enables a bridge to the selected model provider's token-counting API. When
+reply selection is enabled, candidate reply text is passed to that API.
+The provider determines how it processes that text. This setting is empty
+by default; no counting bridge starts until a model family is explicitly
+configured. Review the provider's data handling before enabling it.
+
 ## Write permission
 
 A manually started MCP server is read-only by default. File and structured-artifact changes require `--allow-write`. First workspace setup enables writes by default, CLI refresh preserves existing per-client permissions, and explicit `--read-only` or `--allow-write` flags override them. The extension's setup enables writes.

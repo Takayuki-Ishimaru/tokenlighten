@@ -24,6 +24,7 @@
 // dictionary, no dependency. Does NOT touch `readCodeTaskPack.ts`'s own
 // `lightStem`/`surfaceEvidencesSalientWord` (other pins depend on their
 // exact behavior) — this is a new, independent, additive helper.
+import { boundedTextMemo } from "../../util/boundedTextMemo.js";
 
 /**
  * A BACKWARD rule strips one known suffix from `word` and returns zero or
@@ -419,17 +420,17 @@ function splitSubwords(run: string): string[] {
  * only ever offer split PIECES ("calculate"/"shipping"/"cost"), which a
  * whole compound needle could never equal.
  */
-function identifierWords(text: string): string[] {
-  const out: string[] = [];
+const identifierWords = boundedTextMemo((text: string): ReadonlySet<string> => {
+  const out = new Set<string>();
   for (const run of text.match(IDENTIFIER_RUN_RE) ?? []) {
-    out.push(run.toLowerCase());
+    out.add(run.toLowerCase());
     for (const segment of run.split(/[_-]+/u)) {
-      out.push(segment.toLowerCase());
-      for (const piece of splitSubwords(segment)) out.push(piece.toLowerCase());
+      out.add(segment.toLowerCase());
+      for (const piece of splitSubwords(segment)) out.add(piece.toLowerCase());
     }
   }
   return out;
-}
+});
 
 /**
  * True when some whole word of `text` — after camelCase/snake/kebab/digit
@@ -438,9 +439,19 @@ function identifierWords(text: string): string[] {
  * must never evidence "constant"). Pure; no workspace access.
  */
 export function textHasWordVariant(text: string, word: string): boolean {
-  const variants = new Set(inflectionVariants(word));
-  for (const token of identifierWords(text)) {
-    if (variants.has(token)) return true;
-  }
-  return false;
+  const words = identifierWords(text);
+  return heldInflectionVariants(word).some((variant) => words.has(variant));
+}
+
+const MAX_HELD_VARIANT_WORDS = 1024;
+const heldVariants = new Map<string, readonly string[]>();
+
+/** `inflectionVariants` for a caller that only reads the result, so one word's family is worked out once. */
+function heldInflectionVariants(word: string): readonly string[] {
+  const hit = heldVariants.get(word);
+  if (hit !== undefined) return hit;
+  if (heldVariants.size >= MAX_HELD_VARIANT_WORDS) heldVariants.clear();
+  const variants = inflectionVariants(word);
+  heldVariants.set(word, variants);
+  return variants;
 }

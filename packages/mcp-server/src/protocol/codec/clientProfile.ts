@@ -113,14 +113,16 @@ const KNOWN_CLIENT_PROFILES: ReadonlyMap<string, ClientProfile> = new Map([
     "tl-reference-client",
     {
       id: "tl-reference-client",
-      profileVersion: "1",
+      profileVersion: "2",
       lastValidated: "2026-08-21",
       // tl-raw-1 round-trips deterministically for any client that reads
       // `TextContent.text` as an opaque UTF-8 string and lets THIS SAME
       // server's `tl_read_file`/`tl_edit_file` continuation decode it -- already
       // round-trip-proven by policy.ts's evaluateCandidates before
       // selection ever runs, independent of which client is asking.
-      allowedCodecIds: ["tl-raw-1/1"],
+      // tl-dedup-1 likewise: a same-server decode with a proven round trip. It is only
+      // ever a candidate at all under TL_WIRE_DEDUP.
+      allowedCodecIds: ["tl-raw-1/1", "tl-dedup-1/1"],
     },
   ],
 ]);
@@ -186,17 +188,28 @@ const COPILOT_CLI_CLIENT_PROFILE: ClientProfile = {
   responseByteCeiling: 18 * 1024,
 };
 
-/** Use bytes conservatively: even token-dense source must fit the host limit. */
+/** Claude Code moves a tool result over 50,000 characters into a file, whatever MAX_MCP_OUTPUT_TOKENS says; a byte is at most one character. */
+const CLAUDE_CODE_MAX_REPLY_BYTES = 45_056;
+/**
+ * Bytes per token of MAX_MCP_OUTPUT_TOKENS. A reply over that limit also moves
+ * into a file, which costs a turn, and so does every page a lower ceiling adds:
+ * 0.8 (20,000 B) cut T03's walk of one class into 6 replies where 1.2 (30,000 B)
+ * takes 3 (2026-11-02). On o200k_base 30,000 B is 7,400-7,600 tokens of source or
+ * a task pack, 15,300 of numeric csv and 20,600 of base64; only a body of single
+ * digits and commas passes 25,000, and it reaches the model through that file.
+ */
+const CLAUDE_CODE_BYTES_PER_TOKEN = 1.2;
+
 function claudeCodeProfile(): ClientProfile {
   const raw = process.env["MAX_MCP_OUTPUT_TOKENS"];
   const parsed = raw !== undefined && /^[1-9][0-9]*$/.test(raw.trim()) ? Number(raw) : NaN;
   const tokens = Number.isSafeInteger(parsed) ? parsed : 25_000;
   return {
     id: "claude-code",
-    profileVersion: "1",
-    lastValidated: "2026-10-28",
+    profileVersion: "2",
+    lastValidated: "2026-11-02",
     allowedCodecIds: [],
-    responseByteCeiling: Math.max(1, Math.floor(tokens * 0.8)),
+    responseByteCeiling: Math.min(CLAUDE_CODE_MAX_REPLY_BYTES, Math.max(1, Math.floor(tokens * CLAUDE_CODE_BYTES_PER_TOKEN))),
   };
 }
 

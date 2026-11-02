@@ -72,7 +72,9 @@ export type StateHandlePurpose =
    */
   | "read-request"
   /** The same, for `tl_search_files` match paging (R3, Wave 2). */
-  | "search-request";
+  | "search-request"
+  /** B1: the fetched bytes of one read, addressed for later ranges of that revision. */
+  | "snapshot";
 
 /**
  * `StateHandlePurpose`'s closed member list, backing `isStateHandlePurpose`,
@@ -85,6 +87,7 @@ export const STATE_HANDLE_PURPOSES = [
   "continuation",
   "read-request",
   "search-request",
+  "snapshot",
 ] as const satisfies readonly StateHandlePurpose[];
 
 /** Runtime guard for `StateHandlePurpose`. */
@@ -216,6 +219,7 @@ export const HANDLE_WIRE_PREFIXES = {
   continuation: "tlh_cont_v1_",
   "read-request": "tlh_rreq_v1_",
   "search-request": "tlh_sreq_v1_",
+  snapshot: "tlh_snap_v1_",
 } as const satisfies Record<StateHandlePurpose, string>;
 
 /**

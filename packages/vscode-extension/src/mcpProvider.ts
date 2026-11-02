@@ -11,6 +11,7 @@ import {
   type WorkspaceMcpSettings,
 } from "./workspaceState.js";
 import { TOKENLIGHTEN_SCHEMA_STAMP } from "./generated/schemaStamp.js";
+import { hostCounterEnv } from "./hostCounterBridge.js";
 // The window-scoped off switch for a server VS Code launches from a managed
 // `.vscode/mcp.json` (see hostActivation.ts). It reads the bypass flag back
 // from this file; both sides use the other's binding only inside functions.
@@ -259,6 +260,7 @@ export function registerMcpProvider(context: vscode.ExtensionContext): void {
           {
             ...launch.env,
             TOKENLIGHTEN_CLIENT: "vscode",
+            ...hostCounterEnv(),
             // GitHub Copilot Chat fixed-overhead reduction (WP-C1): pins the
             // VS Code advertisement profile (protocol/clientAdvertisement.ts)
             // even on a transport leg that never threads a real

@@ -1,5 +1,5 @@
 import { defineConfig } from "vitest/config";
-import { availableParallelism, cpus, homedir } from "node:os";
+import { availableParallelism, cpus, homedir, totalmem } from "node:os";
 
 // Concurrency + timeout hardening (deflake) — 2026-08-01: hoisted from
 // packages/mcp-server/vitest.config.ts (see its longer rationale comment) so
@@ -8,10 +8,14 @@ import { availableParallelism, cpus, homedir } from "node:os";
 // the machine (per-file wall-clock over 100s, blown 5s timeouts, an outright
 // threads-pool crash). Keep the two configs' pool/timeout blocks in sync.
 const CPUS = typeof availableParallelism === "function" ? availableParallelism() : cpus().length;
-// Keep the root invocation at the same two-file cap as the package config:
-// each file can spawn multiple real MCP stdio servers, so CPU-count-based
-// parallelism still creates a multiplicative process load.
-const MAX_FORKS = Math.min(2, Math.max(1, Math.floor(CPUS / 2)));
+const TOTAL_MEM_GB = totalmem() / 1024 ** 3;
+// Keep the root invocation at the same cap as the package config: each file can
+// spawn multiple real MCP stdio servers, so a bare CPU count would still create a
+// multiplicative process load.
+// 2026-11-01: two files at once took 109 minutes on 12 CPUs. That cap predates
+// `--liftoff-only`, which took a server from about 750 MB to about 220 MB, so it scales
+// with the machine now: half the CPUs, 4 GB per file, at most six files.
+const MAX_FORKS = Math.max(1, Math.min(6, Math.floor(CPUS / 2), Math.floor(TOTAL_MEM_GB / 4)));
 
 export default defineConfig({
   test: {
@@ -19,6 +23,9 @@ export default defineConfig({
     include: ["packages/*/src/**/*.test.ts", "packages/*/src/**/*.spec.ts", "scripts/*.spec.mjs"],
     // ESM-first — no transforms needed for .ts with Node 20+
     environment: "node",
+    // Fixture directories a killed worker left under HOME; see the module itself.
+    // Keep in sync with packages/mcp-server/vitest.config.ts.
+    globalSetup: ["./packages/mcp-server/src/__tests__/helpers/homeTempStaleSweep.global.ts"],
     // S3 (v0.14.3 pre-release fix wave, test isolation leak): `npm run
     // test`/`npm run test:packages` runs every package's specs through
     // THIS root config (there is no vitest.workspace.ts tying per-package

@@ -37,6 +37,7 @@
 import * as fs from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { walkCodeFiles, type FoundFile } from "../../tools/walkRepo.js";
+import { readFileForRequest } from "../../util/requestFileCache.js";
 import { decodeTextBuffer } from "../../util/textDecode.js";
 import { decomposeIdentifier } from "./tokenize.js";
 import { buildJaBridgeVocabulary, MAX_VOCAB_WORDS, type JaBridgeVocabulary } from "./jaQueryBridge.js";
@@ -123,7 +124,7 @@ function addContentWords(absPath: string, counts: Map<string, number>, maxConten
   if (!stat.isFile() || stat.size > maxContentFileBytes) return;
   let buf: Buffer;
   try {
-    buf = fs.readFileSync(absPath);
+    buf = readFileForRequest(absPath);
   } catch {
     return;
   }

@@ -2285,6 +2285,13 @@ export function servedWindowsOf(
     // table before booking), so the window this reads is already the
     // post-shed truth.
     const artifactRows = record["rows"];
+    // A3: a task pack's query window names its lines by `line_offset`, which it has
+    // only while the rows it kept are intact (features/task-pack/artifactSections.ts).
+    const lineOffset = (record["query_window"] as { line_offset?: unknown } | undefined)?.line_offset;
+    if (scopePath !== undefined && Array.isArray(artifactRows) && artifactRows.length > 0 && typeof lineOffset === "number") {
+      const logical = parseServedRange(record["range"]);
+      if (logical !== undefined) windows.push({ path: scopePath, start: logical[0] + lineOffset, end: logical[1] + lineOffset });
+    }
     if (
       scopePath !== undefined
       && Array.isArray(artifactRows)
@@ -2294,6 +2301,13 @@ export function servedWindowsOf(
       const fileRange = parseServedRange(record["file_range"]);
       if (fileRange !== undefined && fileRange[0] >= 1) {
         windows.push({ path: scopePath, start: fileRange[0], end: fileRange[1] });
+      }
+      // B2b: a sparse view's runs each corroborate exactly their own span.
+      if (Array.isArray(record["row_spans"])) {
+        for (const span of record["row_spans"]) {
+          const run = span !== null && typeof span === "object" ? parseServedRange((span as Record<string, unknown>)["file_range"]) : undefined;
+          if (run !== undefined && run[0] >= 1) windows.push({ path: scopePath, start: run[0], end: run[1] });
+        }
       }
     }
 

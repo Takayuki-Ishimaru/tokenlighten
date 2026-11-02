@@ -9,7 +9,9 @@
 
 import type { Kind } from "@tokenlighten/types";
 import { measureResponseBytes } from "../budget/measure.js";
+import { wireDedupEnabled } from "../../util/flags.js";
 import { NON_JSON_CANDIDATES } from "./registry.js";
+import { tlDedup1Codec } from "./tlDedup1.js";
 import { countUniformArrayRows } from "./shape.js";
 import { canonicalEqual, type CodecPayload, type ResponseCodec } from "./types.js";
 
@@ -83,20 +85,43 @@ export function isEligibleKind(kind: Kind): boolean {
  * equal `payload`, is silently excluded -- never surfaced as an error.
  */
 export function evaluateCandidates(kind: Kind, payload: CodecPayload): CodecCandidate[] {
-  const out: CodecCandidate[] = [];
-  for (const codec of NON_JSON_CANDIDATES) {
+  const out = evaluateCandidatesWithRejections(kind, payload).candidates;
+  return out;
+}
+
+export type CandidateRejection = "cannot-encode" | "codec-threw" | "round-trip-mismatch";
+
+/**
+ * `evaluateCandidates`, plus why each excluded codec was excluded -- the A1
+ * shadow reports the difference between "does not apply to this payload" and
+ * "applied and failed its round trip", which the selection path has no use for.
+ */
+export function evaluateCandidatesWithRejections(
+  kind: Kind,
+  payload: CodecPayload,
+): { candidates: CodecCandidate[]; rejected: Array<{ codecId: string; reason: CandidateRejection }> } {
+  const candidates: CodecCandidate[] = [];
+  const rejected: Array<{ codecId: string; reason: CandidateRejection }> = [];
+  for (const codec of wireDedupEnabled() ? [...NON_JSON_CANDIDATES, tlDedup1Codec] : NON_JSON_CANDIDATES) {
+    const codecId = `${codec.id}/${codec.version}`;
     try {
-      if (!codec.canEncode(kind, payload)) continue;
+      if (!codec.canEncode(kind, payload)) {
+        rejected.push({ codecId, reason: "cannot-encode" });
+        continue;
+      }
       const text = codec.encode(payload);
       const decoded = codec.decode(text);
-      if (!canonicalEqual(decoded, payload)) continue;
-      out.push({ codec, text, bytes: measureResponseBytes(text) });
+      if (!canonicalEqual(decoded, payload)) {
+        rejected.push({ codecId, reason: "round-trip-mismatch" });
+        continue;
+      }
+      candidates.push({ codec, text, bytes: measureResponseBytes(text) });
     } catch {
-      continue;
+      rejected.push({ codecId, reason: "codec-threw" });
     }
   }
-  out.sort((a, b) => a.bytes - b.bytes);
-  return out;
+  candidates.sort((a, b) => a.bytes - b.bytes);
+  return { candidates, rejected };
 }
 
 export interface SelectionResult {
@@ -138,8 +163,10 @@ export function selectForWire(
   // mode === "auto": the full optimization gate.
   const relativeGain = jsonBytes > 0 ? absoluteGain / jsonBytes : 0;
   const rows = countUniformArrayRows(payload);
+  // The row floor is a tabular codec's assumption. A log body folds with no rows at all.
+  const rowsClear = rows >= MIN_ROWS || winner.codec.id === tlDedup1Codec.id;
   const passes =
-    rows >= MIN_ROWS && absoluteGain >= MIN_ABSOLUTE_GAIN_BYTES && relativeGain >= MIN_RELATIVE_GAIN;
+    rowsClear && absoluteGain >= MIN_ABSOLUTE_GAIN_BYTES && relativeGain >= MIN_RELATIVE_GAIN;
   if (!passes) return { text: jsonText, codecId: "json" };
   return { text: winner.text, codecId: `${winner.codec.id}/${winner.codec.version}` };
 }

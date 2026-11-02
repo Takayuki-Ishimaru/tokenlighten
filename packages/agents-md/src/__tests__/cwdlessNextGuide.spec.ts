@@ -10,8 +10,8 @@ describe("the per-call cwd rule leaves a server-issued next as written", () => {
   const en = "add no `cwd` to a `next`", plain = "add no cwd to a next", jp = "`next`にcwd追加禁止";
 
   it.each([
-    ["compact EN", () => renderCompactBlock("en"), `top-level \`cwd\` (no pwd; else \`cwd-required-for-edit\`); ${en}. Working alone, omit \`lane\``],
-    ["compact JP", () => renderCompactBlock("jp"), `なければ\`cwd-required-for-edit\`); ${jp}. 単独作業では\`lane\`を省略`],
+    ["compact EN", () => renderCompactBlock("en"), `top-level \`cwd\` (no pwd; else \`cwd-required-for-edit\`); ${en}. In parallel: one fixed \`lane\``],
+    ["compact JP", () => renderCompactBlock("jp"), `なければ\`cwd-required-for-edit\`); ${jp}. 並列作業では初回から固定の\`lane\``],
     ["medium EN", () => renderMediumBlock("en"), `Top-level \`cwd\`; ${en}; alone omit \`lane\``],
     ["medium JP", () => renderMediumBlock("jp"), `最上位\`cwd\`; ${jp}; 単独は\`lane\`省略`],
     ["full EN", () => renderCanonicalBlock("en"), `on EVERY call; otherwise \`cwd-required-for-edit\`. Add no \`cwd\` to a \`next\`.`],
@@ -27,7 +27,6 @@ describe("the per-call cwd rule leaves a server-issued next as written", () => {
     const compact = renderCompactBlock("en");
     expect(compact).toContain("Each call: top-level `cwd` (no pwd; else `cwd-required-for-edit`)");
     expect(compact).toContain("`next` whole call, verbatim; hints advisory.");
-    expect(compact).toContain("New files/tests=`edits:[{path,create:true,content}]`+explicit `cwd`");
     expect(renderCompactBlock("jp")).toContain("各callはtop-level `cwd`必須(pwd不要;");
   });
 });

@@ -33,6 +33,7 @@ import * as path from "path";
 import type { LocateInput, LocateOutput, ImpactCandidate, ImpactSurface, LocateCandidateDetail } from "@tokenlighten/types";
 import { findTextMany, scanManyLiteral, type TextMatch } from "../search/find/findText.js";
 import { decodeTextBuffer } from "../../util/textDecode.js";
+import { readFileForRequest } from "../../util/requestFileCache.js";
 import { findReferences } from "../../tools/findReferences.js";
 import { searchSymbols } from "../../tools/searchSymbols.js";
 import { isProtocolSymbolSearchToken } from "../../tools/queryEvidence.js";
@@ -53,6 +54,7 @@ import {
 } from "../../util/flags.js";
 import { fileNamesInPathSpans, isEnumLikeQuery, stripPathSpans } from "../../util/queryShape.js";
 import { packageMemberPairs } from "../../util/memberReferences.js";
+import { anchorsIfEnabled, subjectLiteralsIfEnabled } from "../task-pack/anchorFlag.js";
 // BLOCKER 61 (AC1, review round 12): `features/task-pack/requestItems.ts` is
 // pure and imports NOTHING (its own module header states the contract), so this
 // one clause-shape import introduces no cycle into the locator.
@@ -248,6 +250,8 @@ export function artifactQueryTokenVariants(token: string): string[] {
  * Discovery-only artifact inventory for task packs. Artifact entries never enter
  * locator candidate ranking, symbol parsing, role classification, or apiGraph.
  */
+const NAMED_CSV_MAX_BYTES = 25 * 1024 * 1024;
+
 export function discoverArtifactFiles(
   workspace: string,
   input: ArtifactDiscoveryInput = {},
@@ -271,6 +275,25 @@ export function discoverArtifactFiles(
     const candidate = path.posix.basename(file.relPath).toLowerCase();
     const candidateTokens = new Set(candidate.match(/[a-z0-9]+/g) ?? []);
     return tokens.some((token) => candidateTokens.has(token));
+  });
+}
+
+/**
+ * A csv or tsv the request names by path, above the walk's 1 MB default. Reading a
+ * whole table is what a lookup needs and what the csv parser's own 25 MB quota is sized
+ * for, so a named table up to that size is a surface. Ignore rules still apply. Other
+ * artifact kinds keep the default: they are extracted, not scanned.
+ */
+export function discoverNamedLargeCsvFiles(workspace: string, query: string): FoundFile[] {
+  const named = query.match(/[^\s"'`「」()（）、。:：,]+\.(?:csv|tsv)(?![A-Za-z0-9])/gi) ?? [];
+  return [...new Set(named)].flatMap((subPath) => {
+    try {
+      if (!fs.statSync(path.join(workspace, subPath)).isFile()) return [];
+    } catch {
+      return [];
+    }
+    return walkCodeFiles(workspace, { subPath, includeArtifacts: true, sizeCapBytes: NAMED_CSV_MAX_BYTES })
+      .filter((file) => file.kind === "artifact");
   });
 }
 
@@ -1106,7 +1129,7 @@ function applyCommentOnlyPenalty(
     let raw: string;
     try {
       if (fs.statSync(abs).size > COMMENT_SCAN_MAX_FILE_BYTES) continue;
-      const decoded = decodeTextBuffer(fs.readFileSync(abs));
+      const decoded = decodeTextBuffer(readFileForRequest(abs));
       if (decoded === null) continue;
       raw = decoded;
     } catch {
@@ -1154,7 +1177,7 @@ function applyCommentOnlyPenalty(
     if (size > COMMENT_SCAN_MAX_FILE_BYTES) continue;
     let raw: string;
     try {
-      const decoded = decodeTextBuffer(fs.readFileSync(abs));
+      const decoded = decodeTextBuffer(readFileForRequest(abs));
       if (decoded === null) continue;
       raw = decoded;
     } catch { continue; }
@@ -1714,7 +1737,7 @@ function addMarkdownContractCandidates(
     if (isExcluded(f.relPath, scope)) continue;
     let raw: string;
     try {
-      const decoded = decodeTextBuffer(fs.readFileSync(f.absPath));
+      const decoded = decodeTextBuffer(readFileForRequest(f.absPath));
       if (decoded === null) continue;
       raw = decoded;
     } catch { continue; }
@@ -1823,7 +1846,7 @@ function addStructuralCandidates(
     for (const f of files) {
       let raw: string;
       try {
-        const decoded = decodeTextBuffer(fs.readFileSync(f.absPath));
+        const decoded = decodeTextBuffer(readFileForRequest(f.absPath));
         if (decoded === null) continue;
         raw = decoded;
       } catch { continue; }
@@ -2014,7 +2037,7 @@ function addSiblingValueStructuralCandidates(
   for (const relPath of contractPaths) {
     let raw: string;
     try {
-      const decoded = decodeTextBuffer(fs.readFileSync(path.join(workspace, relPath)));
+      const decoded = decodeTextBuffer(readFileForRequest(path.join(workspace, relPath)));
       if (decoded === null) continue;
       raw = decoded;
     } catch { continue; }
@@ -2065,7 +2088,7 @@ function addSiblingValueStructuralCandidates(
         if (!isWithinRoleSearchScope(f.relPath, siblingScanScope)) continue;
         let raw: string;
         try {
-          const decoded = decodeTextBuffer(fs.readFileSync(f.absPath));
+          const decoded = decodeTextBuffer(readFileForRequest(f.absPath));
           if (decoded === null) continue;
           raw = decoded;
         } catch { continue; }
@@ -2126,7 +2149,7 @@ function addSiblingValueStructuralCandidates(
     if (size > SIBLING_ENUM_SCAN_MAX_FILE_BYTES) continue;
     let raw: string;
     try {
-      const decoded = decodeTextBuffer(fs.readFileSync(f.absPath));
+      const decoded = decodeTextBuffer(readFileForRequest(f.absPath));
       if (decoded === null) continue;
       raw = decoded;
     } catch { continue; }
@@ -2208,6 +2231,40 @@ function extractMemberIdentifiers(text: string, cap = 24): Set<string> {
   return members;
 }
 
+/** A callable longer than this keeps the window around its matches. */
+const ENCLOSING_CALLABLE_MAX_LINES = 80;
+
+/**
+ * The whole function or method holding every line of a cluster of matches, when
+ * one does and it is short. A window cut around the matches left out the
+ * function's start, and a solver read it in a turn of its own before editing
+ * (code-fix probe, 2026-11-01: 3 of 3 runs, which cost more than the lines do).
+ * `undefined` keeps that window.
+ */
+async function enclosingCallableRange(
+  workspace: string,
+  relPath: string,
+  firstLine: number,
+  lastLine: number,
+): Promise<string | undefined> {
+  try {
+    // served-bytes: not-served (locator scoring: symbol bounds only, no body derived from it)
+    const text = decodeTextBuffer(readFileForRequest(path.join(workspace, relPath)));
+    const lang = text === null ? undefined : languageForPathWithContent(relPath, text);
+    if (text === null || !lang) return undefined;
+    let best: CollectedSymbol | undefined;
+    for (const symbol of await collectSymbols(text, lang, {})) {
+      if (symbol.kind !== "function" && symbol.kind !== "method") continue;
+      if (symbol.startLine > firstLine || symbol.endLine < lastLine) continue;
+      if (best === undefined || symbol.endLine - symbol.startLine < best.endLine - best.startLine) best = symbol;
+    }
+    if (best === undefined || best.endLine - best.startLine + 1 > ENCLOSING_CALLABLE_MAX_LINES) return undefined;
+    return `${best.startLine}-${best.endLine}`;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Resolve the enum/const declaration's own [startLine, endLine] for
  * `relPath` via collectSymbols (tree-sitter; same utility
@@ -2237,7 +2294,7 @@ async function extractEnumMembersFromSymbolRange(
 ): Promise<Set<string> | null> {
   let text: string;
   try {
-    const decoded = decodeTextBuffer(fs.readFileSync(path.join(workspace, relPath)));
+    const decoded = decodeTextBuffer(readFileForRequest(path.join(workspace, relPath)));
     if (decoded === null) return null;
     text = decoded;
   } catch {
@@ -2393,7 +2450,7 @@ async function addSiblingValueInitializerCandidates(
       for (const m of scoped) siblingMembers.add(m);
     } else {
       try {
-        const decoded = decodeTextBuffer(fs.readFileSync(path.join(workspace, relPath)));
+        const decoded = decodeTextBuffer(readFileForRequest(path.join(workspace, relPath)));
         if (decoded === null) continue;
         raw = decoded;
       } catch { continue; }
@@ -2408,7 +2465,7 @@ async function addSiblingValueInitializerCandidates(
     // which cannot be shared here without changing that function's contract).
     if (raw === null) {
       try {
-        const decoded = decodeTextBuffer(fs.readFileSync(path.join(workspace, relPath)));
+        const decoded = decodeTextBuffer(readFileForRequest(path.join(workspace, relPath)));
         if (decoded === null) continue;
         raw = decoded;
       } catch { continue; }
@@ -2454,7 +2511,7 @@ async function addSiblingValueInitializerCandidates(
 
     let raw: string;
     try {
-      const decoded = decodeTextBuffer(fs.readFileSync(f.absPath));
+      const decoded = decodeTextBuffer(readFileForRequest(f.absPath));
       if (decoded === null) continue;
       raw = decoded;
     } catch { continue; }
@@ -2827,6 +2884,61 @@ async function locateTaskContextBase(workspace: string, input: LocateInput): Pro
   }
 
   // -------------------------------------------------------------------------
+  // Layer 1d: dotted member chains the request names (`res.redirect`,
+  //           `Foo.prototype.bar`, `req.protocol`) — one thing, not two tokens
+  // -------------------------------------------------------------------------
+  // `extractIdentifiers` splits `res.redirect` into `res` / `redirect`, Layer 1b
+  // needs a capitalized owner and Layer 1c a capitalized member, so the member
+  // of `res` (a lowercase object) was never looked up as such and the primary
+  // became `lib/express.js` (`var res = require(...)`) on a filename match
+  // (2026-10-29 first-hop field report). The chain is searched whole: the symbol
+  // index by its dotted name, else by its member under that owner, else the
+  // assignment that declares it (`res.redirect = function redirect(url) {`) —
+  // the symbol index does not model every such assignment.
+  for (const chain of anchorsIfEnabled(input.query).chains.slice(0, 2)) {
+    const symbolQuery = {
+      includeFuzzy: true as const,
+      ...(input.lang ? { lang: input.lang } : {}),
+      ...(scope ? { path: scope } : {}),
+      limit: 10,
+    };
+    const ownedByChain = (symbol: string): boolean =>
+      symbol === chain.raw
+      || (symbol.endsWith(`.${chain.member}`) && (symbol.slice(0, -(chain.member.length + 1)) === chain.owner || symbol.startsWith(`${chain.owner}.`)));
+    let located: Array<{ path: string; line: number; symbol: string }> = (
+      await searchSymbols({ query: chain.raw, ...symbolQuery }, workspace)
+    ).locations
+      .filter((loc) => loc.symbol === chain.raw && !isExcluded(loc.path, scope))
+      .map((loc) => ({ path: loc.path, line: loc.line, symbol: loc.symbol }));
+    if (located.length === 0) {
+      located = (await searchSymbols({ query: chain.member, ...symbolQuery }, workspace)).locations
+        .filter((loc) => !isExcluded(loc.path, scope) && ownedByChain(loc.symbol))
+        .map((loc) => ({ path: loc.path, line: loc.line, symbol: loc.symbol }));
+    }
+    if (located.length === 0) {
+      const assigned = new RegExp(`^\\s*${chain.raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*=(?!=)`);
+      const [found] = findTextMany([{ query: chain.raw }], workspace, {
+        ...(input.lang ? { lang: input.lang } : {}),
+        ...(scope ? { path: scope } : {}),
+      });
+      located = (found?.matches ?? [])
+        .filter((match) => !isExcluded(match.path, scope) && assigned.test(match.text ?? ""))
+        .map((match) => ({ path: match.path, line: match.line, symbol: chain.raw }));
+    }
+    for (const loc of located.slice(0, 2)) {
+      if (candidates.some((c) => c.path === loc.path && c.line === loc.line && c.why === "dotted-member")) continue;
+      candidates.push({
+        path: loc.path,
+        line: loc.line,
+        symbol: loc.symbol,
+        kind: "symbol",
+        score: applyPenalties(1.7, loc.path, scope, queryContext),
+        why: "dotted-member",
+      });
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Layer 2: Symbol search over query tokens (if no symbol provided or
   //           layer 1 found nothing distinctive)
   // -------------------------------------------------------------------------
@@ -2898,15 +3010,24 @@ async function locateTaskContextBase(workspace: string, input: LocateInput): Pro
   // -------------------------------------------------------------------------
   // Layer 3: Exact text search for quoted strings / distinctive identifiers
   // -------------------------------------------------------------------------
-  const _distinctiveToken = extractDistinctiveToken(input.query);
+  // 2026-10-29: a literal the request quotes or brackets (`[default: (unlimited)]`)
+  // is the most distinctive text it can carry: found verbatim in exactly one place
+  // it IS the primary (the `distinctivePrimary` gate below), found in a few it
+  // outranks the lexical neighbours the way a distinctive identifier does.
+  const _distinctiveToken = extractAnchorLiteralToken(input.query) ?? extractDistinctiveToken(input.query);
   // Pre-filtered/sliced here (rather than inside the loop below) so it can be
   // combined with variantSlice into ONE shared needle batch — see the perf
   // comment above textLayerOpts. Net effect on which tq's produce candidates
   // is unchanged: slice(0,2) then filter is the same set slice(0,2).forEach
   // {if (isScopeOnlyTextQuery) continue; ...} would have visited.
-  const textQueries = extractTextSearchQueries(input.query)
-    .slice(0, 2)
-    .filter((tq) => !isScopeOnlyTextQuery(tq, queryContext));
+  // The two-needle cap is the request's own (quoted strings, long identifiers); the literals it
+  // names as anchors join them in front and never displace one (a quoted answer format such as
+  // 「どちらが正しいか」 must not push the subject's identifier out of the batch).
+  const ownTextQueries = extractTextSearchQueries(input.query, false).slice(0, 2);
+  const textQueries = [
+    ...anchorLiteralNeedles(input.query).filter((literal) => !ownTextQueries.includes(literal)),
+    ...ownTextQueries,
+  ].filter((tq) => !isScopeOnlyTextQuery(tq, queryContext));
 
   // -------------------------------------------------------------------------
   // Layer 3/4 extension: variant token search for impact surface discovery
@@ -2973,7 +3094,11 @@ async function locateTaskContextBase(workspace: string, input: LocateInput): Pro
       const occurrenceKey = `${m.path}\0${m.line}`;
       if (isDistinctive) distinctiveTextMatchedOccurrences.add(occurrenceKey);
       else exactTextMatchedOccurrences.add(occurrenceKey);
-      if (candidates.some((c) => c.path === m.path && c.line === m.line)) continue;
+      // A quoted / bracketed literal found where the filename layer already put a
+      // candidate (a test file named for the query holds its own message) is still
+      // that literal's exact occurrence: only another distinctive hit dedupes it.
+      const literalOnTakenLine = isDistinctive && tq === extractAnchorLiteralToken(input.query);
+      if (candidates.some((c) => c.path === m.path && c.line === m.line && !(literalOnTakenLine && c.why !== "exact-text:distinctive"))) continue;
       candidates.push({
         path: m.path,
         line: m.line,
@@ -3236,7 +3361,11 @@ async function locateTaskContextBase(workspace: string, input: LocateInput): Pro
         for (const c of existing) {
           if (nameScore > c.score) {
             c.score = nameScore;
-            c.why = "filename-match";
+            // The exact occurrence of a literal the request quotes stays that: a
+            // file named for the query that also holds the literal is the literal's file.
+            if (!(c.why === "exact-text:distinctive" && _distinctiveToken !== null && _distinctiveToken === extractAnchorLiteralToken(input.query))) {
+              c.why = "filename-match";
+            }
           }
           // The basename layer KNOWS which query tokens it matched; recording
           // them keeps the coverage bookkeeping from having to re-derive (and
@@ -3481,7 +3610,7 @@ async function locateTaskContextBase(workspace: string, input: LocateInput): Pro
     if (cluster.length < 2) continue;
     const start = Math.max(1, cluster[0]!.line - 4);
     const end = cluster.at(-1)!.line + 4;
-    const range = `${start}-${end}`;
+    const range = await enclosingCallableRange(workspace, candidatePath, cluster[0]!.line, cluster.at(-1)!.line) ?? `${start}-${end}`;
     for (const candidate of cluster) candidate.range = range;
   }
   // V10-08 (beta.2, flag-gated): BM25F candidate generation + RRF fusion.
@@ -3582,6 +3711,12 @@ async function locateTaskContextBase(workspace: string, input: LocateInput): Pro
     top.why === "package-member" &&
     filteredCandidates.filter((c) => c.why === "package-member" && c.symbol === top.symbol).length === 1;
 
+  // Layer 1d: the same certainty for a dotted member the request names whole
+  // (`res.redirect`) when exactly one declaration of it was found.
+  const uniqueDottedMember =
+    top.why === "dotted-member" &&
+    filteredCandidates.filter((c) => c.why === "dotted-member" && c.symbol === top.symbol).length === 1;
+
   const largeMargin =
     second === undefined ||
     top.score - second.score >= 0.8;
@@ -3593,6 +3728,14 @@ async function locateTaskContextBase(workspace: string, input: LocateInput): Pro
     const dtHits = filteredCandidates.filter((c) => c.why === "exact-text:distinctive");
     if (dtHits.length === 1) {
       distinctivePrimary = dtHits[0]!;
+    }
+  } else if (_distinctiveToken !== null && _distinctiveToken === extractAnchorLiteralToken(input.query)) {
+    // A literal the request quotes, found in ONE file (on several lines of it,
+    // as a test asserts its message twice) is that file's: the occurrences are
+    // one cluster, not rivals.
+    const dtHits = filteredCandidates.filter((c) => c.why === "exact-text:distinctive");
+    if (dtHits.length > 1 && dtHits.every((c) => c.path === dtHits[0]!.path)) {
+      distinctivePrimary = [...dtHits].sort((a, b) => b.score - a.score || a.line - b.line)[0]!;
     }
   }
 
@@ -3610,7 +3753,7 @@ async function locateTaskContextBase(workspace: string, input: LocateInput): Pro
     coverageDominant = covers[0]! >= 2 && covers.slice(1).every((n) => n < covers[0]!);
   }
 
-  const shouldHit = uniqueExactSymbol || uniqueExactText || uniquePackageMember || (largeMargin && top.score >= 0.8) ||
+  const shouldHit = uniqueExactSymbol || uniqueExactText || uniquePackageMember || uniqueDottedMember || (largeMargin && top.score >= 0.8) ||
     distinctivePrimary !== null || (coverageDominant && top.score >= 0.8);
 
   if (!shouldHit) {
@@ -4198,7 +4341,7 @@ function expandCppModuleClosure(
 
   let raw: string;
   try {
-    const decoded = decodeTextBuffer(fs.readFileSync(path.join(workspace, relPath)));
+    const decoded = decodeTextBuffer(readFileForRequest(path.join(workspace, relPath)));
     if (decoded === null) return;
     raw = decoded;
   } catch {
@@ -4245,7 +4388,7 @@ async function rangeForCandidate(workspace: string, candidate: Candidate): Promi
     const absPath = path.join(workspace, candidate.path);
     let fileLines: string[] = [];
     try {
-      const decoded = decodeTextBuffer(fs.readFileSync(absPath));
+      const decoded = decodeTextBuffer(readFileForRequest(absPath));
       // Undecodable is the same fallback as any other read failure here.
       if (decoded !== null) fileLines = decoded.split(/\r?\n/);
     } catch {
@@ -4505,7 +4648,7 @@ function scanStyleFiles(files: ReadonlyArray<FoundFile>, stems: string[], cb: (r
     if (!STYLE_EXTS.has(f.ext)) continue;
     let raw: string;
     try {
-      const decoded = decodeTextBuffer(fs.readFileSync(f.absPath));
+      const decoded = decodeTextBuffer(readFileForRequest(f.absPath));
       if (decoded === null) continue;
       raw = decoded;
     } catch { continue; }
@@ -4521,6 +4664,10 @@ function scanStyleFiles(files: ReadonlyArray<FoundFile>, stems: string[], cb: (r
 }
 
 /** Return the longest all-caps identifier (>=6 chars) in the query, or null. */
+function extractAnchorLiteralToken(query: string): string | null {
+  return subjectLiteralsIfEnabled(query).find((literal) => literal.length >= 6) ?? null;
+}
+
 function extractDistinctiveToken(query: string): string | null {
   const matches = query.match(/\b[A-Z][A-Z0-9_]{5,}\b/g) ?? [];
   if (matches.length === 0) return null;
@@ -4658,7 +4805,7 @@ function isPureReexportBarrel(workspace: string, relPath: string): boolean {
   try {
     const abs = path.join(workspace, relPath);
     if (fs.statSync(abs).size > 2048) return false;
-    const text = decodeTextBuffer(fs.readFileSync(abs));
+    const text = decodeTextBuffer(readFileForRequest(abs));
     if (text === null) return false;
     const codeLines = text
       .split(/\r?\n/)
@@ -5035,7 +5182,7 @@ export async function importEdgeCandidates(
   try {
     const abs = path.join(workspace, primary.path);
     if (fs.statSync(abs).size > FILENAME_SYMBOL_REFINE_MAX_BYTES) return { candidates: [], remaining: [] };
-    const decoded = decodeTextBuffer(fs.readFileSync(abs));
+    const decoded = decodeTextBuffer(readFileForRequest(abs));
     if (decoded === null) return { candidates: [], remaining: [] };
     text = decoded;
   } catch {
@@ -5090,7 +5237,7 @@ export async function importEdgeCandidates(
     try {
       const abs = path.join(workspace, target);
       if (fs.statSync(abs).size > FILENAME_SYMBOL_REFINE_MAX_BYTES) continue;
-      const decoded = decodeTextBuffer(fs.readFileSync(abs));
+      const decoded = decodeTextBuffer(readFileForRequest(abs));
       if (decoded === null) continue;
       targetText = decoded;
     } catch {
@@ -5193,7 +5340,7 @@ async function refineFilenameMatchSymbol(
   try {
     const abs = path.join(workspace, relPath);
     if (fs.statSync(abs).size > FILENAME_SYMBOL_REFINE_MAX_BYTES) return null;
-    const decoded = decodeTextBuffer(fs.readFileSync(abs));
+    const decoded = decodeTextBuffer(readFileForRequest(abs));
     if (decoded === null) return null;
     text = decoded;
   } catch {
@@ -5503,7 +5650,7 @@ function declaredUnderPackageOwner(workspace: string, relPath: string, owner: st
   if (path.posix.basename(posix).replace(/\.[^.]+$/, "") === owner) return true;
   if (!posix.endsWith(".go")) return false;
   try {
-    const decoded = decodeTextBuffer(fs.readFileSync(path.join(workspace, relPath)));
+    const decoded = decodeTextBuffer(readFileForRequest(path.join(workspace, relPath)));
     return decoded !== null && new RegExp(`^package\\s+${owner}\\b`, "m").test(decoded.slice(0, 4096));
   } catch {
     return false;
@@ -5621,6 +5768,11 @@ const SHORT_TEXT_SEARCH_STOP_WORDS: ReadonlySet<string> = new Set([
   "old", "key", "keys", "map", "ref", "refs", "id", "ids",
 ]);
 
+/** The literals the request quotes or brackets, long enough to search for (at most two). */
+function anchorLiteralNeedles(query: string): string[] {
+  return anchorsIfEnabled(query).literals.filter((literal) => literal.length >= 4).slice(0, 2);
+}
+
 /**
  * R3 (2026-08-21, re-applied by W5-B): first attempted earlier in this
  * release-prep effort and reverted after two corpus regressions traced into
@@ -5637,12 +5789,18 @@ const SHORT_TEXT_SEARCH_STOP_WORDS: ReadonlySet<string> = new Set([
  * single bare short word does not widen a query on its own, and excludes
  * SHORT_TEXT_SEARCH_STOP_WORDS (generic short programming nouns/verbs).
  */
-function extractTextSearchQueries(query: string): string[] {
+function extractTextSearchQueries(query: string, withAnchorLiterals = true): string[] {
   const results: string[] = [];
+  // 2026-10-29 (first-hop field report): the literals the request quotes OR
+  // brackets (`[default: (unlimited)]` — plain words to the quote scan below)
+  // come first (the Layer-3 batch adds them OUTSIDE its two-needle cap).
+  if (withAnchorLiterals) {
+    for (const literal of anchorLiteralNeedles(query)) if (!results.includes(literal)) results.push(literal);
+  }
   // Quoted strings.
   const quoted = query.match(/"([^"]+)"|'([^']+)'/g);
   if (quoted) {
-    for (const q of quoted) results.push(q.slice(1, -1));
+    for (const q of quoted) if (!results.includes(q.slice(1, -1))) results.push(q.slice(1, -1));
   }
   // Long ASCII identifiers and exact CJK script spans are suitable for
   // bounded literal search. The latter prevents Japanese requests from

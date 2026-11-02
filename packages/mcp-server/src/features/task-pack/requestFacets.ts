@@ -83,6 +83,7 @@ import { effFlowOrderVocabEnabled } from "../../util/flags.js";
 import { maskStructureMapAnswerWording } from "./structureMap.js";
 import { isProseAcronym } from "./concernRecovery.js";
 import { stripPathSpans } from "../../util/queryShape.js";
+import { anchorsIfEnabled } from "./anchorFlag.js";
 import { maskCitationFormatFields } from "../../util/citationFormat.js";
 import { maskEvaluationInputRecords } from "../../util/evaluationInputs.js";
 import { languageForPath } from "../../util/languages.js";
@@ -1539,7 +1540,7 @@ const SCRIPT_AWARE_IDENTIFIER_TOKEN_RE = new RegExp(
  * replay case ir1010gc, "retry ... matches no member of Uploader") instead of
  * becoming a subject nothing resolves.
  */
-export function explicitIdentifiersIn(clause: string): string[] {
+export function explicitIdentifiersIn(clause: string, options?: { readonly memberChains?: boolean }): string[] {
   const cleaned = stripPathSpans("", maskCitationFormatFields(maskEvaluationInputRecords(clause)));
   // P1-9 (eval-0927 review-r2 #9, perfEdge): ASCII-only, so a query naming
   // `größe` (whole word, or backtick-quoted) never even reached the
@@ -1576,6 +1577,22 @@ export function explicitIdentifiersIn(clause: string): string[] {
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(token);
+  }
+  // 2026-10-29 (first-hop field report): a dotted member of a lowercase object the
+  // clause names (`res.redirect`, `req.accepts`, `Foo.prototype.bar`) is ONE
+  // subject — its words alone made the pack's first window (`createApplication`)
+  // the facet's focal. A TYPE-owned member (`Uploader.Retry`) keeps the owner as
+  // the subject (ir1010gc, above), and an explicit identifier the clause already
+  // names stays first. The compound-request planner asks without the chains: there a
+  // member list ("how cents, tax.calculate and shipping.calculate contribute") is
+  // one request's detail, never the independent subjects of further clauses
+  // (reviewWatcherInvoiceParsing).
+  for (const chain of options?.memberChains === false ? [] : anchorsIfEnabled(clause).chains) {
+    if (!/^[a-z_$]/.test(chain.owner) && !chain.owner.endsWith(".prototype")) continue;
+    const key = chain.raw.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(chain.raw);
   }
   return out;
 }

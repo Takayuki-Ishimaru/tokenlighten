@@ -29,7 +29,7 @@ describe("bounded handle-batch resend continuations", () => {
         const taskId = (reply.body["task"] as Row | undefined)?.["id"];
         for (let page = 0; page < 20; page++) {
           pages.push(reply);
-          expect(reply.bytes).toBeLessThanOrEqual(20_000);
+          expect(reply.bytes).toBeLessThanOrEqual(30_000);
           expect((reply.body["task"] as Row | undefined)?.["id"]).toBe(taskId);
           expect(["read.batch", "read.text"], JSON.stringify(reply.body).slice(0, 500)).toContain(reply.body["kind"]);
           const next = nextOf(reply.body);

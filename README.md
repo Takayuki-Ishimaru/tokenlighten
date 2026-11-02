@@ -17,29 +17,31 @@
 
 It exposes exactly three tools: `tl_read_file`, `tl_search_files`, and `tl_edit_file`.
 
-## v0.16.3 release
+## v0.16.4 release
 
-**Public Beta.** TokenLighten v0.16.3 improves repository discovery, continued reads, and installation and removal workflows. Interfaces and supported workflows may change as feedback is incorporated.
+**Public Beta.** TokenLighten v0.16.4 improves CSV lookups, focused code discovery, continued reads and edits, and MCP server startup. Interfaces and supported workflows may change as feedback is incorporated.
 
-The main fixes in v0.16.3 are:
+The main improvements in v0.16.4 are:
 
-- discovery retains named files and projects, locates quoted CLI commands by their options, and keeps bug investigations focused on the requested scope;
-- compound English and Japanese questions retain their requirements, and Python symbol reads prefer implementations over overload declarations;
-- forced resends, budgeted reads and requests for omitted comments retain the source and continuation needed to finish;
-- Windows C/C++ include discovery preserves native paths and quoting; and
-- install maintenance honors dry runs, requires explicit non-interactive confirmation, and cleans recorded setup-created files while preserving user content.
+- supported read-only questions naming a CSV can receive matching rows and a whole-table match count in the first reply;
+- discovery prioritizes named code, recognizes more English and Japanese questions, and avoids repeatedly paging unrelated documentation;
+- continued reads preserve table ranges and omitted comments, while edit replies retain useful surrounding code;
+- client tool definitions and workspace guides are smaller, with edit instructions supplied when needed; and
+- direct MCP launches use the same memory setting as CLI launches to prevent a startup failure when many servers run together.
 
 The three MCP tools remain `tl_read_file`, `tl_search_files`, and `tl_edit_file`. A manually started server is read-only unless passed `--allow-write`; first workspace setup enables writes by default.
 
 The public release includes four platform install archives (win-x64, darwin-arm64, darwin-x64, linux-x64) with the CLI, MCP server and a bundled Node.js runtime, source code with public package tests, and a self-contained VS Code VSIX. Model weights are downloaded separately when requested. The desktop application is not included.
 
-**Upgrade:** install the v0.16.3 archive or VSIX, refresh workspace setup, then start a new agent session or reconnect your MCP client. CLI workspace refresh preserves existing per-client write permissions; use `--read-only` or `--allow-write` to change them explicitly. The extension's **Set up this workspace** enables writes. Scripts using `tl install --use`, `--prune` or `--uninstall` outside an interactive terminal must now pass `--yes`; `--dry-run` previews these operations. The three tool names and canonical top-level request fields are unchanged from v0.16.2. See the [v0.16.3 release notes](release-docs/github-release-v0.16.3.md) and [Local analysis engines](release-docs/local-analysis.md).
+**Upgrade:** install the v0.16.4 archive or VSIX, refresh workspace setup, then start a new agent session or reconnect your MCP client. CLI workspace refresh preserves existing per-client write permissions; use `--read-only` or `--allow-write` to change them explicitly. The extension's **Set up this workspace** enables writes. Non-interactive install maintenance continues to require `--yes`; `--dry-run` previews these operations. The three tool names and supported canonical top-level request fields are unchanged from v0.16.3. Follow returned `next` calls and any supplied `edit_rules`. See the [v0.16.4 release notes](release-docs/github-release-v0.16.4.md) and [Local analysis engines](release-docs/local-analysis.md).
 
 ## Why TokenLighten
 
 Coding agents often spend multiple turns locating files, reading broad sections, and reopening context before making a small change. TokenLighten performs local repository discovery and returns compact structure, symbols, exact ranges, and bounded edit handles.
 
-Repository indexing and context selection run locally on the CPU. Optional semantic search uses a separately downloaded local embedding model; it is disabled by default. TokenLighten does not send repository contents to a model service. Your editor, MCP client, and AI provider continue to operate under their own configuration and terms.
+Repository indexing and context selection run locally on the CPU. Optional semantic search uses a separately downloaded local embedding model; it is disabled by default and does not send repository contents to a model service. Your editor, MCP client, and AI provider continue to operate under their own configuration and terms.
+
+The optional VS Code model token counter is also disabled by default. Enabling it for reply selection passes candidate reply text to the selected provider's counting API. See [Privacy, security, and support](release-docs/privacy-security-support.md) before enabling it.
 
 Savings vary by repository, task, client, and model behavior. Usage and cost figures shown by TokenLighten are local estimates, not provider billing records.
 
@@ -68,7 +70,7 @@ The headline compares summed costs; the table compares each configuration's medi
 
 A complementary estimate retained **16 pairs** by charging missing TokenLighten output at a conservative upper bound inferred from the following request's input, while keeping the baseline cost as recorded. Its conservative result was **35.2% lower cost**; two pairs without usable bounds remain excluded. This estimate is separate from the complete-record comparison above.
 
-The Sonnet candidate preceded the final request-handling fixes, which were not separately remeasured on Sonnet. Savings have not been remeasured for v0.16.3.
+The Sonnet candidate preceded the final request-handling fixes, which were not separately remeasured on Sonnet. Savings have not been remeasured for v0.16.4.
 
 ### Tasks that may benefit less
 
@@ -96,7 +98,7 @@ Prefer VS Code's own extension instead? See the next section.
 
 ## Install the VS Code extension (no build required)
 
-Download **[tokenlighten-vscode-extension-0.16.3.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.16.3/tokenlighten-vscode-extension-0.16.3.vsix)** from the v0.16.3 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
+Download **[tokenlighten-vscode-extension-0.16.4.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.16.4/tokenlighten-vscode-extension-0.16.4.vsix)** from the v0.16.4 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
 
 Then:
 
@@ -107,7 +109,7 @@ Then:
 Or install it from a terminal:
 
 ```sh
-code --install-extension tokenlighten-vscode-extension-0.16.3.vsix
+code --install-extension tokenlighten-vscode-extension-0.16.4.vsix
 ```
 
 Open a trusted project folder, select the TokenLighten view, and choose **Set up this workspace**. The packaged VSIX includes the CLI, MCP server, parsers, and required assets; a separate global installation is not required. This performs the same machine install as the archive above (`tl install --from-extension`) and sets up the current workspace, but leaves other hosts on the machine — Claude Code, Codex — unregistered (`--clients none`); register them separately with `tl clients activate`, or with an archive's `tl-setup`.

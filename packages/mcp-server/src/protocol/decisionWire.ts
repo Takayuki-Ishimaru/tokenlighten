@@ -42,7 +42,7 @@ import {goReviewOrigin} from "../goReturnedLocalReview.js";
 import {javaLoopGuardOrigin} from "../javaLoopGuardReview.js";
 
 import { emittableToolCall } from "./refusal.js";
-import { decisionGradeLiteralAbsenceSubject, discoveryBundleAdvisory, discoveryBundleNext, unservedAddressableRepack, semanticFrontierNextAllowed, sanitizeSemanticFrontierNext, isSemanticFrontierDemotionEligible, sfAwaitInputCandidatePathsFor, parseLedgerMissingRow, isSupportingEvidenceWhy } from "../features/task-pack/canonicalDecision.js";
+import { decisionGradeLiteralAbsenceSubject, discoveryBundleAdvisory, discoveryBundleNext, docZoomAllowed, explorationBudgetOf, unservedAddressableRepack, semanticFrontierNextAllowed, sanitizeSemanticFrontierNext, isSemanticFrontierDemotionEligible, sfAwaitInputCandidatePathsFor, parseLedgerMissingRow, isSupportingEvidenceWhy } from "../features/task-pack/canonicalDecision.js";
 import { effStructureMapEnabled, semanticFrontierGuardEnabled, sfDemoteEnabled } from "../util/flags.js";
 import { ELISION_MARKER_RE } from "../util/formatCompress.js";
 import { isSemanticFrontierContinuationOptional } from "../features/task-pack/semanticFrontier.js";
@@ -1162,7 +1162,18 @@ function discoverNext(
  * window is already held — which is the honest input to the `await_input` arms
  * below, all of which name what is unresolved.
  */
-function servedEvidenceZoom(evidence: readonly Evidence[]): ToolCall | undefined {
+function servedEvidenceZoom(
+  evidence: readonly Evidence[],
+  /**
+   * 2026-10-29 (first-hop field report): which rows may be offered as a zoom.
+   * This is the wire-level twin of canonicalDecision.ts's `docZoomAllowed`
+   * seats: it builds a `{handle, range}` call straight from `evidence[].remaining`
+   * for ANY partial row, so a changelog the locator ranked (History.md, 3,928
+   * lines) was paged to its end through THIS door once the canonical arms
+   * declined it. Omitted = every row, as before.
+   */
+  mayZoom?: (entry: Evidence) => boolean,
+): ToolCall | undefined {
   const parseSpan = (value: string | undefined): [number, number] | undefined => {
     const match = /^(\d+)-(\d+)$/.exec(value ?? "");
     if (match === null) return undefined;
@@ -1185,6 +1196,7 @@ function servedEvidenceZoom(evidence: readonly Evidence[]): ToolCall | undefined
     return (held.get(path) ?? []).some(([start, end]) => start <= span[0] && end >= span[1]);
   };
   for (const entry of evidence) {
+    if (mayZoom !== undefined && !mayZoom(entry)) continue;
     for (const range of entry.remaining ?? []) {
       if (typeof range !== "string" || range === "") continue;
       const span = parseSpan(range);
@@ -1651,6 +1663,21 @@ function projectUnresolved(
     });
   }
 
+  // 0c. 2026-10-29 (first-hop field report): the task spent its exploration
+  // budget (`TASK_EXPLORATION_MAX_HOPS` / `_MAX_BYTES`), so no further document
+  // page or candidate re-pack is proposed. Stated here so the absence of a
+  // `next` is a disclosed stop, never a silent one. Read from the pack's own
+  // internal stamp, like the two rows above.
+  const explorationBudget = recordAt(explorationBudgetOf(result));
+  if (explorationBudget?.["exhausted"] === true) {
+    const hops = typeof explorationBudget["hops"] === "number" ? explorationBudget["hops"] : undefined;
+    const bytes = typeof explorationBudget["bytes"] === "number" ? explorationBudget["bytes"] : undefined;
+    push({
+      kind: "exploration-budget-exhausted",
+      reason: `this task already spent ${hops ?? "several"} follow-up call(s) and ${bytes === undefined ? "a large share of" : `${Math.round(bytes / 1024)} KB of`} responses; no further document pages are proposed — answer from the served evidence, or request the one file/range you still need explicitly`,
+    });
+  }
+
   // 1. The evidence model. Its two carriers overlap: `unresolved[]` is a list
   // of CLAIM IDS, so an id whose claim row was just emitted (with that row's
   // reason and handle) must not be restated as a bare, reasonless second row.
@@ -1821,6 +1848,21 @@ function awaitInput(
 }
 
 /**
+ * A csv section whose lookup still carries every row it counted is usable evidence
+ * without an `Evidence` body: those rows are what the answer is read from, and they sit
+ * in `artifact_sections` because a table's rows do not form one contiguous body. A shed
+ * that removes them removes this too. A lookup of no rows, or one whose request only
+ * asks how many, answers from the count, read over the whole table.
+ */
+function carriesCompleteCsvLookup(sections: unknown): boolean {
+  return Array.isArray(sections) && sections.some((entry) => {
+    const lookup = (entry as { section?: { lookup?: { total?: unknown; row_numbers?: unknown; counted?: unknown } } } | null)?.section?.lookup;
+    if (lookup === undefined || !Array.isArray(lookup.row_numbers)) return false;
+    return lookup.counted === true || lookup.row_numbers.length === lookup.total;
+  });
+}
+
+/**
  * §2.1.1's evidence floor for `act.answer`, applied.
  *
  * The floor is "for every obligation the certificate names, usable evidence the
@@ -1845,8 +1887,10 @@ export function answerFloorHolds(
     readonly obligations?: readonly string[];
     readonly workspace?: { readonly inventory_complete?: boolean };
   },
+  artifactSections?: unknown,
 ): boolean {
   if (evidence.some((entry) => entry.body !== undefined || entry.prior !== undefined)) return true;
+  if (carriesCompleteCsvLookup(artifactSections)) return true;
   const obligations = certificate?.obligations;
   return certificate?.workspace?.inventory_complete === true
     && Array.isArray(obligations)
@@ -2129,7 +2173,10 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
   // R1: the same rule for the restoring fallback the degrade arms use — a zoom
   // of a window this lane already re-read is a round trip charged for no bytes,
   // which is the condition `servedEvidenceZoom`'s own contract already forbids.
-  const restoringZoom = (): ToolCall | undefined => firstUnconsumed(consumed, withDiscoveryReplay(result, servedEvidenceZoom(evidence)));
+  const restoringZoom = (): ToolCall | undefined => firstUnconsumed(consumed, withDiscoveryReplay(result, servedEvidenceZoom(
+    evidence,
+    (entry) => docZoomAllowed(result as unknown as TaskPackResult, { path: entry.path }),
+  )));
 
   if (canonicalKind === "terminal-closed") return { kind: "done" };
 
@@ -2137,7 +2184,7 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
     const certificate = projectCertificate(contract, result);
     if (certificate !== undefined) {
       if (canonicalKind === "act-answer") {
-        if (answerFloorHolds(evidence, certificate)) return { kind: "act.answer", certificate };
+        if (answerFloorHolds(evidence, certificate, result["artifact_sections"])) return { kind: "act.answer", certificate };
       } else {
         const frontier = projectFrontier(contract, evidence, result);
         // [R5-23] / ruling 6: the create target is the SECOND arm of the floor,
@@ -2242,7 +2289,7 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
     const certificate = projectCertificate(contract, result);
     if (certificate !== undefined) {
       if (contract.next_action === "answer") {
-        if (answerFloorHolds(evidence, certificate)) return { kind: "act.answer", certificate };
+        if (answerFloorHolds(evidence, certificate, result["artifact_sections"])) return { kind: "act.answer", certificate };
       } else {
         const frontier = projectFrontier(contract, evidence, result);
         const createTarget = projectCreateTarget(result);

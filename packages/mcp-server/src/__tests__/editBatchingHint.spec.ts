@@ -163,7 +163,7 @@ const HINT_BEARING_CEILING = 600;
 // replaces a follow-up read turn. The ceilings above bind the CORE response,
 // so strip the separately-capped read-back sections before measuring.
 function coreBytes(data: Record<string, unknown>): number {
-  const { applied: _a, applied_note: _n, verification: _v, ...core } = data;
+  const { applied: _a, applied_note: _n, verification: _v, edit_rules: _r, ...core } = data;
   return Buffer.byteLength(JSON.stringify(core), "utf8");
 }
 

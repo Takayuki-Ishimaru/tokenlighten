@@ -30,6 +30,9 @@
  * expose no reset RPC or changed tool-response shape.
  * Host budget: MAX_MCP_OUTPUT_TOKENS lowers Claude's output ceiling; it does
  * not select a protocol version, schema, or response representation.
+ * Retrieval rollback: TL_ANCHOR_FIRST=0 (default ON; task-pack/anchorFlag.ts)
+ * restores the pre-anchor-first locator and first pack; it selects which rows an
+ * existing v1 response family serves, never a kind, field or tool argument.
  *
  * 2026-09-14 addendum (USER ruling, DESIGN-v0.14-plan.md §10 residual 12):
  * TL_FRONTIER_STRICT_WRITES — D10(B) out-of-contract, default OFF. Strict
@@ -176,6 +179,22 @@
  *       argument: an echo window is the existing absent `after`, a kit delta
  *       is the existing kit with fewer entries and its one `note`, and the
  *       omitted batched read is the existing optional `next_call`.
+ *
+ *       TL_PORTABLE_SLIM (2026-10-31; see `portableAdvertisement.ts` `slimmed`):
+ *       drops rarely needed fields from the portable tool schemas, default ON.
+ *       Explicit `0`/`off` restores the previous portable schema and remains
+ *       the rollback path. Advertising only: no kind, field, or tool argument
+ *       changes, and dispatch still accepts and validates every dropped field.
+ *
+ *       TL_CSV_SAMPLE (2026-10-31; see `csvSampleEnabled`): a pack shows ten rows
+ *       of a csv it cannot carry whole, default ON. Explicit `0`/`off` restores the
+ *       longer head and remains the rollback path. Content only: no kind, field, or
+ *       tool argument changes, and the entry's `next` still reaches every other row.
+ *
+ *       TL_CSV_LOOKUP (2026-11-01; see `csvLookupEnabled`): a pack on a csv the request
+ *       names also carries the rows holding a value the request spells, default ON.
+ *       A read-only lookup those rows answer ends in `act.answer` rather than a search.
+ *       Explicit `0`/`off` restores the sample and the search.
  *
  *       TL_EFF_FIND_SNIPPET_CAP (2026-10-19, after the v0.16.0 decision run
  *       bench/workflows/runs/2026-10-18-v016-decision-6t-3; see
@@ -531,6 +550,40 @@
  * itself wire-affecting: a clientId that fails to resolve a KNOWN, FRESH
  * profile still yields UNKNOWN_CLIENT_PROFILE, and this whole selection
  * branch stays behind TL_WIRE_BREAKEVEN+auto exactly as above.
+ *
+ * ---------------------------------------------------------------------------
+ * A1/A2 addendum -- real-tokenizer measurement and selection (2026-10-30)
+ * ---------------------------------------------------------------------------
+ *
+ * TL_WIRE_TOKENIZER names one encoding (o200k_base|cl100k_base). Alone it does
+ * nothing. With TL_WIRE_SHADOW (or format=debug) and TL_TRACE, each response adds
+ * one `wire_codec_token_shadow` trace record and the wire bytes do not change.
+ * With TL_WIRE_TOKEN_SELECT as well as TOKENLIGHTEN_RESPONSE_FORMAT=auto and
+ * TL_WIRE_BREAKEVEN, v2 selection compares candidates in that encoding's tokens
+ * under the versioned token policy (protocol/codec/breakeven.ts). Any failure
+ * (unknown encoding, load failure, refused or invalid count, no policy) selects
+ * in bytes exactly as without these flags, and the trace says so. Disabling
+ * either flag is the rollback: no state survives a restart, and the measurement
+ * cache is keyed by counter identity.
+ *
+ * TL_WIRE_DEDUP (B2a) adds the exact-repeat codec to the candidates. TL_WIRE_STABLE
+ * (B5) fixes object key order, so sizes do not move. TL_WIRE_HOST_COUNTER (B6) defers
+ * token selection to a host's counts, on the one asynchronous stage after the funnel,
+ * and any failure there sends the reply as it stood.
+ *
+ * TL_READ_SNAPSHOT (B1) and TL_SPARSE_SELECT (B2b) extend the csv query window below.
+ * The first keeps the fetched bytes, so a cursor chain survives a source change and
+ * says it did; the second lets a first response show non-contiguous rows. Unsetting
+ * either returns to the plain window. Snapshot blobs expire within an hour.
+ *
+ * TL_ARTIFACT_QUERY_WINDOW (A3) joins class (B): out-of-contract, default OFF. A
+ * query on one csv/tsv serves the relevant contiguous rows first (a task pack's
+ * inlined section, or the `select.kind` spelling its `next` uses, which only this
+ * flag routes to rows rather than to a pack). Q stays the whole table and the rest
+ * is walked through the read-request store. A file it cannot address exactly, a
+ * query that locates nothing, and every explicit selector keep today's path.
+ * Rollback: unset the flag. A chain already out finishes, because its cursor
+ * carries the request; new requests return to today's path.
  *
  * ---------------------------------------------------------------------------
  * V11-02 addendum -- Task-aware Weighted RRF v2 / Query Precision (2026-08-21)
@@ -1153,6 +1206,14 @@ export function activeExperimentFlags(): readonly string[] {
   if (fastPathV2Enabled()) active.push("TL_FAST_PATH_V2");
   if (deltaContextEnabled()) active.push("TL_DELTA_CONTEXT");
   if (batchEditFrontierEnabled()) active.push("TL_BATCH_EDIT_FRONTIER");
+  // A2 (2026-10-30): default OFF, and unlike the serialization pair it can change which codec a comparison picks.
+  if (wireTokenSelectEnabled()) active.push("TL_WIRE_TOKEN_SELECT");
+  if (wireDedupEnabled()) active.push("TL_WIRE_DEDUP");
+  if (readSnapshotEnabled()) active.push("TL_READ_SNAPSHOT");
+  if (sparseSelectEnabled()) active.push("TL_SPARSE_SELECT");
+  if (wireHostCounterSocket() !== undefined) active.push("TL_WIRE_HOST_COUNTER");
+  // A3 (2026-10-30): default OFF, and it changes which rows are observable first.
+  if (artifactQueryWindowEnabled()) active.push("TL_ARTIFACT_QUERY_WINDOW");
   // FX-L strict frontier writes (user ruling 2026-09-14). Default OFF, so a
   // stock session's `flags_active` is byte-identical to before this flag.
   if (frontierStrictWritesEnabled()) active.push("TL_FRONTIER_STRICT_WRITES");
@@ -1277,6 +1338,69 @@ export function graphEvidenceEnabled(): boolean {
 /** V11-07 addendum above (this file's top doc comment) explains this flag's scope. */
 export function wireBreakevenEnabled(): boolean {
   return parseBool(process.env["TL_WIRE_BREAKEVEN"], false);
+}
+
+/**
+ * A1 (2026-10-30): the encoding a real tokenizer counts in -- `o200k_base` or
+ * `cl100k_base`, read by protocol/codec/tokenizerResolver.ts, which reports any
+ * other value as unavailable. Unset (the default) means no tokenizer exists for
+ * this process and its dictionary is never loaded. It names an ENCODING, never a
+ * model: nothing here claims a host's billed tokens. See the A1/A2 addendum above.
+ */
+export function wireTokenizerEncoding(): string | undefined {
+  const raw = process.env["TL_WIRE_TOKENIZER"]?.trim();
+  return raw === undefined || raw === "" ? undefined : raw;
+}
+
+/** A2 (2026-10-30), class (B), default OFF: v2 selection compares in TL_WIRE_TOKENIZER's tokens. Requires auto + TL_WIRE_BREAKEVEN, like v2 itself. */
+export function wireTokenSelectEnabled(): boolean {
+  return parseBool(process.env["TL_WIRE_TOKEN_SELECT"], false);
+}
+
+/** B1 (2026-10-30), class (B), default OFF: a csv query window keeps the bytes it read, so a later range of that revision stays exact after the file moves. */
+export function readSnapshotEnabled(): boolean {
+  return parseBool(process.env["TL_READ_SNAPSHOT"], false);
+}
+
+/** B2b (2026-10-30), class (B), default OFF, and only with TL_READ_SNAPSHOT: a csv query window may show non-contiguous rows, labelled a partial view. */
+export function sparseSelectEnabled(): boolean {
+  return parseBool(process.env["TL_SPARSE_SELECT"], false) && readSnapshotEnabled();
+}
+
+/** B3 (2026-10-30): `token-1` restores the earlier token policy (protocol/codec/breakeven.ts). Any other value is the current one. It only matters where TL_WIRE_TOKEN_SELECT is on. */
+export function wireTokenPolicyOverride(): string | undefined {
+  return process.env["TL_WIRE_TOKEN_POLICY"]?.trim() || undefined;
+}
+
+/** B2a (2026-10-30), class (B), default OFF: `tl-dedup-1` joins the codec candidates. It competes under the same gates as every other codec. */
+export function wireDedupEnabled(): boolean {
+  return parseBool(process.env["TL_WIRE_DEDUP"], false);
+}
+
+/**
+ * B6 (2026-10-30), class (B), default OFF: the local socket of a host's token counter,
+ * set by the editor extension that owns it. With TL_WIRE_TOKEN_SELECT, auto and
+ * TL_WIRE_BREAKEVEN, selection moves to the host's counts. Reply text then reaches
+ * that host's counting API, so it is never set by default.
+ */
+export function wireHostCounterSocket(): string | undefined {
+  const raw = process.env["TL_WIRE_HOST_COUNTER"]?.trim();
+  return raw === undefined || raw === "" ? undefined : raw;
+}
+
+/** B5 (2026-10-30), class (B), default OFF: spell every reply's object keys in one canonical order. Key order only, so sizes and budgets do not move. */
+export function wireStableEnabled(): boolean {
+  return parseBool(process.env["TL_WIRE_STABLE"], false);
+}
+
+/**
+ * A3 (2026-10-30), class (B), default OFF: a query-bearing read of one csv/tsv
+ * serves the query-relevant contiguous rows first and tracks the rest of the file
+ * through the existing read-request store. It changes which rows a first response
+ * carries, never the rows it can reach. Off, no new branch runs.
+ */
+export function artifactQueryWindowEnabled(): boolean {
+  return parseBool(process.env["TL_ARTIFACT_QUERY_WINDOW"], false);
 }
 
 /** V11-04 (B): Task Reasoning IR v2. Advisory + trace-only — see the (B) list above. */
@@ -2173,6 +2297,36 @@ export function portableToolsEnabled(defaultOn = false): boolean {
   return parseBool(process.env["TL_PORTABLE_TOOLS"], defaultOn);
 }
 
+/**
+ * TL_PORTABLE_SLIM (2026-10-31), default ON: the portable advertisement also
+ * leaves out fields a model does not need in order to make a call
+ * (protocol/portableAdvertisement.ts `slimmed`). `0` restores the previous
+ * portable schema. Other advertisements are unaffected.
+ */
+export function portableSlimEnabled(): boolean {
+  return parseBool(process.env["TL_PORTABLE_SLIM"], true);
+}
+
+/**
+ * TL_CSV_SAMPLE (2026-10-31), default ON: a pack shows ten rows of a csv it cannot
+ * carry whole instead of as many as fit its 8 KiB inline cap
+ * (features/task-pack/artifactSections.ts `plainCsvSample`). `0` restores the longer
+ * head. Reads that name their rows are unaffected.
+ */
+export function csvSampleEnabled(): boolean {
+  return parseBool(process.env["TL_CSV_SAMPLE"], true);
+}
+
+/**
+ * TL_CSV_LOOKUP (2026-11-01), default ON: a pack on a csv the request names also
+ * carries every row holding a value the request spells (office/csvLookup.ts), and a
+ * read-only lookup those rows answer ends there instead of searching for them. `0`
+ * restores the sample and the search.
+ */
+export function csvLookupEnabled(): boolean {
+  return parseBool(process.env["TL_CSV_LOOKUP"], true);
+}
+
 // ---------------------------------------------------------------------------
 // v0.15 W-CORE-FLAGS: Semantic Frontier v2 program flags (2026-09-02)
 // ---------------------------------------------------------------------------
@@ -2696,7 +2850,8 @@ export function effFindSnippetCapEnabled(): boolean {
  * (1,536 B) under the ceiling, and the follow-up that asks for the windows the page
  * left owed is batched like the larger tier's. A ceiling too small for the
  * skeleton (T03's is 127 code lines, 15,046 B estimated) is served no map and
- * keeps the whole-member requirement. Measured on the 69 map-shaped chains of the
+ * keeps the whole-member requirement, its follow-ups batched since 2026-11-02
+ * (readCodeTaskPack.ts `mergeFacetGap`). Measured on the 69 map-shaped chains of the
  * generality audit under VS Code's 14,336 B: the map stands in 23 of them, up
  * from 2, the mean chain takes 4.14 round trips where it took 4.26, and over the
  * 38 chains that reach an answer both ways 3.26 where they took 3.71 (24.7 to

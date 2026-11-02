@@ -793,6 +793,7 @@ export type ReadLimitCode =
    * refusalと原要求を再開する正準nextを返す". Carries that restart `next`.
    */
   | "cursor-stale"                    // server.ts (grep "cursor-stale")
+  | "snapshot-unavailable"            // server.ts (grep "snapshot-unavailable")
   /**
    * DESIGN-v0.15 §5.2 (R2): an unknown, tampered, expired, wrong-purpose,
    * other-workspace, other-lane or other-task cursor ("未知/改竄/別purpose/別
