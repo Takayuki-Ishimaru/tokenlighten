@@ -47,6 +47,12 @@ No separate `tl` installation is required. The packaged VSIX includes a zero-ins
 
 TokenLighten performs repository indexing and context selection locally. Optional semantic search uses a local embedding model downloaded at your request and is off by default. This engine does not send repository content to a model service. Your selected coding agent remains responsible for any model requests it makes.
 
+The optional model token counter is disabled by default. When configured for
+reply selection, it passes candidate reply text to the selected provider's
+counting API. Review the provider's data handling and the
+[privacy guide](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.4/release-docs/privacy-security-support.md)
+before enabling it.
+
 Workspace-changing actions require a trusted VS Code workspace.
 
 ## Local analysis engines
@@ -55,7 +61,7 @@ Open **TokenLighten: Manage Local Analysis Engines** to configure typed symbol r
 compound requests and local multilingual semantic search. Typed resolution
 and semantic search are off by default; model weights require an explicit
 download. The panel also offers language-server configuration and licenses.
-See the [local analysis guide](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.0/release-docs/local-analysis.md).
+See the [local analysis guide](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.4/release-docs/local-analysis.md).
 
 ## Settings
 
@@ -69,6 +75,7 @@ See the [local analysis guide](https://github.com/Takayuki-Ishimaru/tokenlighten
 | `tokenlighten.guideProfile` | `compact` | Shared guide written during workspace setup; explicit `full` or `medium` choices take precedence. |
 | `tokenlighten.toolSurface` | `full` | MCP capabilities: `full` or the smaller code/plain-text/config `code` surface. Reconnect after changing it. |
 | `tokenlighten.copilotGuide` | `standalone` | Copilot instructions: dedicated guide, shared AGENTS.md, or keep existing configuration. |
+| `tokenlighten.hostTokenCounter.modelFamily` | empty | Optional model family for reply token counting; candidate reply text reaches the selected provider's counting API when reply selection is enabled. See the [MCP settings](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.4/release-docs/mcp-tools.md#optional-reply-and-table-settings). |
 
 ## Main workflow
 
@@ -98,4 +105,4 @@ npm run package -w tokenlighten-vscode-extension
 code --install-extension packages/vscode-extension/tokenlighten-vscode-extension-<version>.vsix
 ```
 
-See the [project README](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.0/README.md) and [public release documentation](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.0/release-docs/README.md) for setup, MCP tools, language support, privacy, and licensing.
+See the [project README](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.4/README.md) and [public release documentation](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.4/release-docs/README.md) for setup, MCP tools, language support, privacy, and licensing.
