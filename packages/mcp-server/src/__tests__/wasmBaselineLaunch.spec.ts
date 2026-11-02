@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { WASM_BASELINE_FLAG, wasmBaselineRelaunchArgv } from "../util/wasmBaselineLaunch.js";
+import { TSX_NODE_ARGS } from "./helpers/tsxNode.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -48,7 +49,10 @@ describe("relaunchWithWasmBaseline, end to end", () => {
     fs.writeFileSync(file, `import { relaunchWithWasmBaseline } from ${JSON.stringify(helper)};\n${body}\n`);
     return file;
   };
-  const run = (file: string, args: string[] = []) => spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", file, ...args], {
+  // Node 20 has no native type stripping. Use the shared source loader, but
+  // omit its baseline flag so this fixture must actually restart itself.
+  const sourceLoaderArgs = TSX_NODE_ARGS.filter(arg => arg !== WASM_BASELINE_FLAG);
+  const run = (file: string, args: string[] = []) => spawnSync(process.execPath, ["--no-warnings", ...sourceLoaderArgs, file, ...args], {
     encoding: "utf8",
     input: "from-host\n",
     timeout: 60_000,
@@ -58,12 +62,14 @@ describe("relaunchWithWasmBaseline, end to end", () => {
     const file = script(`
       if (!relaunchWithWasmBaseline(process.argv[1], process.argv.slice(2))) {
         const input = (await import("node:fs")).readFileSync(0, "utf8");
-        process.stdout.write(JSON.stringify({ flag: process.execArgv.includes(${JSON.stringify(WASM_BASELINE_FLAG)}), args: process.argv.slice(2), input }));
+        process.stdout.write(JSON.stringify({ flag: process.execArgv.includes(${JSON.stringify(WASM_BASELINE_FLAG)}), args: process.argv.slice(2), input, pid: process.pid }));
         process.exit(7);
       }`);
     const result = run(file, ["/ws", "--allow-write"]);
     expect(result.stderr).toBe("");
-    expect(JSON.parse(result.stdout)).toEqual({ flag: true, args: ["/ws", "--allow-write"], input: "from-host\n" });
+    const restarted = JSON.parse(result.stdout);
+    expect(restarted).toEqual({ flag: true, args: ["/ws", "--allow-write"], input: "from-host\n", pid: expect.any(Number) });
+    expect(restarted.pid).not.toBe(result.pid);
     expect(result.status).toBe(7);
   }, 90_000);
 });
