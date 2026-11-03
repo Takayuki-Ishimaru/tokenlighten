@@ -106,7 +106,7 @@ describe("FX-O2 finding 7a — served_this_session must not survive a zero-byte 
     expect(file!["served_this_session"], "a genuinely served path must still read true").toBe(true);
   });
 
-  it("CONTROL: a doc-sliver serve (real bytes shipped, just not at the matched line) still keeps FILE-level served_this_session:true — this fix must not collapse it into the LINE-level lines_held check", () => {
+  it("CONTROL: a doc-sliver serve keeps partial-file provenance without claiming the unread matched line was served", () => {
     const ws = mkWorkspace("sliver");
     const TOTAL = 40;
     const MATCH_LINE = 10;
@@ -124,7 +124,8 @@ describe("FX-O2 finding 7a — served_this_session must not survive a zero-byte 
     const files = outcome.body["files"] as Array<Record<string, unknown>> | undefined;
     const file = files!.find((f) => f["path"] === "docs/BIG.md");
     expect(file, JSON.stringify(outcome.body)).toBeDefined();
-    expect(file!["served_this_session"], "file-level provenance IS true — a real, non-zero serve happened").toBe(true);
+    expect(file!["served_this_session"], "the matched line was never served").toBeUndefined();
+    expect(file!["file_partially_served"], "a real, non-zero file sliver was served").toBe(true);
     expect(file!["lines_held"], "line-level residency is honestly false").toBe(false);
   });
 });

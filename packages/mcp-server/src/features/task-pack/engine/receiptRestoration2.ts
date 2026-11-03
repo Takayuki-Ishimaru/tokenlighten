@@ -87,10 +87,11 @@ export function tryServeCachedPack(
 /**
  * A pathless repeat can retain a certificate earned by this same task's
  * explicitly selected targets. Candidate proposals are never cached evidence.
- * Unlike semantic dedup, this path requires exact query/profile/task identity
+ * Unlike semantic dedup, this path requires exact query/task identity and a
+ * compatible declared profile (an omitted profile defers to the record).
  * and the currently installed prepared fence; it cannot resurrect an old act.
  */
-export function tryServeCertifiedQueryReceipt(workspace: string, args: TaskPackArgs): TaskPackResult | undefined {
+function currentCertifiedQueryResult(workspace: string, args: TaskPackArgs, rebuildOnly: boolean): TaskPackResult | undefined {
   if (args.forceServe === true || args.taskEpoch === "new"
     || !args.taskBinding || !args.query || args.path || args.symbol || args.paths?.length
     || args.lang !== undefined || (args.surfaceRoles?.length ?? 0) > 0) return undefined;
@@ -106,8 +107,12 @@ export function tryServeCertifiedQueryReceipt(workspace: string, args: TaskPackA
   const profileKey = computeRequestProfileKey(args);
   for (let i = records.length - 1; i >= 0; i--) {
     const record = records[i]!;
-    if (record.lane !== lane || record.taskBinding !== args.taskBinding
-      || record.queryIdentity !== queryIdentity || record.requestProfileKey !== profileKey) continue;
+    // The first targeted pack is captured before its wire task handle exists.
+    // An absent capture-time binding is admitted only by the exact current
+    // prepared certificate/fingerprint checks below; a conflicting binding
+    // remains a hard rejection.
+    if (record.lane !== lane || record.taskBinding !== undefined && record.taskBinding !== args.taskBinding
+      || record.queryIdentity !== queryIdentity || !packProfileCompatible(profileKey, record.requestProfileKey)) continue;
     const contract = record.executionContract;
     const certificate = contract?.readiness_certificate;
     if (!recordCertifiedTerminal(contract) || contract?.typestate.phase !== "prepared"
@@ -125,12 +130,26 @@ export function tryServeCertifiedQueryReceipt(workspace: string, args: TaskPackA
       receiptRecordWithoutConsumedSearch(workspace, record, args.taskBinding),
       args.taskQueryRefReplay === true,
       { lane, taskBinding: args.taskBinding },
+      rebuildOnly,
     );
     if (receipt === undefined) continue;
+    if (rebuildOnly) return receipt;
     const decision = deriveCanonicalTaskDecision(receipt);
     if (decision?.kind === "act-answer" || decision?.kind === "act-edit") return receipt;
   }
   return undefined;
+}
+
+export function tryServeCertifiedQueryReceipt(workspace: string, args: TaskPackArgs): TaskPackResult | undefined {
+  return currentCertifiedQueryResult(workspace, args, false);
+}
+
+/** Current source-bound certificate context only; callers must build fresh
+ * evidence. The reduced type cannot be returned as a cached task-pack act.
+ */
+export function certifiedQueryRebuildContext(workspace: string, args: TaskPackArgs): Pick<TaskPackResult, "execution_contract"> | undefined {
+  const result = currentCertifiedQueryResult(workspace, args, true);
+  return result === undefined ? undefined : {execution_contract: result.execution_contract};
 }
 
 /**
@@ -187,12 +206,22 @@ export function revalidateRecordToReceipt(
   prev: ServedPackRecord,
   isQueryRefReplay: boolean,
   consumption: ReceiptConsumptionScope = { lane: currentSessionLane() },
+  rebuildOnly = false,
 ): TaskPackResult | undefined {
+  if (rebuildOnly) {
+    const fence = getSession(workspace).executionFence;
+    const contract = prev.executionContract;
+    const certificate = contract?.readiness_certificate;
+    if (!recordCertifiedTerminal(contract) || fence?.phase !== "prepared"
+      || prev.lane !== consumption.lane || consumption.taskBinding !== fence.taskFingerprint
+      || certificate?.id !== fence.certificateId || certificate.task_fingerprint !== fence.taskFingerprint
+      || getSession(workspace).revokedCertificateIds.has(certificate.id)) return undefined;
+  }
   // The captured surfaces must actually be verifiable AND unchanged. An empty
   // capture (a no-surface pack) has nothing to re-serve compactly and nothing
   // to prove unchanged — recompute rather than emit an empty acknowledgement.
   if (prev.fileShas.length === 0) return undefined;
-  if (isQueryRefReplay && prev.surfaces.some((s) => recordDocSurfaceIsPartial(workspace, s))) {
+  if (!rebuildOnly && isQueryRefReplay && prev.surfaces.some((s) => recordDocSurfaceIsPartial(workspace, s))) {
     return undefined;
   }
   for (const { path: p, sha } of prev.fileShas) {
@@ -230,7 +259,7 @@ export function revalidateRecordToReceipt(
   // to name has no readiness verdict worth replaying — re-evaluate the latest
   // state instead of re-serving a past response (see
   // `receiptContinuationDisposition`).
-  if (
+  if (!rebuildOnly &&
     receiptContinuationDisposition(
       workspace,
       prev,
@@ -251,6 +280,9 @@ export function revalidateRecordToReceipt(
     prev.taskProfile !== "answer"
     && recordSupersededByLaterCertifiedTerminal(workspace, prev, consumption.lane)
   ) return undefined;
+  // Source context grants no residency claim or cached act. A replay with a
+  // partial file or a spent delivery next must still ship a freshly proved pack.
+  if (rebuildOnly) return {mode:"task_pack",coverage:prev.coverage,surfaces:[],missing:[],execution_contract:prev.executionContract};
   return compactReceiptFromRecord(workspace, prev, currentWorkspaceState, consumption);
 }
 

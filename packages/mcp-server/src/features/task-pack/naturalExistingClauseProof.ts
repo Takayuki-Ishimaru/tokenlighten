@@ -3,7 +3,10 @@ import { createHash } from 'node:crypto';
 import type { TaskPackResult, TaskPackSurface } from './model.js';
 import { collectNaturalServedSpans, type NaturalEvidence, type NaturalProjection } from './naturalQueryAdapter.js';
 import type { Span } from './naturalQueryPlan.js';
-import { facetClauseMatchesItem, facetClausesJointlyOwnItem, itemConjunctionParts } from './facetGate.js';
+import { facetClauseMatchesItem, facetClausesJointlyOwnItem, facetPlanFor, itemConjunctionParts, type FacetPlanEntry } from './facetGate.js';
+import { facetPlanWorkspaceKey } from './engine/facetClosure.js';
+import { parseCitedSpans } from './certificateWireInvariant.js';
+import { shaOfText } from '../../util/handles.js';
 import { buildReadinessObligations } from './engine/readinessObligations.js';
 import { buildRequestItemReadiness } from './engine/requestItemReadiness.js';
 import { buildFacetReadiness } from './engine/facetReadiness.js';
@@ -27,6 +30,10 @@ export function existingNaturalClauseProjection(
   const base = buildReadinessObligations(result, 'answer', natural.query, false, workspace);
   const requests = buildRequestItemReadiness(workspace, natural.query, 'answer', result, base);
   const facets = buildFacetReadiness(workspace, natural.query, 'answer', result);
+  const plan = facetPlanFor(facetPlanWorkspaceKey(workspace), natural.query, path => {
+    const text = source(path);
+    return text === undefined ? undefined : shaOfText(text);
+  });
   const owners: TaskReadinessObligation[] = [];
   const provedEvidence: TaskReadinessEvidence[] = [];
   const resident = (spans: Span[], evidence: readonly TaskReadinessEvidence[]): boolean => {
@@ -42,23 +49,30 @@ export function existingNaturalClauseProjection(
       return next > s.end;
     });
   };
-  const ownsCompleteBody = (evidence: readonly TaskReadinessEvidence[], clauseText: string, name?: string): boolean => evidence.some(e => {
-    const m = /^(\d+)-(\d+)$/.exec(e.range ?? '');
-    if (!m || !e.path) return false;
+  const completeBodyEvidence = (evidence: readonly TaskReadinessEvidence[], clauseText: string, focal?: NonNullable<FacetPlanEntry['focal']>): TaskReadinessEvidence[] => evidence.flatMap(e => {
+    const spans = parseCitedSpans(e.range);
+    if (!spans.length || !e.path) return [];
     const predicates = [...contentPredicateWords(clauseText)].filter(word => !GENERIC_PROCESS_VERB_WORDS.has(word));
-    return natural.declarations!.some(d => d.path === e.path && d.operations.some(op => op.kind === 'branch' && predicates.length === 0 || op.kind === 'delete'
+    const declarations = natural.declarations!.filter(d => d.path === e.path
+      && spans.some(([start,end]) => d.start >= start && d.end <= end)
+      && (focal === undefined || d.path === focal.path && d.start >= focal.start && d.end <= focal.end
+        && (d.name.replace(/::|#/g, '.') === focal.name.replace(/::|#/g, '.')
+          || d.container !== undefined && focal.name.replace(/::|#/g, '.') === `${d.container}.${d.name}`.replace(/::|#/g, '.'))));
+    // A line shared by several same-named declarations cannot identify one
+    // owner. Never choose whichever happens to contain a computed return.
+    if (focal !== undefined && declarations.length !== 1) return [];
+    return declarations.filter(d => d.operations.some(op => op.kind === 'branch' && predicates.length === 0 || op.kind === 'delete'
       || op.kind === 'write' && (op.targetShape === 'member' || op.targetShape === 'subscript')
       || op.kind === 'return' && (op.computedResult === true || op.controls.length > 0))
-      && (name === undefined || d.name === name)
       && predicates.every(word => textHasWordVariant([d.name, ...d.operations.map(op => op.callee ?? '')].join(' '), word))
-      && d.start >= Number(m[1]) && d.end <= Number(m[2])
-      && resident(d.executableRanges.map(r => ({...r,path:d.path,sha:d.sha})),[e]));
-  });
+      && resident(d.executableRanges.map(r => ({...r,path:d.path,sha:d.sha})),[e]))
+      .map(d => ({...e,range:`${d.start}-${d.end}`}));
+  }).slice(0,6);
   const currentFacetEvidence = (evidence: readonly TaskReadinessEvidence[]): boolean => evidence.length > 0 && evidence.every(e => {
     if (!e.path || !isImplementationPath(e.path)) return false;
-    const m = /^(\d+)-(\d+)$/.exec(e.range ?? '');
+    const spans = parseCitedSpans(e.range);
     const text = source(e.path);
-    return !!m && text !== undefined && resident([{path:e.path,start:Number(m[1]),end:Number(m[2]),sha:createHash('sha256').update(text).digest('hex')}],[e]);
+    return spans.length > 0 && text !== undefined && resident(spans.map(([start,end]) => ({path:e.path!,start,end,sha:createHash('sha256').update(text).digest('hex')})),[e]);
   });
   for (const clause of natural.plan.clauses) {
     const candidates = facets?.entries.filter(e => e.dependency !== true && e.facts.focalResolved) ?? [];
@@ -74,10 +88,15 @@ export function existingNaturalClauseProjection(
       const inherited = candidates.filter(e => e.requirement.inheritedFromLead);
       if (lead && detail && facetClausesJointlyOwnItem(inherited.map(e => e.requirement.clause),detail)) {
         const behavior = base.find(o => o.id === 'behavior-body' && o.status === 'proved');
-        const focalNames = new Set(inherited.map(e => e.facts.term.split(':').slice(1).join(':')));
-        if (!behavior || ![...focalNames].some(name => ownsCompleteBody(behavior.evidence ?? [],lead,name))) return undefined;
-        owners.push({...behavior,id:'request-item:natural-facet-lead-body',origin:'query'});
-        provedEvidence.push(...(behavior.evidence ?? []));
+        const focals = plan?.entries.filter(entry => entry.dependency !== true
+          && inherited.some(e => e.requirement.facet === entry.facet && e.requirement.clause === entry.clause))
+          .flatMap(entry => entry.focal !== undefined && entry.focal.callable !== false ? [entry.focal] : []) ?? [];
+        const bodyEvidence = behavior?.status === 'proved'
+          ? focals.flatMap(focal => completeBodyEvidence(behavior.evidence ?? [],lead,focal)) : [];
+        if (!behavior || !bodyEvidence.length) return undefined;
+        const uniqueBodyEvidence = bodyEvidence.filter((entry,index,all) => all.findIndex(other => other.path === entry.path && other.range === entry.range && other.handle === entry.handle) === index).slice(0,6);
+        owners.push({...behavior,id:'request-item:natural-facet-lead-body',origin:'query',evidence:uniqueBodyEvidence});
+        provedEvidence.push(...uniqueBodyEvidence);
         matching = inherited.filter(e => itemConjunctionParts(detail).some(part => facetClauseMatchesItem(e.requirement.clause,part)));
       }
     }
@@ -92,7 +111,7 @@ export function existingNaturalClauseProjection(
     }
     const owner = requests.obligations.find(o => o.id === `request-item:${clause.id}`);
     if (!owner) return undefined;
-    if (owner.status === 'proved' && ownsCompleteBody(owner.evidence ?? [],clause.text)) {
+    if (owner.status === 'proved' && completeBodyEvidence(owner.evidence ?? [],clause.text).length > 0) {
       owners.push(owner); provedEvidence.push(...(owner.evidence ?? []));
     } else if (owner.status === 'uncovered' && requests.gap?.ids.includes(clause.id)) owners.push(owner);
     else return undefined;

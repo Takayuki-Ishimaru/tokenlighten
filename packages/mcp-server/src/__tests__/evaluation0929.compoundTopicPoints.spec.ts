@@ -191,11 +191,23 @@ async function ask(
   allowWrite = false,
   toolSurface: "code" | "full" = "code",
   extraEnv: Readonly<Record<string, string>> = {},
+  declaredScope?: string,
 ): Promise<{ chain: ChainResult; disclosures: string[]; served: Set<string> }> {
   const ws = workspace(files);
-  const server = startDevServer(ws, "default", { allowWrite, toolSurface, extraEnv });
-  servers.push(server);
-  await server.initialize();
+  const spawned = startDevServer(ws, "default", { allowWrite, toolSurface, extraEnv });
+  servers.push(spawned);
+  await spawned.initialize();
+  // Declared fixture source scope (v0.16.6 unanchored-body confirmation): isolates
+  // this fixture's concept/facet/request-item handling; the unanchored discovery
+  // guard stays covered by naturalLanguageFirstHop.spec.ts.
+  const server: ServerHandle = declaredScope === undefined ? spawned : {
+    ...spawned,
+    callTool: (name: string, args: Record<string, unknown>) =>
+      spawned.callTool(name, name === "tl_read_file" && typeof args["query"] === "string"
+        && (args["task"] as { epoch?: unknown } | undefined)?.epoch === "new"
+        && args["targets"] === undefined && args["path"] === undefined && args["paths"] === undefined
+        ? { ...args, targets: [{ path: declaredScope }] } : args),
+  };
   const chain = await followNextToEnd(
     server,
     { tool: "tl_read_file", arguments: { query, cwd: ws, task: { epoch: "new", ...(profile ? { profile } : {}) } } },
@@ -218,21 +230,21 @@ const undetermined = (disclosures: readonly string[]): string[] => disclosures.f
 // ---------------------------------------------------------------------------
 
 describe("end-to-end: a coordinated noun-phrase point is located or disclosed, never silently covered", () => {
-  const located: ReadonlyArray<readonly [string, Record<string, string>, string, string]> = [
+  const located: ReadonlyArray<readonly [string, Record<string, string>, string, string, string?]> = [
     ["EN 'X and the NP'", HTTP, "Explain shouldRetry and the health probe.", "src/health.ts"],
     ["EN 'the NP and X'", HTTP, "Explain the health probe and shouldRetry.", "src/health.ts"],
     ["EN 'X, the NP and the NP2'", HTTP, "Explain shouldRetry, the health probe and the retry codes.", "src/health.ts"],
     ["EN bullets", HTTP, "Explain the HTTP client:\n- shouldRetry and the health probe\n- the default timeout", "src/health.ts"],
-    ["EN 'the NP and the NP2'", HTTP, "Explain the retry policy and the health probe.", "src/health.ts"],
+    ["EN 'the NP and the NP2'", HTTP, "Explain the retry policy and the health probe.", "src/health.ts", "src"],
     ["JA 「X と NP について」 (mapped katakana)", HTTP, "shouldRetry とヘルスチェックについて説明してください。", "src/health.ts"],
     ["EN, a second fixture", FEES, "Explain computeFee and the audit trail.", "src/audit.ts"],
     ["EN relation clause 'how X decides and the NP'", HTTP, "Explain how shouldRetry decides and the health probe.", "src/health.ts"],
     ["control: the named-path phrasing", HTTP, "Explain shouldRetry and the health probe in src/health.ts.", "src/health.ts"],
-    ["control: the concept alone", HTTP, "Explain the health probe.", "src/health.ts"],
+    ["control: the concept alone", HTTP, "Explain the health probe.", "src/health.ts", "src"],
   ];
-  for (const [label, files, query, target] of located) {
+  for (const [label, files, query, target, scope] of located) {
     it(`${label}: ${target} is served`, async () => {
-      const { chain, disclosures, served } = await ask(files, query);
+      const { chain, disclosures, served } = await ask(files, query, "answer", false, "code", {}, scope);
       expect([...served], JSON.stringify(disclosures)).toContain(target);
       expect(absent(disclosures).filter((d) => /health|probe|check|ヘルス|audit|trail/iu.test(d)), JSON.stringify(disclosures)).toEqual([]);
       expect(finalDecisionKind(chain)).toBe("act.answer");
@@ -291,7 +303,7 @@ describe("end-to-end: a coordinated noun-phrase point is located or disclosed, n
   }, 60_000);
 
   it("control: a shared head noun stays one point — no disclosure about its parts", async () => {
-    const { disclosures, served } = await ask(HTTP, "Explain the retry and backoff logic.");
+    const { disclosures, served } = await ask(HTTP, "Explain the retry and backoff logic.", "answer", false, "code", {}, "src");
     expect(served.has("src/retry.ts"), JSON.stringify([...served])).toBe(true);
     expect([...absent(disclosures), ...undetermined(disclosures)].filter((d) => /retry|backoff/iu.test(d)), JSON.stringify(disclosures)).toEqual([]);
   }, 60_000);
@@ -316,6 +328,7 @@ describe("end-to-end: adjectives in identifier-free topic clauses are never cert
     const { disclosures } = await ask(
       HTTP,
       "I'm debugging slow requests. Explain the default timeout, how the backoff grows between attempts, and whether the circuit breaker trips after repeated failures.",
+      "answer", false, "code", {}, "src",
     );
     expect(absent(disclosures).filter((d) => /\b(?:slow|debugging|grows)\b/iu.test(d)), JSON.stringify(disclosures)).toEqual([]);
     expect(absent(disclosures).some((d) => /request-item-absent:circuit\b/u.test(d)), JSON.stringify(disclosures)).toBe(true);
@@ -382,7 +395,7 @@ describe("end-to-end: a katakana term is certified absent only through a known E
       }
     };
     walk(root);
-    const { chain, disclosures } = await ask(files, "認証情報の検証方法と、データベースマイグレーションの実行方法を説明してください。");
+    const { chain, disclosures } = await ask(files, "認証情報の検証方法と、データベースマイグレーションの実行方法を説明してください。", "answer", false, "code", {}, "src");
     expect(finalDecisionKind(chain)).toBe("act.answer");
     expect(JSON.stringify(chain.hops.map((hop) => hop.response))).toMatch(/validateCredentials/u);
     expect(undetermined(disclosures).some((d) => /マイグレーション/u.test(d) && /katakana term with no known English spelling/u.test(d)), JSON.stringify(disclosures)).toBe(true);

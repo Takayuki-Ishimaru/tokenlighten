@@ -2168,7 +2168,11 @@ function projectSemanticFrontierNext(
 export function projectTaskDecision(input: DecisionProjectionInput): TaskDecision | undefined {
   const { result, contract, canonicalKind, evidence, consumed } = input;
   const candidateDecision = queryCandidateDecision(result);
-  if (candidateDecision !== undefined) return candidateDecision;
+  if (candidateDecision !== undefined) {
+    if (candidateDecision.kind !== "await_input" || contract === undefined) return candidateDecision;
+    const unresolved = projectUnresolved(result, contract, candidateDecision.code, candidateDecision.candidates ?? []);
+    return { ...candidateDecision, ...(unresolved.length > 0 ? { unresolved } : {}) };
+  }
   if (canonicalKind === undefined || contract === undefined) return undefined;
 
   // W9: `gapNamedNext` is the LAST of the three, so it can only supply a call

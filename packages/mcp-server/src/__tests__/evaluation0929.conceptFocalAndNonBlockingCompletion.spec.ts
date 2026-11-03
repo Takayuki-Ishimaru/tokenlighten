@@ -59,10 +59,20 @@ function workspace(files: Record<string, string>): string {
   return ws;
 }
 
-async function ask(ws: string, query: string, hopCap = 6) {
-  const server = startDevServer(ws, "default");
-  servers.push(server);
-  await server.initialize();
+async function ask(ws: string, query: string, hopCap = 6, declaredScope?: string) {
+  const spawned = startDevServer(ws, "default");
+  servers.push(spawned);
+  await spawned.initialize();
+  // Declared fixture source scope (v0.16.6 unanchored-body confirmation): isolates
+  // this fixture's concept/facet handling; the guard stays with naturalLanguageFirstHop.
+  const server: ServerHandle = declaredScope === undefined ? spawned : {
+    ...spawned,
+    callTool: (name: string, args: Record<string, unknown>) =>
+      spawned.callTool(name, name === "tl_read_file" && typeof args["query"] === "string"
+        && (args["task"] as { epoch?: unknown } | undefined)?.epoch === "new"
+        && args["targets"] === undefined && args["path"] === undefined && args["paths"] === undefined
+        ? { ...args, targets: [{ path: declaredScope }] } : args),
+  };
   const chain = await followNextToEnd(
     server,
     { tool: "tl_read_file", arguments: { query, cwd: ws, task: { epoch: "new", profile: "answer" } } },
@@ -92,7 +102,7 @@ describe("end-to-end: a value clause naming a concept (no explicit identifier) b
       "src/config/limits.ts": ["export const BACKOFF_CEILING = 12;", "export const MAX_WORKERS = 4;", ""].join("\n"),
     });
     const query = "Explain the backoff ceiling constant's configured value.";
-    const chain = await ask(ws, query);
+    const chain = await ask(ws, query, 6, "src");
     expect(finalDecisionKind(chain)).toBe("act.answer");
     const servedText = JSON.stringify(chain.hops.map((s) => s.response));
     expect(servedText, servedText).toMatch(/BACKOFF_CEILING/u);
@@ -126,7 +136,7 @@ describe("end-to-end: a value clause naming a concept (no explicit identifier) b
     // (dispatchWorker), never BACKOFF_CEILING itself (a constant has no
     // "flow" of its own).
     const query = "Walk me through the backoff dispatch flow, step by step.";
-    const chain = await ask(ws, query);
+    const chain = await ask(ws, query, 6, "src");
     expect(finalDecisionKind(chain)).not.toBe("await_input");
     const servedText = JSON.stringify(chain.hops.map((s) => s.response));
     expect(servedText, servedText).toMatch(/dispatchWorker/u);

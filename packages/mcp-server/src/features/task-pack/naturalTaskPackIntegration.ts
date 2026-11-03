@@ -10,12 +10,12 @@ import { tokenizeForEpoch } from '../../state/session.js';
 import { collectNaturalServedSpans, currentNaturalEvidence, exactQueryIdentity, projectNaturalEvidence, type NaturalProjection } from './naturalQueryAdapter.js';
 const WIRING_OBLIGATION_IDS = ['wiring-source', 'wiring-consumer', 'wiring-link', 'wiring-insertion'];
 /** Qualifies a fresh specialized rebuild; this is never permission to return a cached act. */
-export function hasNaturalWiringCertificate(result: TaskPackResult): boolean {
+export function hasNaturalWiringCertificate(result: Pick<TaskPackResult, 'execution_contract'>): boolean {
     const certified = result.execution_contract?.readiness_certificate?.obligations ?? [];
     return WIRING_OBLIGATION_IDS.every(id => certified.some(o => o.id === `request-item:natural-${id}` && o.status === 'proved'));
 }
 /** A specialized certificate qualifies only a fresh rebuild, never a direct cached act. */
-export function hasNaturalSpecializedCertificate(result: TaskPackResult): boolean {
+export function hasNaturalSpecializedCertificate(result: Pick<TaskPackResult, 'execution_contract'>): boolean {
     return hasNaturalWiringCertificate(result) || (result.execution_contract?.readiness_certificate?.obligations ?? [])
         .some(o => o.id === NATURAL_EXISTING_CLAUSE_PROOF && o.status === 'proved');
 }

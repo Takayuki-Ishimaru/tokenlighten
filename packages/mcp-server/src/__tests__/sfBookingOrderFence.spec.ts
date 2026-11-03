@@ -2,7 +2,7 @@
  * sfBookingOrderFence.spec.ts — FX-J/FX-K's STATIC ordering fence.
  *
  * WHY A PARSE TEST. The invariant "the pack that gets BOOKED is the pack that
- * SHIPS" is an ORDERING claim about `readCodeTaskPack.ts`, and it has now been
+ * SHIPS" is an ORDERING claim about the task-pack engine, and it has now been
  * broken four times in four different ways, each time by a producer nobody
  * re-checked:
  *
@@ -29,15 +29,29 @@
  * producer called from any THIRD function was invisible to it — and three
  * `captureServedPack` sites already were. This version inverts the check. It
  * enumerates every booking producer and every WITNESS that reads the pack
- * before the seam, finds every call site of each ACROSS THE WHOLE MODULE, and
- * requires each site to be covered by an explicit allowlist entry carrying a
- * reason. A new site anywhere in the file fails until it is classified.
+ * before the seam, finds every call site of each ACROSS EVERY ENGINE
+ * IMPLEMENTATION MODULE (readCodeTaskPack.ts is now a pure re-export facade),
+ * and requires each site to be covered by an explicit allowlist entry carrying
+ * a reason. A new site anywhere in the engine fails until it is classified.
  *
- * WHAT IT CANNOT BIND. It is textual: an alias (`const book =
- * recordServedSurfaces`), a call through a wrapper, or a producer added in
- * ANOTHER module is out of reach. `ALIAS_FORMS` below rejects the cheapest
- * aliasing shapes; the rest is covered by the live end-to-end cases in
- * `sfShippedBookings.spec.ts` and `sfCapOverflowBookings.spec.ts`.
+ * HOW IT READS THE CODE (post-extraction rewrite). `readCodeTaskPack.ts` was
+ * split into `features/task-pack/engine/` owner modules, so a single-file
+ * textual scan no longer sees the producers. This version parses every engine
+ * module with the TypeScript AST: call sites are actual `CallExpression`s
+ * (comments, prose and import specifiers can never count), each site's owner is
+ * the TOP-LEVEL function whose AST span contains it, and the reviewed
+ * `FUNCTION_OWNERS` map below pins each function the fence reasons over to the
+ * module that must define it — a producer moved into an unexpected owner, or a
+ * new top-level function calling one, fails the coverage case. Module sources
+ * are never concatenated: every ordering assertion compares positions inside
+ * ONE owner's AST span.
+ *
+ * WHAT IT CANNOT BIND. A call through a dynamically computed property or
+ * a re-exported alias, or a producer added in a module OUTSIDE
+ * `engine/` that no engine module calls directly, is out of reach; the
+ * `ALIAS_FORMS` scan rejects the cheapest aliasing shapes in every module, and
+ * the rest is covered by the live end-to-end cases in `sfShippedBookings.spec.ts`
+ * and `sfCapOverflowBookings.spec.ts`.
  *
  * WHAT WOULD FAIL WITHOUT THE FIX. Against `ab2dab32` (FX-J) this file fails on
  * the single-pass case (`bookPreSeamPackServeState` books a second time),
@@ -50,10 +64,10 @@ import { describe, expect, it } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const SOURCE_PATH = path.resolve(HERE, "../features/task-pack/readCodeTaskPack.ts");
-const SOURCE = fs.readFileSync(SOURCE_PATH, "utf8");
+const ENGINE_DIR = path.resolve(HERE, "../features/task-pack/engine");
 
 /** The seam that may still withhold a body. */
 const SEAM = "applySemanticFrontierPreBookingSeam";
@@ -78,7 +92,6 @@ interface ProducerSpec {
   kind: "booking" | "witness";
   sites: ReadonlyArray<{ enclosing: string; count: number; reason: string }>;
 }
-
 const PRODUCERS: readonly ProducerSpec[] = [
   {
     name: "recordServedEditAdmissibility",
@@ -320,25 +333,127 @@ const PRODUCERS: readonly ProducerSpec[] = [
 ];
 
 /**
- * Source span of a TOP-LEVEL function: from its own declaration to the next
- * column-0 declaration/comment anchor. Every nested statement in this module
- * is indented, so a column-0 anchor is always the next top-level construct —
- * which makes this a stable span without needing a brace matcher that would
- * have to understand template literals and regex literals.
+ * The reviewed owner map: every top-level function this fence reasons over,
+ * pinned to the engine module that must DEFINE it. A function moved into an
+ * unexpected module fails the span-resolution case — the same way a producer
+ * called from an unexpected function fails the coverage case.
  */
-function topLevelFunctionSpan(name: string): { start: number; end: number } {
-  const start = SOURCE.search(new RegExp(`^(?:export )?(?:async )?function ${name}\\(`, "m"));
-  expect(start, `top-level function ${name} must exist in readCodeTaskPack.ts`).toBeGreaterThan(-1);
-  const rest = SOURCE.slice(start + 1);
-  const nextAnchor = rest.search(
-    /^(?:export )?(?:async |declare )?(?:function |const |let |class |interface |type |\/\*\*|\/\/ ---)/m,
-  );
-  return { start: start + 1, end: nextAnchor === -1 ? SOURCE.length : start + 1 + nextAnchor };
+const FUNCTION_OWNERS: Readonly<Record<string, string>> = {
+  dedupeTrimAndPersist: "packSettlement.ts",
+  [FINALIZE]: "contentSettlement2.ts",
+  [SHIPPED_PASS]: "servedStateAndEdits.ts",
+  captureServedPack: "packState4.ts",
+  writeServedPackRecord: "packState4.ts",
+  buildAnswerTaskPack: "answerPackBuilder.ts",
+  buildTaskPackCore: "taskPackBuilder.ts",
+  buildPropagationTaskPack: "literalAndConcernSeeds3.ts",
+  buildPartialPack: "partialPackBuilder2.ts",
+  shippedSurfaces: "wiringEvidence.ts",
+  servedBodySurfaces: "wiringEvidence2.ts",
+  rememberCertifiedWorkingSet: "epochContract2.ts",
+};
+
+interface ModuleAst {
+  /** File name inside engine/ (never a path — failures quote the module). */
+  file: string;
+  source: string;
+  sf: ts.SourceFile;
+  /** Top-level functions: name plus the AST span of the whole declaration. */
+  functions: ReadonlyArray<{ name: string; start: number; end: number }>;
 }
 
-function topLevelFunctionBody(name: string): string {
-  const span = topLevelFunctionSpan(name);
-  return SOURCE.slice(span.start, span.end);
+function parseModule(file: string, source: string): ModuleAst {
+  const sf = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const functions: Array<{ name: string; start: number; end: number }> = [];
+  for (const statement of sf.statements) {
+    let decl: ts.Node | undefined;
+    let name: string | undefined;
+    if (ts.isFunctionDeclaration(statement)) {
+      decl = statement;
+      name = statement.name?.text;
+    } else if (ts.isVariableStatement(statement)) {
+      const d = statement.declarationList.declarations[0];
+      if (d !== undefined && ts.isIdentifier(d.name) && d.initializer !== undefined
+        && (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer))) {
+        decl = d.initializer;
+        name = d.name.text;
+      }
+    }
+    if (decl !== undefined && name !== undefined) functions.push({ name, start: decl.getStart(sf), end: decl.getEnd() });
+  }
+  return { file, source, sf, functions };
+}
+
+/** EVERY engine implementation module, parsed once. The facade is not read: it re-exports. */
+const MODULES: readonly ModuleAst[] = fs.readdirSync(ENGINE_DIR)
+  .filter((f) => f.endsWith(".ts"))
+  .sort()
+  .map((f) => parseModule(f, fs.readFileSync(path.join(ENGINE_DIR, f), "utf8")));
+
+/** The top-level function whose AST span contains `offset` in `m`, or undefined. */
+function ownerOf(m: ModuleAst, offset: number): string | undefined {
+  for (const fn of m.functions) {
+    if (offset >= fn.start && offset < fn.end) return fn.name;
+  }
+  return undefined;
+}
+
+/** One actual `name(...)` CallExpression found in the corpus. */
+interface CallRecord {
+  file: string;
+  /** Byte offset of the callee identifier inside its own module's source. */
+  offset: number;
+  /** The top-level function containing the call, or undefined at module scope. */
+  owner: string | undefined;
+}
+
+/**
+ * Every direct or property-access call of any of `names` across `modules`, as
+ * AST CallExpressions. Comments, prose and import specifiers can never
+ * match; a call nested in a callback inside a top-level function still reports
+ * that function as its owner, so a helper wrapper cannot hide it.
+ */
+function collectCalls(modules: readonly ModuleAst[], names: readonly string[]): CallRecord[] {
+  const wanted = new Set(names);
+  const out: CallRecord[] = [];
+  for (const m of modules) {
+    const walk = (n: ts.Node): void => {
+      const callee = ts.isCallExpression(n) ? n.expression : undefined;
+      const name = callee !== undefined && ts.isIdentifier(callee) ? callee.text
+        : callee !== undefined && ts.isPropertyAccessExpression(callee) ? callee.name.text : undefined;
+      if (name !== undefined && wanted.has(name)) {
+        out.push({ file: m.file, offset: n.getStart(m.sf), owner: ownerOf(m, n.getStart(m.sf)) });
+      }
+      n.forEachChild(walk);
+    };
+    walk(m.sf);
+  }
+  return out;
+}
+
+/** The module that defines the top-level function `name` (per FUNCTION_OWNERS). */
+function ownerModule(name: string): ModuleAst {
+  const expected = FUNCTION_OWNERS[name];
+  expect(expected, `${name} must have a reviewed owner module in FUNCTION_OWNERS`).toBeDefined();
+  const found = MODULES.filter((m) => m.functions.some((f) => f.name === name));
+  expect(
+    found.map((m) => m.file),
+    `${name} must be defined in exactly one engine module`,
+  ).toEqual([expected]);
+  return found[0]!;
+}
+
+/** The AST span of the top-level function `name` inside its owner module. */
+function functionSpan(name: string): { module: ModuleAst; start: number; end: number } {
+  const module = ownerModule(name);
+  const fn = module.functions.find((f) => f.name === name)!;
+  return { module, start: fn.start, end: fn.end };
+}
+
+/** The full declaration text of `name`, from its own module only. */
+function functionBody(name: string): string {
+  const span = functionSpan(name);
+  return span.module.source.slice(span.start, span.end);
 }
 
 /** `text` with every line-comment and block-comment line removed, so a doc that NAMES a producer is not counted as a call site. */
@@ -356,72 +471,55 @@ function callSites(text: string, name: string): number {
   return matches === null ? 0 : matches.length;
 }
 
-/**
- * Byte offsets of every call site of `name` in the WHOLE module.
- *
- * Comment lines are BLANKED, not deleted, so every line keeps its index and an
- * offset computed here addresses the same position in the untouched source.
- */
-function callSiteOffsets(name: string): number[] {
-  const lines = SOURCE.split("\n").map((line) =>
-    /^\s*(?:\/\/|\*|\/\*)/.test(line) ? "" : line.replace(/\s\/\/.*$/, ""),
-  );
-  const sourceLineStarts: number[] = [0];
-  for (let i = 0; i < SOURCE.length; i++) if (SOURCE[i] === "\n") sourceLineStarts.push(i + 1);
-  const re = new RegExp(`(?<!function )\\b${name}\\(`, "g");
-  const out: number[] = [];
-  for (let ln = 0; ln < lines.length; ln++) {
-    re.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(lines[ln]!)) !== null) out.push((sourceLineStarts[ln] ?? 0) + m.index);
-  }
-  return out;
-}
-
-/** The top-level function whose span contains `offset`, or `undefined`. */
-function enclosingFunctionOf(offset: number, names: readonly string[]): string | undefined {
-  for (const name of names) {
-    const span = topLevelFunctionSpan(name);
-    if (offset >= span.start && offset < span.end) return name;
-  }
-  return undefined;
+/** The actual AST call records of `name` inside the span of function `fn`. */
+function callsOfIn(name: string, fn: string): CallRecord[] {
+  const span = functionSpan(fn);
+  return collectCalls([span.module], [name]).filter((c) => c.offset >= span.start && c.offset < span.end);
 }
 
 describe("FX-K static ordering fence: every booking producer is classified, and the one pass books what ships", () => {
   it("resolves the spans this fence reasons over (guards the parse itself)", () => {
     const names = new Set<string>([
-      "dedupeTrimAndPersist", FINALIZE, SHIPPED_PASS, "captureServedPack",
+      "dedupeTrimAndPersist", FINALIZE, SHIPPED_PASS, "captureServedPack", "shippedSurfaces",
       ...PRODUCERS.flatMap((producer) => producer.sites.map((site) => site.enclosing)),
     ]);
     for (const name of names) {
-      const body = topLevelFunctionBody(name);
-      expect(body.length, `${name}'s span must be non-trivial`).toBeGreaterThan(200);
-      // A runaway span (the anchor regex failing) would swallow the rest of the
-      // file and make every classification below meaningless.
+      const span = functionSpan(name);
+      const body = span.module.source.slice(span.start, span.end);
+      expect(body.length, `${name}'s span in ${span.module.file} must be non-trivial`).toBeGreaterThan(200);
+      // A runaway span (a broken parse) would swallow the rest of the module
+      // and make every classification below meaningless.
       expect(body.length, `${name}'s span must not run away`).toBeLessThan(120_000);
     }
+    // The corpus itself is guarded: the engine directory must be the real one.
+    expect(MODULES.length, "the engine directory must hold the extracted modules").toBeGreaterThan(50);
   });
 
   it("THE FENCE: every call site of every booking producer is covered by an allowlist entry with a reason", () => {
-    const enclosingNames = [...new Set(PRODUCERS.flatMap((p) => p.sites.map((s) => s.enclosing)))];
     for (const producer of PRODUCERS) {
-      const offsets = callSiteOffsets(producer.name);
+      const records = collectCalls(MODULES, [producer.name]);
       const expected = producer.sites.reduce((sum, site) => sum + site.count, 0);
       expect(
-        offsets.length,
-        `${producer.name}: ${offsets.length} call sites in readCodeTaskPack.ts, `
+        records.length,
+        `${producer.name}: ${records.length} call sites across the engine modules, `
         + `${expected} allowlisted. A new booking site must be added to PRODUCERS with a reason `
         + `(FX-K: no producer may assert what a pack served from an unclassified position).`,
       ).toBe(expected);
       const byFunction = new Map<string, number>();
-      for (const offset of offsets) {
-        const enclosing = enclosingFunctionOf(offset, enclosingNames);
+      for (const record of records) {
         expect(
-          enclosing,
-          `${producer.name} at offset ${offset} is called from a function this fence does not `
-          + `classify — add it to PRODUCERS with a justification`,
+          record.owner,
+          `${producer.name} at ${record.file}:${record.offset} is called at module scope, `
+          + "outside every top-level function this fence classifies",
         ).toBeDefined();
-        byFunction.set(enclosing!, (byFunction.get(enclosing!) ?? 0) + 1);
+        expect(
+          producer.sites.some((site) => site.enclosing === record.owner),
+          `${producer.name} at ${record.file}:${record.offset} is called from ${record.owner}, `
+          + "a function this fence does not classify — add it to PRODUCERS with a justification",
+        ).toBe(true);
+        expect(record.file, `${producer.name}'s classified owner must be in its reviewed module`)
+          .toBe(FUNCTION_OWNERS[record.owner!]);
+        byFunction.set(record.owner!, (byFunction.get(record.owner!) ?? 0) + 1);
       }
       for (const site of producer.sites) {
         expect(site.reason.length, `${producer.name}@${site.enclosing} needs a real reason`)
@@ -435,7 +533,7 @@ describe("FX-K static ordering fence: every booking producer is classified, and 
   });
 
   it("`finalizePackServeState` books nothing: its only producer call is the empty-list epoch bookkeeping", () => {
-    const body = topLevelFunctionBody(FINALIZE);
+    const body = functionBody(FINALIZE);
     for (const producer of PRODUCERS.filter((p) => p.kind === "booking")) {
       const allowed = producer.sites.find((site) => site.enclosing === FINALIZE)?.count ?? 0;
       expect(
@@ -457,7 +555,7 @@ describe("FX-K static ordering fence: every booking producer is classified, and 
   });
 
   it("`dedupeTrimAndPersist` books nothing directly, and its booking pass runs AFTER the seam", () => {
-    const body = topLevelFunctionBody("dedupeTrimAndPersist");
+    const body = functionBody("dedupeTrimAndPersist");
     for (const producer of PRODUCERS.filter((p) => p.kind === "booking")) {
       const allowed = producer.sites
         .find((site) => site.enclosing === "dedupeTrimAndPersist")?.count ?? 0;
@@ -503,7 +601,7 @@ describe("FX-K static ordering fence: every booking producer is classified, and 
   });
 
   it("the booking pass is UNCONDITIONAL — no flag selects a second booking position", () => {
-    const body = withoutComments(topLevelFunctionBody(SHIPPED_PASS));
+    const body = withoutComments(functionBody(SHIPPED_PASS));
     // FX-J gated the whole pass on `deferred === undefined ? undefined : ...`.
     expect(body, "the projection must not be flag-selected").toMatch(
       /const shipped = shippedSurfaces\(returned\);/,
@@ -511,17 +609,21 @@ describe("FX-K static ordering fence: every booking producer is classified, and 
     expect(body, "no producer may be gated on a deferral sentinel")
       .not.toMatch(/shipped !== undefined/);
     // The pass's own caller must build the bookings object unconditionally.
-    const caller = withoutComments(topLevelFunctionBody("dedupeTrimAndPersist"));
+    const caller = withoutComments(functionBody("dedupeTrimAndPersist"));
     expect(caller).toMatch(/const pendingBookings: PendingPackBookings = \{/);
     expect(caller, "FX-K: the booking position must not depend on sfDemoteEnabled()")
       .not.toMatch(/sfDemoteEnabled\(\)\s*$/m);
-    // And the retired pre-seam booking site must stay retired.
-    expect(SOURCE, "bookPreSeamPackServeState was collapsed into the single pass (FX-K)")
-      .not.toContain("bookPreSeamPackServeState");
+    // And the retired pre-seam booking site must stay retired, in every module.
+    for (const m of MODULES) {
+      expect(
+        m.source.includes("bookPreSeamPackServeState"),
+        `bookPreSeamPackServeState was collapsed into the single pass (FX-K) but reappears in ${m.file}`,
+      ).toBe(false);
+    }
   });
 
   it("the shipped pass derives every booking from ONE `shippedSurfaces` projection", () => {
-    const body = topLevelFunctionBody(SHIPPED_PASS);
+    const body = functionBody(SHIPPED_PASS);
     const projectionAt = body.indexOf("shippedSurfaces(returned)");
     expect(projectionAt, "the pass must compute shippedSurfaces(returned)").toBeGreaterThan(-1);
     expect(
@@ -534,14 +636,24 @@ describe("FX-K static ordering fence: every booking producer is classified, and 
       expect(at, `${producer} must be booked AFTER the projection`).toBeGreaterThan(projectionAt);
     }
     // Every call site is dedupeTrimAndPersist's (the normal exit and the
-    // byte-budget fallback exit, both asserted above).
-    expect(callSites(SOURCE, SHIPPED_PASS))
-      .toBe(callSites(topLevelFunctionBody("dedupeTrimAndPersist"), SHIPPED_PASS));
+    // byte-budget fallback exit, both asserted above) — across ALL modules.
+    const allPassCalls = collectCalls(MODULES, [SHIPPED_PASS]);
+    const dedupeSpan = functionSpan("dedupeTrimAndPersist");
+    const inDedupe = allPassCalls.filter(
+      (c) => c.file === dedupeSpan.module.file && c.offset >= dedupeSpan.start && c.offset < dedupeSpan.end,
+    );
+    expect(allPassCalls.length, "bookShippedPackServeState may only be called from dedupeTrimAndPersist")
+      .toBe(inDedupe.length);
+    expect(inDedupe.length).toBeGreaterThan(0);
   });
 
   it("`shippedSurfaces` is the only definition of 'what this response shipped', reused rather than re-derived by every consumer", () => {
-    expect((SOURCE.match(/^function shippedSurfaces\(/m) ?? []).length).toBe(1);
-    expect(SOURCE).toMatch(/return codeTaskPackSurfaces\(result\.surfaces\)\.filter\(hasServedCode\);/);
+    const definitions = MODULES.flatMap((m) => m.functions.filter((f) => f.name === "shippedSurfaces"));
+    expect(definitions.length, "exactly one shippedSurfaces definition across the engine").toBe(1);
+    expect(functionBody("shippedSurfaces")).toMatch(/return primaryEnumContextRows\(servedBodySurfaces\(result\)\);/);
+    expect(functionBody("servedBodySurfaces")).toMatch(/return codeTaskPackSurfaces\(result\.surfaces\)\.filter\(hasServedCode\);/);
+    expect(collectCalls(MODULES, ["servedBodySurfaces"])).toHaveLength(1);
+    expect(callsOfIn("servedBodySurfaces", "shippedSurfaces")).toHaveLength(1);
     // FX-K (round-15 finding 3): the certified-working-set writer used to take
     // its OWN projection, over `trimmed` rather than over the pack that ships.
     // It now receives the one list, so `rememberCertifiedWorkingSet` itself has
@@ -557,28 +669,60 @@ describe("FX-K static ordering fence: every booking producer is classified, and 
     // shipped", is exactly what this test's own name asks for; a call site
     // duplicating the FILTER LOGIC instead (the anti-pattern round-15 finding 3
     // fixed) would still be caught by the single-definition assertion above.
-    expect(callSites(SOURCE, "shippedSurfaces")).toBe(2);
-    expect(callSites(topLevelFunctionBody("rememberCertifiedWorkingSet"), "shippedSurfaces")).toBe(0);
+    expect(collectCalls(MODULES, ["shippedSurfaces"]).length).toBe(2);
+    expect(callsOfIn("shippedSurfaces", "rememberCertifiedWorkingSet").length).toBe(0);
     expect(
-      withoutComments(topLevelFunctionBody("rememberCertifiedWorkingSet")),
+      withoutComments(functionBody("rememberCertifiedWorkingSet")),
       "the certified working set must consume the list it is handed",
     ).toMatch(/const surfaces = shipped;/);
     expect(
-      callSites(topLevelFunctionBody("buildAnswerTaskPack"), "shippedSurfaces"),
+      callsOfIn("shippedSurfaces", "buildAnswerTaskPack").length,
       "the second call site is buildAnswerTaskPack's post-augmenter re-booking",
     ).toBe(1);
   });
 
   it("rejects the cheapest ways to smuggle a producer past the textual check", () => {
-    const stripped = withoutComments(SOURCE);
-    for (const producer of PRODUCERS) {
-      // `const book = recordServedSurfaces;` / `= recordServedSurfaces,`
-      const ALIAS_FORMS = new RegExp(`=\\s*${producer.name}\\s*[;,)\\]}]`);
-      expect(
-        ALIAS_FORMS.test(stripped),
-        `${producer.name} must not be aliased — this fence counts call sites textually`,
-      ).toBe(false);
+    for (const m of MODULES) {
+      const stripped = withoutComments(m.source);
+      for (const producer of PRODUCERS) {
+        // `const book = recordServedSurfaces;` / `= recordServedSurfaces,`
+        const ALIAS_FORMS = new RegExp(`=\\s*${producer.name}\\s*[;,\\)\\]}]`);
+        expect(
+          ALIAS_FORMS.test(stripped),
+          `${producer.name} must not be aliased in ${m.file} — this fence counts call sites`,
+        ).toBe(false);
+      }
     }
+  });
+
+  it("regression: a new unclassified producer call in ANOTHER engine module is detected", () => {
+    // A synthetic module — nothing is written to disk — shaped like a real
+    // engine owner module, with one allowlisted call and one NEW call from an
+    // unclassified function. The audit must report exactly the new site.
+    const legitimate = parseModule("servedStateAndEdits.ts", [
+      "export function bookShippedPackServeState(ws: string) {",
+      "  recordServedSurfaces(ws, ws, [], 0);",
+      "}",
+    ].join("\n"));
+    const synthetic = parseModule("syntheticForeign.ts", [
+      "export function someNewHelper(ws: string) {",
+      "  namespace.recordServedSurfaces(ws, ws, [{ path: 'a' }], 0);",
+      "}",
+    ].join("\n"));
+    const records = collectCalls([legitimate, synthetic], ["recordServedSurfaces"]);
+    expect(records.length).toBe(2);
+    const classified = records.filter((r) =>
+      PRODUCERS.find((p) => p.name === "recordServedSurfaces")!
+        .sites.some((s) => s.enclosing === r.owner));
+    expect(classified.length).toBe(1);
+    expect(classified[0]!.owner).toBe(SHIPPED_PASS);
+    const smuggled = records.find((r) => r.owner === "someNewHelper");
+    expect(smuggled, "the new call must be found").toBeDefined();
+    expect(
+      PRODUCERS.find((p) => p.name === "recordServedSurfaces")!.sites
+        .some((s) => s.enclosing === smuggled!.owner),
+      "and it must be REJECTED as unclassified by the fence's own predicate",
+    ).toBe(false);
   });
 
   it("the ordering prose in the sibling modules names the real position", () => {
@@ -590,7 +734,7 @@ describe("FX-K static ordering fence: every booking producer is classified, and 
       // Round-14 finding 1's second half: both files claimed the seam ran
       // "immediately before `finalizePackServeState`". It runs AFTER it.
       expect(
-        /immediately\s+\*?\s*\/?\/?\s*before `finalizePackServeState`/.test(text.replace(/\n\s*(?:\/\/|\*)\s*/g, " ")),
+        /immediately\s+\*?\s*\/?\s*\/?\s*before `finalizePackServeState`/.test(text.replace(/\n\s*(?:\/\/|\*)\s*/g, " ")),
         `${label} must not claim the seam runs immediately before finalizePackServeState`,
       ).toBe(false);
       expect(text, `${label} must name the pass that actually books`).toContain(SHIPPED_PASS);

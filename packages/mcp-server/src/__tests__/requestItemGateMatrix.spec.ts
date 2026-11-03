@@ -603,6 +603,11 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
 // ---------------------------------------------------------------------------
 // R-B3 ruling 5: a served-but-only-mentioned-in-passing absence never claims
 // "no occurrence" (the term DOES occur — in a served comment).
+// STRUCTURAL FIXTURE SCOPE (2026-11-04): this cell isolates incidental-mention
+// absence wording WITHIN a caller-declared fixture scope, so its first query
+// declares the known-present src/ directory; the default unanchored-prose
+// safety boundary (bodyless candidates) is covered separately
+// (naturalLanguageFirstHop.spec.ts). All other cells unchanged.
 // ---------------------------------------------------------------------------
 
 for (const config of CONFIG_NAMES as readonly ConfigName[]) {
@@ -621,7 +626,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       servers.push(server);
       try {
         await server.initialize();
-        const chain = await follow(server, { tool: "tl_read_file", arguments: { query: "1. How are refunds processed?\n2. How is inventory replenished?", task: { epoch: "new", profile: "answer" } } }, ws);
+        const chain = await follow(server, { tool: "tl_read_file", arguments: { query: "1. How are refunds processed?\n2. How is inventory replenished?", targets: [{ path: "src" }], task: { epoch: "new", profile: "answer" } } }, ws);
         const texts = chain.hops.flatMap((hop) => disclosures(hop.body)).filter((text) => /inventory|replenish/i.test(text) && ABSENCE_RE.test(text));
         expect(texts.length, JSON.stringify(chain.hops.map((hop) => hop.body?.decision))).toBeGreaterThan(0);
         expect(texts.filter((text) => /no occurrence/i.test(text)), JSON.stringify(texts)).toEqual([]);

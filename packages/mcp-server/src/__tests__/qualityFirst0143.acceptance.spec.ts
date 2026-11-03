@@ -123,6 +123,38 @@ function itFor(id: string): typeof it | typeof it.fails {
   return PENDING_FIXES[id] ? it.fails : it;
 }
 
+// STRUCTURAL FIXTURE SCOPE (2026-11-04): these ids isolate clause retention,
+// false-absence prevention, partial-read window completion and multi-module
+// coverage WITHIN a caller-declared fixture scope (every one of their
+// buildWorkspace variants creates src/). The default unanchored-prose safety
+// boundary — bodyless candidate locations — is covered separately (see
+// naturalLanguageFirstHop.spec.ts) and is NOT relaxed here; only the FIRST
+// fresh-scope tl_read_file declares src/ or the known cache module.
+// Continuation/re-pack calls and every other scenario pass through
+// unchanged.
+const STRUCTURAL_SCOPES: Readonly<Record<string, string>> = {
+  Q01: "src", Q02: "src", Q03: "src/cache.ts", Q05: "src",
+};
+
+function declaredScopeServer(server: ServerHandle, id: string): ServerHandle {
+  const scope = STRUCTURAL_SCOPES[id];
+  if (scope === undefined) return server;
+  return {
+    ...server,
+    async callTool(name: string, args: Record<string, unknown>) {
+      const task = args["task"] as { epoch?: unknown } | undefined;
+      const declaresScope =
+        name === "tl_read_file"
+        && typeof args["query"] === "string"
+        && task?.epoch === "new"
+        && args["targets"] === undefined
+        && args["path"] === undefined
+        && args["paths"] === undefined;
+      return server.callTool(name, declaresScope ? { ...args, targets: [{ path: scope }] } : args);
+    },
+  };
+}
+
 const tmpDirs: string[] = [];
 const servers: ServerHandle[] = [];
 
@@ -167,7 +199,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
           await currentServer.initialize();
 
           const ctx: ScenarioContext = {
-            server: currentServer,
+            server: declaredScopeServer(currentServer, scenario.id),
             ws,
             // S01 ("a server RESTART mid-chain"): kills the current server and
             // starts a fresh one on the SAME workspace/config, tracked for the

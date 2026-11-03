@@ -277,6 +277,25 @@ describe("natural query public retrieval and completion", () => {
     });
   },90000);
 
+  it("does not borrow a sibling method's computed body to prove the selected method", async () => {
+    await fixture({
+      "src/limits.ts": "export const RETRY_LIMIT = 7; export class Alpha { retry(attempts: number): boolean { return attempts < RETRY_LIMIT; } }\n",
+      "src/scheduler.ts": "import { RETRY_LIMIT } from './limits.js';\nexport class Beta {\n  retry(attempts: number): boolean {\n    return false;\n  }\n}\n",
+      "src/worker.ts": "import { Beta } from './scheduler.js';\nexport function finishAttempt(attempts: number) {\n  return new Beta().retry(attempts);\n}\n",
+    }, async (server, workspace) => {
+      const query = "How does the scheduler decide whether to retry: what is the retry limit constant's configured value, and who calls the retry decision?";
+      const first = await server.call("tl_read_file", {cwd:workspace,query,task:{epoch:"new",profile:"answer"}});
+      expect(decision(first).kind, first.text).toBe("await_input");
+      const selected = await server.call("tl_read_file", {cwd:workspace,query,targets:[
+        {path:"src/scheduler.ts",range:"3-5"}, {path:"src/limits.ts",range:"1-1"},
+      ],task:{handle:taskHandle(first)}});
+      expect(bodyText(selected), selected.text).toContain("return false;");
+      expect(bodyText(selected), selected.text).toContain("return attempts < RETRY_LIMIT;");
+      expect(decision(selected).kind, selected.text).not.toMatch(/^act\./);
+      expect(decision(selected).certificate).toBeUndefined();
+    });
+  }, 90000);
+
   it("isolates unrelated syntax errors while preserving owner and scope failures",async()=>{
     const one="// badges are validated here.\nexport function validateBadge(badge: string): boolean {\n  return badge.length > 2;\n}\n";
     const two="// queued totals are computed here.\nexport function computeQueuedTotals(records: number[]): number {\n  return records.length * 2;\n}\n";

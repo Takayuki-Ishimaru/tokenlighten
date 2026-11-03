@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import * as path from "node:path";
 import { makeSmallTaskWorkspace, startSmallTaskServer, type SmallTaskServer } from "./helpers/smallTaskServer.js";
 import { rmDirWithRetry } from "./helpers/rmDirWithRetry.js";
 
@@ -74,13 +75,15 @@ describe("natural-language first hop does not certify guessed implementations", 
 describe("confirmed query subjects retain targeted routes", () => {
   let server: SmallTaskServer;
   let workspace: string;
+  let fixtureRoot: string;
   beforeAll(async () => {
-    workspace = makeSmallTaskWorkspace("tl-confirmed-subject-", {
+    fixtureRoot = makeSmallTaskWorkspace("tl-confirmed-subject-", Object.fromEntries(Object.entries({
       "package.json": JSON.stringify({ name: "@tools/token-lighten" }),
       "src/TokenLighten.ts": "export class TokenLighten { choose() { return 1; } }\n",
       "src/OrderOrchestrator.ts": "export class OrderOrchestrator { place() { return 2; } }\n",
       "src/retry.ts": "export function retry() { return 3; }\nexport function retryDelay() { return 100; }\n",
       "src/run.ts": "export function run() { return 4; }\n",
+      "src/check.ts": "export function 検証(value: number) { return value > 0; }\n",
       "src/Sum.ts": "export function Sum() { return 5; }\n",
       "src/HTTP.ts": "export function HTTP() { return 6; }\n",
       "include/EKF.hpp": "namespace nav { class EKF { public: EKF(); bool healthy(); }; }\n",
@@ -88,19 +91,29 @@ describe("confirmed query subjects retain targeted routes", () => {
       "src/MAVLink.ts": "export class MAVLink { encode() { return 1; } }\n",
       "src/redirect.ts": "export function redirect() { return 'UNRELATED_REDIRECT_BODY'; }\n",
       "src/requests.py": "class Session:\n    def rebuild_method(self, method):\n        return method\n",
-    });
+    }).map(([file, text]) => [`作業/${file}`, text])));
+    workspace = path.join(fixtureRoot, "作業");
     server = await startSmallTaskServer(workspace, { env: { TL_BACKGROUND_INDEX: "off", TL_LEGACY_INPUT: "accept" } });
   }, 90000);
-  afterAll(async () => { await server?.kill(); if (workspace) await rmDirWithRetry(workspace); });
+  afterAll(async () => { await server?.kill(); if (fixtureRoot) await rmDirWithRetry(fixtureRoot); });
 
   it.each([
     ["Explain OrderOrchestrator briefly.", "OrderOrchestrator"],
     ["Give me a quick overview of OrderOrchestrator and the order it calls payment / inventory / shipping in.", "OrderOrchestrator"],
     ["Explain how OrderOrchestrator places an order.", "OrderOrchestrator"],
+    ["Explain what OrderOrchestrator does.", "OrderOrchestrator"],
     ["Explain the EKF class.", "EKF"],
     ["shopflow に最近入った OrderOrchestrator っていうデカいクラスを短く説明してほしい。", "OrderOrchestrator"],
     ["Explain the retry function, including the exact maximum number of attempts.", "retry"],
     ["Explain run", "run"],
+    ["Who calls retry?", "retry"],
+    ["Where is run used?", "run"],
+    ["What value does run return?", "run"],
+    ["What retry delay does retry use?", "retry"],
+    ["Under what condition does run stop?", "run"],
+    ["Who calls 検証?", "検証"],
+    ["Under what condition does 検証 return true?", "検証"],
+    ["Where is OrderOrchestrator defined?", "OrderOrchestrator"],
     ["Fix Sum so drains count down.", "Sum"],
   ])("keeps a declared direct subject usable: %s", async (query, name) => {
     const result = await server.call("tl_read_file", { cwd: workspace, query, task: { epoch: "new" } });
@@ -109,17 +122,39 @@ describe("confirmed query subjects retain targeted routes", () => {
     expect(result.text).toContain(name);
   }, 90000);
 
+  it("preserves a current same-task certificate that began at caller-selected targets", async () => {
+    const query = "Explain the behavior.";
+    const first = await server.call("tl_read_file", {
+      cwd: workspace, lane: "selected-origin", query,
+      targets: [{ path: "src/retry.ts" }], task: { epoch: "new", profile: "answer" },
+    });
+    expect((first.body.decision as { kind?: string })?.kind, first.text).toBe("act.answer");
+    const task = (first.body.task as { id?: string })?.id;
+    const repeated = await server.call("tl_read_file", { cwd: workspace, lane: "selected-origin", query, task: { handle: task } });
+    expect((repeated.body.decision as { kind?: string })?.kind, repeated.text).toBe("act.answer");
+    expect(repeated.text).not.toContain('"next":');
+    const fresh = await server.call("tl_read_file", { cwd: workspace, lane: "selected-origin", query, task: { epoch: "new", profile: "answer" } });
+    expect((fresh.body.decision as { code?: string })?.code, fresh.text).toBe("name-intended-target");
+    expect(fresh.body.evidence ?? [], fresh.text).toEqual([]);
+  }, 90000);
+
   it.each([
     "How does TokenLighten choose a continuation?",
     "Find why navigation health stays normal when EKF fails; reuse the MAVLink encoder.",
     "When following redirects, how does requests change the HTTP method and decide whether to remove authentication headers?",
     "How does requests choose the redirect method?",
     "How does requests choose the redirect function?",
+    "What value does requests choose for the redirect function?",
+    "Which value does requests use for the redirect method?",
     "Explain the MissingType class.",
   ])("does not make incidental or absent declarations into request anchors: %s", async query => {
     const result = await server.call("tl_read_file", { cwd: workspace, query, task: { epoch: "new" } });
     expect(result.isError, result.text).toBe(false);
     expect((result.body.decision as { code?: string })?.code, result.text).toBe("name-intended-target");
+    const unresolved = (result.body.decision as { unresolved?: Array<{ reason: string }> }).unresolved;
+    expect(unresolved?.length, result.text).toBeGreaterThan(0);
+    expect(unresolved!.length).toBeLessThanOrEqual(4);
+    expect(unresolved!.every(item => item.reason.length > 0)).toBe(true);
     expect(result.body.evidence ?? []).toEqual([]);
     expect(result.text).not.toMatch(/"certificate":|"next":|"body":|UNRELATED_REDIRECT_BODY/);
   }, 90000);

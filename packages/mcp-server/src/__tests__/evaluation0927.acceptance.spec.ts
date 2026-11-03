@@ -88,6 +88,30 @@ function itFor(id: string): typeof it | typeof it.fails {
 const tmpDirs: string[] = [];
 const servers: ServerHandle[] = [];
 
+// Declared fixture source scope (v0.16.6 unanchored-body confirmation) for the
+// V02/V05 fixture-directory walks only; the unanchored discovery guard itself
+// stays covered by naturalLanguageFirstHop.spec.ts (qualityFirst0143 pattern).
+const STRUCTURAL_SCOPES: Readonly<Record<string, string>> = { V02: ".", V05: "src" };
+
+function declaredScopeServer(server: ServerHandle, id: string): ServerHandle {
+  const scope = STRUCTURAL_SCOPES[id];
+  if (scope === undefined) return server;
+  return {
+    ...server,
+    async callTool(name: string, args: Record<string, unknown>) {
+      const task = args["task"] as { epoch?: unknown } | undefined;
+      const declaresScope =
+        name === "tl_read_file"
+        && typeof args["query"] === "string"
+        && task?.epoch === "new"
+        && args["targets"] === undefined
+        && args["path"] === undefined
+        && args["paths"] === undefined;
+      return server.callTool(name, declaresScope ? { ...args, targets: [{ path: scope }] } : args);
+    },
+  };
+}
+
 // Every server is started inside one test (a fresh `startDevServer` per
 // scenario, never shared across `it`s); stop it — and any restart/extra
 // write-server the scenario pushed alongside it — when that test ends, so
@@ -130,7 +154,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
           await currentServer.initialize();
 
           const ctx: ScenarioContext = {
-            server: currentServer,
+            server: declaredScopeServer(currentServer, scenario.id),
             ws,
             async restartServer(): Promise<ServerHandle> {
               await currentServer.kill();

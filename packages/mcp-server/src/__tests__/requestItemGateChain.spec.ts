@@ -22,6 +22,14 @@
  *
  * Neutral generated fixtures; nothing in the product keys on any identifier,
  * path or phrase used here (brief-common.md rule 5).
+ *
+ * STRUCTURAL FIXTURE SCOPE (2026-11-04): WINDOW/SLIVER/UNREADABLE/JA isolate
+ * clause retention, false-absence prevention, partial-read window completion
+ * and JA clause coverage WITHIN a caller-declared fixture scope, so their
+ * first query declares the known-present src/ directory (targets:[{path}]).
+ * The default unanchored-prose safety boundary (bodyless candidate locations)
+ * is covered separately (naturalLanguageFirstHop.spec.ts), not here. RECALL
+ * keeps its explicit full-length range control unchanged.
  */
 import { afterAll, describe, expect, it } from "vitest";
 import * as fs from "node:fs";
@@ -170,7 +178,7 @@ for (const config of CONFIG_NAMES) {
   describe(`request-item completion gate — chain classes (config=${config})`, () => {
     it("WINDOW: the unserved body of a partly served file is read through its own window, never a bare tree", async () => {
       await withWorkspace(config, "win", (ws) => write(ws, "src/store.ts", largeStore(true)), async (server, ws) => {
-        const { follow } = await chainWithRepack(server, ws, { query: EN_QUERY, task: { epoch: "new", profile: "answer" } });
+        const { follow } = await chainWithRepack(server, ws, { query: EN_QUERY, targets: [{ path: "src" }], task: { epoch: "new", profile: "answer" } });
         expect(follow.capped).toBe(false);
         expect(treeHops(follow), JSON.stringify(follow.hops.map((h) => h.call))).toBe(0);
         expect(strandedHops(follow)).toEqual([]);
@@ -187,7 +195,7 @@ for (const config of CONFIG_NAMES) {
 
     it("SLIVER: never certified off a served interface line, never certified absent from it", async () => {
       await withWorkspace(config, "slv", (ws) => write(ws, "src/store.ts", largeStore(false)), async (server, ws) => {
-        const { follow, repack } = await chainWithRepack(server, ws, { query: EN_QUERY, task: { epoch: "new", profile: "answer" } });
+        const { follow, repack } = await chainWithRepack(server, ws, { query: EN_QUERY, targets: [{ path: "src" }], task: { epoch: "new", profile: "answer" } });
         for (const chain of [follow, repack].filter((c): c is ChainResult => c !== undefined)) {
           expect(absencesNaming(chain, ["refund"]), "the implemented concern must never be called absent").toEqual([]);
           if (finalKind(chain) === "act.answer") expect(served(follow, "processRefund") || served(chain, "processRefund")).toBe(true);
@@ -207,7 +215,7 @@ for (const config of CONFIG_NAMES) {
         write(ws, "src/format.ts", "export function formatCents(cents: number): string {\n  return (cents / 100).toFixed(2);\n}\n");
         write(ws, "README.md", "# Shop fixture\n\nA small generated fixture.\n");
       }, async (server, ws) => {
-        const { follow, repack } = await chainWithRepack(server, ws, { query: EN_QUERY, task: { epoch: "new", profile: "answer" } });
+        const { follow, repack } = await chainWithRepack(server, ws, { query: EN_QUERY, targets: [{ path: "src" }], task: { epoch: "new", profile: "answer" } });
         expect(follow.capped).toBe(false);
         expect(repack?.capped ?? false).toBe(false);
         for (const chain of [follow, repack].filter((c): c is ChainResult => c !== undefined)) {
@@ -238,7 +246,7 @@ for (const config of CONFIG_NAMES) {
         "}",
         "",
       ].join("\n")), async (server, ws) => {
-        const { follow } = await chainWithRepack(server, ws, { query: "キャッシュが期限切れの場合の処理と、無効化する処理を説明してください", task: { epoch: "new", profile: "answer" } });
+        const { follow } = await chainWithRepack(server, ws, { query: "キャッシュが期限切れの場合の処理と、無効化する処理を説明してください", targets: [{ path: "src" }], task: { epoch: "new", profile: "answer" } });
         expect(finalKind(follow)).toBe("act.answer");
         expect(served(follow, "class Cache")).toBe(true);
         expect(absencesNaming(follow, ["キャッシュ", "期限"])).toEqual([]);

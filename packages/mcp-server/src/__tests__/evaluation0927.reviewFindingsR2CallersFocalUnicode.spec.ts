@@ -67,8 +67,18 @@ async function spawnedServer(ws: string): Promise<ServerHandle> {
   return s;
 }
 
-async function ask(ws: string, query: string, hopCap = 20): Promise<ChainResult> {
-  const s = await spawnedServer(ws);
+async function ask(ws: string, query: string, hopCap = 20, declaredScope?: string): Promise<ChainResult> {
+  const spawned = await spawnedServer(ws);
+  // Declared fixture source scope (v0.16.6 unanchored-body confirmation): isolates
+  // this fixture's concept/facet handling; the guard stays with naturalLanguageFirstHop.
+  const s: ServerHandle = declaredScope === undefined ? spawned : {
+    ...spawned,
+    callTool: (name: string, args: Record<string, unknown>) =>
+      spawned.callTool(name, name === "tl_read_file" && typeof args["query"] === "string"
+        && (args["task"] as { epoch?: unknown } | undefined)?.epoch === "new"
+        && args["targets"] === undefined && args["path"] === undefined && args["paths"] === undefined
+        ? { ...args, targets: [{ path: declaredScope }] } : args),
+  };
   return followNextToEnd(
     s,
     { tool: "tl_read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws } },
@@ -346,7 +356,7 @@ describe("kanji concept fallback — bestConceptAnchoredCandidate is bounded by 
       "src/zzz_taimuauto.ts",
       "export function defaultTimeoutMs(): number {\n  // the default timeout applied to every outbound request\n  return 4000;\n}\n",
     );
-    const chain = await ask(ws, "既定の待ち時間はいくつですか。", 20);
+    const chain = await ask(ws, "既定の待ち時間はいくつですか。", 20, "src");
     const servedPaths = chain.hops
       .flatMap((h) => (h.response?.["evidence"] as Array<Record<string, unknown>> | undefined) ?? [])
       .map((e) => String(e["path"] ?? ""));

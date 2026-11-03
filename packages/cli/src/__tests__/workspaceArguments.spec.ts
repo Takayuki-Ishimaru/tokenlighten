@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, symlinkSync, lstatSync, readlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync, symlinkSync, lstatSync, readlinkSync } from "node:fs";
 import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,7 +8,11 @@ function snapshot(root: string): Record<string, string> {
   const result: Record<string, string> = {};
   for (const entry of readdirSync(root, { withFileTypes: true, recursive: true })) {
     const file = join(entry.parentPath, entry.name);
-    result[relative(root, file)] = entry.isDirectory() ? "<directory>" : readFileSync(file).toString("base64");
+    const key = relative(root, file);
+    // Symlinked directories are not followed by a recursive readdir; record the
+    // link itself so an alias fixture cannot hide a changed target in a
+    // before/after comparison.
+    result[key] = entry.isSymbolicLink() ? "<symlink>" : entry.isDirectory() ? "<directory>" : readFileSync(file).toString("base64");
   }
   return result;
 }
@@ -21,7 +25,12 @@ describe("workspace CLI argument contract", () => {
   let previousCwd: string;
   const versionCheck = vi.fn(() => "test");
   beforeEach(() => {
-    root = mkdtempSync(join(tmpdir(), "tl-workspace-args-"));
+    // The CLI canonicalizes --root with realpathSync, so the fixture root must
+    // be canonical too: on macOS tmpdir() is /var/... (a symlink to
+    // /private/var/...), and behind a symlinked TMPDIR on Linux, an un-canonical
+    // fixture path would differ from the plan's workspaceRoot for that reason
+    // alone, not because of a production regression.
+    root = realpathSync(mkdtempSync(join(tmpdir(), "tl-workspace-args-")));
     output = ""; errors = "";
     previousExit = process.exitCode;
     previousCwd = process.cwd();
@@ -73,6 +82,45 @@ describe("workspace CLI argument contract", () => {
     expect(plan.workspaceRoot).toBe(workspace);
     expect(versionCheck).not.toHaveBeenCalled();
     expect(snapshot(root)).toEqual(before);
+  });
+
+  it("resolves an intermediate directory alias to the canonical root in a dry-run plan and writes nothing", async (context) => {
+    // Regression (Mac sourceCI4): --root may reach the workspace through a
+    // symlinked DIRECTORY in the middle of the path (/var -> /private/var on
+    // macOS; any alias on Linux). The plan must report the canonical root the
+    // CLI actually operates on, and a dry run must still touch no config and
+    // create no registry entry.
+    const real = join(root, "real");
+    const workspace = join(real, "nested", "workspace");
+    mkdirSync(workspace, { recursive: true });
+    writeFileSync(join(workspace, "AGENTS.md"), "User instructions\n");
+    mkdirSync(join(workspace, ".codex"), { recursive: true });
+    writeFileSync(join(workspace, ".codex", "config.toml"), "model = 'gpt-5'\n");
+    const alias = join(root, "alias");
+    try { symlinkSync(real, alias, "dir"); }
+    catch (error: unknown) {
+      if (["EPERM", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "")) { context.skip(); return; }
+      throw error;
+    }
+    const aliasedWorkspace = join(alias, "nested", "workspace");
+    const before = snapshot(root);
+    // Snapshot the CANONICAL side too: a before/after pair taken through the
+    // alias could agree even if the CLI had written via the alias path.
+    const beforeReal = snapshot(real);
+    await run(["setup", "--root", aliasedWorkspace, "--clients", "codex", "--dry-run", "--json"]);
+    expect(process.exitCode).toBe(0);
+    const plan = JSON.parse(output);
+    expect(plan.dryRun).toBe(true);
+    expect(plan.workspaceRoot).toBe(workspace);
+    expect(plan.workspaceRoot).not.toBe(aliasedWorkspace);
+    expect(versionCheck).not.toHaveBeenCalled();
+    // Configs and the registry are untouched: same tree, same bytes on the
+    // canonical side, and no registry.toml appeared under the fixture root.
+    expect(snapshot(root)).toEqual(before);
+    expect(snapshot(real)).toEqual(beforeReal);
+    expect(readFileSync(join(workspace, "AGENTS.md"), "utf8")).toBe("User instructions\n");
+    expect(readFileSync(join(workspace, ".codex", "config.toml"), "utf8")).toBe("model = 'gpt-5'\n");
+    expect(Object.keys(snapshot(root))).not.toContain("registry.toml");
   });
 
   it("validates values before dry-run", async () => {

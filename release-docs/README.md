@@ -66,7 +66,7 @@ This directory contains the public documentation for TokenLighten v0.16.6.
 
 ## Release scope
 
-The v0.16.5 public release includes four platform install archives (CLI,
+The v0.16.6 public release includes four platform install archives (CLI,
 MCP server and a bundled Node.js runtime), the CLI and MCP server as source
 with selected developer tests, and the VS Code extension. The desktop
 application is not included.

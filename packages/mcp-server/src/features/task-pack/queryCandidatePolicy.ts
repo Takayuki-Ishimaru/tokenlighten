@@ -1,5 +1,6 @@
 import type { Candidate, LocateOutput, TaskDecision, TaskProfileBinding } from "@tokenlighten/types";
 import type { TaskPackArgs, TaskPackResult } from "./model.js";
+import { requestAnchorsOf } from "./anchorFirst.js";
 
 /** A location proposal is not a claim that its implementation answers the task. */
 export const QUERY_CANDIDATE_LIMIT = 6;
@@ -17,7 +18,8 @@ export interface QueryCandidateAnchors {
 export function hasQueryCodeAnchor(query: string): boolean {
   const source = query.replace(/https?:\/\/\S+/g, "");
   const names = source.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) ?? [];
-  return names.some(name => /^[a-z_$]/.test(name) && /[a-z0-9][A-Z]/.test(name)
+  return requestAnchorsOf(query).literals.length > 0
+    || names.some(name => /^[a-z_$]/.test(name) && /[a-z0-9][A-Z]/.test(name)
     || /[A-Za-z0-9]_[A-Za-z0-9]|^_[A-Za-z]/.test(name))
     || /\b[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+(?![\w$.])/.test(source)
     || /\b[A-Za-z_$][\w$]*\(/.test(source)

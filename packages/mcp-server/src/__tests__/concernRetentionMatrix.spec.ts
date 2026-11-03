@@ -37,6 +37,14 @@
  * this file's; wording fixtures to avoid tripping it keeps this file's own
  * oracle isolated to what THIS fix (retention + the completion gate) is
  * responsible for.
+ *
+ * 2026-11-04: retention/completion cells now declare their fixture scope via
+ * `targets` (the concern files actually written into that workspace -- an
+ * absent concern's file is never offered), so this matrix keeps testing
+ * retention/completion instead of target discovery. Default unanchored
+ * discovery safety (bodyless unverified candidates for unsupported prose) is
+ * owned by naturalLanguageFirstHop/naturalQueryRetrieval. The existing
+ * unanchored JA known-limit cell retains its original request and oracle.
  */
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import * as fs from "node:fs";
@@ -276,7 +284,7 @@ describe("concern retention — MATRIX-B: concern count x presence", () => {
           const ws = buildConcernWorkspace(concerns);
           const query = buildCompoundQuery("Explain", concerns);
           const s = await server(ws, config);
-          const chain = await followNextToEnd(s, { tool: "tl_read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws } }, { cwd: ws, hopCap: 24 });
+          const chain = await followNextToEnd(s, { tool: "tl_read_file", arguments: { query, targets: concerns.map((c) => ({ path: c.relPath })), task: { epoch: "new", profile: "answer" }, cwd: ws } }, { cwd: ws, hopCap: 24 });
           const ok = reachedAnswerWithCoverage(chain, concerns.map((c) => c.evidence));
           expect(
             ok,
@@ -291,7 +299,7 @@ describe("concern retention — MATRIX-B: concern count x presence", () => {
           const ws = buildConcernWorkspace(present); // the absent concern's own file is NEVER created
           const query = buildCompoundQuery("Explain", concerns);
           const s = await server(ws, config);
-          const chain = await followNextToEnd(s, { tool: "tl_read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws } }, { cwd: ws, hopCap: 24 });
+          const chain = await followNextToEnd(s, { tool: "tl_read_file", arguments: { query, targets: present.map((c) => ({ path: c.relPath })), task: { epoch: "new", profile: "answer" }, cwd: ws } }, { cwd: ws, hopCap: 24 });
 
           for (const c of present) {
             expect(anyEvidenceContains(chain, c.evidence), `present concern ${c.phrase} must be served somewhere in the chain`).toBe(true);
@@ -372,7 +380,7 @@ describe("concern retention — MATRIX-A sample: every lead once, every joiner o
           const ws = buildConcernWorkspace([a, b]);
           const query = buildSampleQuery(lead, joinerIndex, a.phrase, b.phrase);
           const s = await server(ws, config);
-          const chain = await followNextToEnd(s, { tool: "tl_read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws } }, { cwd: ws, hopCap: 20 });
+          const chain = await followNextToEnd(s, { tool: "tl_read_file", arguments: { query, targets: [a, b].map((c) => ({ path: c.relPath })), task: { epoch: "new", profile: "answer" }, cwd: ws } }, { cwd: ws, hopCap: 20 });
           expect(
             reachedAnswerWithCoverage(chain, [a.evidence, b.evidence]),
             `query=${JSON.stringify(query)} evidenceA=${anyEvidenceContains(chain, a.evidence)} evidenceB=${anyEvidenceContains(chain, b.evidence)}`,
@@ -410,7 +418,7 @@ describe("concern retention — MATRIX-A2 sample: widened lead x joiner, 2nd con
           const ws = buildConcernWorkspace([present]);
           const query = buildSampleQuery(lead, joinerIndex, present.phrase, absent.phrase);
           const s = await server(ws, config);
-          const chain = await followNextToEnd(s, { tool: "tl_read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws } }, { cwd: ws, hopCap: 24 });
+          const chain = await followNextToEnd(s, { tool: "tl_read_file", arguments: { query, targets: [{ path: present.relPath }], task: { epoch: "new", profile: "answer" }, cwd: ws } }, { cwd: ws, hopCap: 24 });
           expect(anyEvidenceContains(chain, present.evidence), `present concern must be served: ${JSON.stringify(query)}`).toBe(true);
           const disclosures = collectDisclosureTexts(chain);
           const absentWords = absent.phrase.split(/\s+/u).filter((w) => w.length >= 4);
@@ -460,7 +468,7 @@ describe("concern retention — Japanese", () => {
       const ws = buildJaWorkspace();
       const query = "認証情報はどこで検証されますか。また、データベースのマイグレーションはどのように実行されますか。";
       const s = await server(ws, config);
-      const chain = await followNextToEnd(s, { tool: "tl_read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws } }, { cwd: ws, hopCap: 20 });
+      const chain = await followNextToEnd(s, { tool: "tl_read_file", arguments: { query, targets: CONCERN_POOL.slice(0, 2).map((c) => ({ path: c.relPath })), task: { epoch: "new", profile: "answer" }, cwd: ws } }, { cwd: ws, hopCap: 20 });
       const disclosures = collectDisclosureTexts(chain);
       const credentialTracked = disclosures.some((t) => /ri-1/u.test(t)) || anyEvidenceContains(chain, CONCERN_POOL[0]!.evidence);
       const migrationTracked = disclosures.some((t) => /ri-2/u.test(t)) || anyEvidenceContains(chain, CONCERN_POOL[1]!.evidence);
@@ -499,7 +507,7 @@ describe("concern retention — Japanese", () => {
       const ws = buildJaWorkspace();
       const query = "認証情報はどこで検証されますか。また、データベースのマイグレーションはどのように実行されますか。";
       const s = await server(ws, config);
-      const chain = await followNextToEnd(s, { tool: "tl_read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws } }, { cwd: ws, hopCap: 20 });
+      const chain = await followNextToEnd(s, { tool: "tl_read_file", arguments: { query, targets: CONCERN_POOL.slice(0, 2).map((c) => ({ path: c.relPath })), task: { epoch: "new", profile: "answer" }, cwd: ws } }, { cwd: ws, hopCap: 20 });
       expect(
         reachedAnswerWithCoverage(chain, [CONCERN_POOL[0]!.evidence, CONCERN_POOL[1]!.evidence]),
         `evidenceA=${anyEvidenceContains(chain, CONCERN_POOL[0]!.evidence)} evidenceB=${anyEvidenceContains(chain, CONCERN_POOL[1]!.evidence)}`,
@@ -536,7 +544,7 @@ describe("concern retention — server-level controls", () => {
       const ws = buildConcernWorkspace([CONCERN_POOL[0]!]);
       const query = `Explain how ${CONCERN_POOL[0]!.phrase}.`;
       const s = await server(ws, config);
-      const chain = await followNextToEnd(s, { tool: "tl_read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws } }, { cwd: ws, hopCap: 10 });
+      const chain = await followNextToEnd(s, { tool: "tl_read_file", arguments: { query, targets: [{ path: CONCERN_POOL[0]!.relPath }], task: { epoch: "new", profile: "answer" }, cwd: ws } }, { cwd: ws, hopCap: 10 });
       const idx = firstAnswerHopIndex(chain);
       expect(idx, `chain never reached act.answer: ${JSON.stringify(chain.hops.map((h) => h.response?.decision?.kind))}`).toBeDefined();
       expect(anyRequestItemGapNamed(chain)).toBe(false);
@@ -576,7 +584,7 @@ describe("concern retention — server-level controls", () => {
       );
       const query = `Explain how ${CONCERN_POOL[0]!.phrase} and what the README documentation says about the release process.`;
       const s = await server(ws, config);
-      const chain = await followNextToEnd(s, { tool: "tl_read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws } }, { cwd: ws, hopCap: 10 });
+      const chain = await followNextToEnd(s, { tool: "tl_read_file", arguments: { query, targets: [{ path: CONCERN_POOL[0]!.relPath }, { path: "README.md" }], task: { epoch: "new", profile: "answer" }, cwd: ws } }, { cwd: ws, hopCap: 10 });
       expect(anyEvidenceContains(chain, ["Release process"])).toBe(true);
     }, 60_000);
   }

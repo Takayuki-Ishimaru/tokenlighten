@@ -48,8 +48,11 @@ import {
 } from "../util/packServeLog.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+// `epochServedSurfaceEntries` moved out of the readCodeTaskPack.ts facade into
+// its engine owner when the task-pack was extracted; the source inspection
+// below must read the file that actually declares it.
 const SOURCE = fs.readFileSync(
-  path.resolve(HERE, "../features/task-pack/readCodeTaskPack.ts"),
+  path.resolve(HERE, "../features/task-pack/engine/epochEvidence.ts"),
   "utf8",
 );
 
@@ -133,7 +136,7 @@ describe("FX-K: the served-log emulation's refresh semantics", () => {
   }, 120000);
 
   it("`epochServedSurfaceEntries` excludes its own pending paths from the query instead of post-filtering", () => {
-    const start = SOURCE.search(/^function epochServedSurfaceEntries\(/m);
+    const start = SOURCE.search(/^export function epochServedSurfaceEntries\(/m);
     expect(start, "epochServedSurfaceEntries must exist").toBeGreaterThan(-1);
     const rest = SOURCE.slice(start + 1);
     const end = rest.search(/^(?:export )?(?:async |declare )?(?:function |const |let |class |interface |type |\/\*\*|\/\/ ---)/m);

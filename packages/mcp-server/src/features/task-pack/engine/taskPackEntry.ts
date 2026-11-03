@@ -3,7 +3,7 @@ import {prepareNaturalQueryRoute, runNaturalQueryRoute, type NaturalRoute} from 
 import {naturalQueryForRequest, recordNaturalQueryOrigin} from '../taskContractStore.js';
 import {currentSessionLane} from '../../../util/laneKey.js';
 import {naturalProjectionForPack, naturalCertificateMatches, hasNaturalSpecializedCertificate} from '../naturalTaskPackIntegration.js';
-import {tryServeCertifiedQueryReceipt} from './receiptRestoration2.js';
+import {certifiedQueryRebuildContext, tryServeCertifiedQueryReceipt} from './receiptRestoration2.js';
 import {deriveCanonicalTaskDecision} from '../canonicalDecision.js';
 // taskPackEntry — extracted implementation; imports point to the owning modules.
 import * as path from "path";
@@ -28,7 +28,9 @@ import { declarationFramedNames } from "../declarationFraming.js";
 import { explicitCodeIdentifiers } from "./anchorFocus2.js";
 import { hasConfirmedQueryCandidateAnchor } from "../queryCandidatePolicy.js";
 import { hasRequestedMutationIntent } from "./coverageAndContinuation3.js";
-import { isFacetDescriptorTerm } from "../requestFacets.js";
+import { extractFacetRequirements, framedCodeNamesIn, isFacetDescriptorTerm } from "../requestFacets.js";
+import { resolveAnchorDefinitions } from "../anchorFirst.js";
+import { packAnchorIO } from "./roleAndConcernScope3.js";
 import { isProseAcronym } from "../concernRecovery.js";
 import { jaBridgeVocabPerCallStorage } from "../../retrieval/jaBridgeWorkspaceVocab.js";
 import { languageForPath } from "../../../util/languages.js";
@@ -52,6 +54,9 @@ import { taskContractGapProjection } from "../taskContractStore.js";
 import { tokenizeForEpoch } from "../../../state/session.js";
 import { trace } from "../../../util/trace.js";
 import { unqualifiedSymbolTail } from "./anchorFocus3.js";
+import { noteSemanticFrontierTraceSeed } from "../../../protocol/semanticFrontierTraceContext.js";
+import { prepareSemanticFrontierTraceSeed } from "../semanticFrontier.js";
+import { semanticFrontierGuardEnabled } from "../../../util/flags.js";
 import { unreadableNamedPathStorage } from "./queryIntent3.js";
 import { withEngineConfiguration } from "../../engines/config.js";
 
@@ -125,9 +130,23 @@ export async function buildTaskPackWithEngineConfiguration(
     try {
       let naturalRoute: NaturalRoute | undefined;
       let rebuildSpecializedNatural = false;
+      let specializedFocalTargets: TaskPackArgs["paths"];
       // The task-contract ALS owns the authenticated handle. taskBinding is
       // the underlying fingerprint, which must never become a handle-store key.
       const resumeNaturalQuery = naturalQueryForRequest(workspace, args.query);
+      const earlyResult = (result: TaskPackResult, query: string): TaskPackResult => {
+        noteSemanticFrontierTraceSeed(prepareSemanticFrontierTraceSeed(result, query, semanticFrontierGuardEnabled()));
+        return result;
+      };
+      const candidatePack = (...parameters: Parameters<typeof buildQueryCandidatePack>): TaskPackResult =>
+        earlyResult(buildQueryCandidatePack(...parameters), resumeNaturalQuery ?? args.query ?? "");
+      // A task that began at caller-selected targets can already own a current
+      // certificate. Preserve only the exact prepared, source-validated receipt;
+      // natural-query tasks still go through their mandatory proof rebuild below.
+      if (resumeNaturalQuery === undefined && queryCandidateSelectionRequired(args, workspace)) {
+        const prior = tryServeCertifiedQueryReceipt(workspace, args);
+        if (prior !== undefined) return earlyResult(prior, args.query!);
+      }
       const naturalSources = new FileReadCache();
       const prepareNatural = async (query: string) => prepareNaturalQueryRoute({
         workspace, query, profile: bindTaskProfile(args.taskProfile, query, args.writeAllowed).selected,
@@ -138,11 +157,21 @@ export async function buildTaskPackWithEngineConfiguration(
         naturalRoute = await prepareNatural(resumeNaturalQuery);
         if ((naturalRoute.evidence.gaps.length > 0 || naturalRoute.targets.length === 0)
           && args.path === undefined && (args.paths?.length ?? 0) === 0) {
-          // A prior specialized proof permits a fresh specialized rebuild,
-          // never reuse of its old graph. All normal receipt identity/source
-          // checks still apply, and forceServe below rebuilds the certificate.
-          const prior = tryServeCertifiedQueryReceipt(workspace, {...args, query: resumeNaturalQuery, forceServe: false});
+          // A current specialized source context permits a fresh rebuild,
+          // never reuse of its old graph or a partial-file delivery receipt.
+          const rebuildCheckArgs: TaskPackArgs = {...args, query: resumeNaturalQuery, forceServe: false};
+          const prior = certifiedQueryRebuildContext(workspace, rebuildCheckArgs);
           rebuildSpecializedNatural = prior !== undefined && hasNaturalSpecializedCertificate(prior);
+          if (rebuildSpecializedNatural) {
+            // Rebuild from the certified focal body, rather than choosing the
+            // first declaration after a value read widened its source file.
+            // These addresses grant no proof: runCore must prove every duty
+            // again against the freshly prepared natural evidence below.
+            specializedFocalTargets = prior?.execution_contract?.readiness_certificate?.obligations
+              .find(obligation => obligation.id === "request-item:natural-facet-lead-body" && obligation.status === "proved")
+              ?.evidence?.flatMap(evidence => evidence.path && /^\d+-\d+$/.test(evidence.range ?? "")
+                ? [{path: evidence.path, range: evidence.range!}] : []).slice(0, QUERY_CANDIDATE_LIMIT);
+          }
           if (!rebuildSpecializedNatural) {
           // Repeating an unsupported query does not authorize a body-bearing
           // fallback. Explicit target reads still retain its open obligations.
@@ -150,7 +179,7 @@ export async function buildTaskPackWithEngineConfiguration(
             action: 'locate', query: stripDelegationActorSpans(resumeNaturalQuery), limit: QUERY_CANDIDATE_LIMIT,
           });
           const gaps = taskContractGapProjection(workspace, tokenizeForEpoch(resumeNaturalQuery));
-          return buildQueryCandidatePack(located,
+          return candidatePack(located,
             noteInheritedTaskProfile(bindTaskProfile(args.taskProfile, resumeNaturalQuery, args.writeAllowed), args),
             candidatePath => {
               const source = naturalSources.read(workspace, candidatePath);
@@ -173,7 +202,7 @@ export async function buildTaskPackWithEngineConfiguration(
         // Typed names and explicitly framed callables remain intentional targets,
         // but syntax alone cannot turn prose ("HTTP method") into a declaration.
         // Confirm only names the request spells, within the locator's bounded files.
-        const identityKey = (name: string): string => name.replace(/[^A-Za-z0-9]/g, "").toLowerCase();
+        const identityKey = (name: string): string => name.replace(/[^\p{L}\p{N}]/gu, "").toLowerCase();
         const projectNames = new Set([identityKey(path.basename(workspace))]);
         try {
           const manifest = JSON.parse(candidateSources.read(workspace, "package.json") ?? "null") as { name?: unknown } | null;
@@ -185,32 +214,63 @@ export async function buildTaskPackWithEngineConfiguration(
         // A plain name must be the request's direct subject, not an embedded
         // prose modifier such as "How does requests choose the redirect method?".
         // Reuse the existing verb recognizers; this adds no behavior vocabulary.
-        const primarySubject = /^\s*([A-Za-z]+)\s+(?:the\s+)?([A-Za-z_$][\w$]*)(?=\s+(function|method)\b|\s+so\b|[.!?]?\s*$)/iu.exec(args.query!);
+        const primarySubject = /^\s*([A-Za-z]+)\s+(?:the\s+)?([A-Za-z_$][\w$]*)(?=\s+(function|method)\b|\s+(?:so|and|including)\b|[.!?]?\s*$)/iu.exec(args.query!);
         const directNames = primarySubject !== null
           && (ANSWER_INTENT_EN_RE.test(primarySubject[1]!) || hasRequestedMutationIntent(primarySubject[1]!))
           && !isFacetDescriptorTerm(primarySubject[2]!)
           && (primarySubject[3] !== undefined || !projectNames.has(identityKey(primarySubject[2]!)))
           ? [primarySubject[2]!] : [];
+        const facets = extractFacetRequirements(args.query!);
+        const namedFacets = facets.filter(facet => facet.facet === "callers" || facet.facet === "value");
+        const valueSubjectNames = (text: string, weakNames: readonly string[] = []): string[] => {
+          const subject = /^\s*(?:what|which)\b.{0,160}?\b(?:does|do)\s+(.{1,120}?)\s+(?:return|use|read)\b/iu.exec(text)?.[1];
+          if (subject === undefined) return [];
+          const single = /^[\p{ID_Start}_$][\p{ID_Continue}$]*$/u.test(subject) ? [subject] : [];
+          const tokens = new Set(subject.split(/[^\p{ID_Continue}$]+/u));
+          return [...single, ...framedCodeNamesIn(subject), ...weakNames.filter(name => tokens.has(name))];
+        };
+        // Weak facet terms can name the object of a question about a project
+        // ("requests ... redirect method"). Admit only the direct callable
+        // slot here; the facet resolver retains its broader search vocabulary.
+        const facetNames = [...valueSubjectNames(args.query!), ...namedFacets.flatMap(facet => {
+          const caller = /^\s*(?:(?:who|what)\s+(?:calls?|invokes?)|(?:show|find|list)\s+(?:the\s+)?callers?\s+of)\s+([\p{ID_Start}_$][\p{ID_Continue}$]*(?:(?:::|[.#])[\p{ID_Start}_$][\p{ID_Continue}$]*)*)/iu.exec(facet.clause);
+          const passiveCaller = /^\s*where\s+is\s+([\p{ID_Start}_$][\p{ID_Continue}$]*)\s+(?:used|called|invoked)\b/iu.exec(facet.clause);
+          if (facet.facet === "callers") {
+            const name = (caller ?? passiveCaller)?.[1];
+            return name === undefined ? [] : [name];
+          }
+          return valueSubjectNames(facet.inheritedFromLead ? args.query! : facet.clause, facet.subjectWeakCandidates);
+        })];
+        const conditionSubject = /^\s*under\s+what\s+conditions?\s+does\s+([\p{ID_Start}_$][\p{ID_Continue}$]*)(?=\s|[?!,.:;]|$)/iu.exec(args.query!)?.[1];
+        if (conditionSubject !== undefined) facetNames.push(conditionSubject);
+        const qualifiedNames = namedFacets.flatMap(facet => (facet.qualifiedMembers ?? []).map(pair => `${pair.owner}.${pair.member}`));
         const names = [...new Set([
           ...explicitCodeIdentifiers(args.query!).filter(name => !projectNames.has(identityKey(name))),
           ...directNames,
+          ...facetNames.filter(name => !projectNames.has(identityKey(name))),
         ])].filter(name => !isProseAcronym(name));
         // A bare type name can name the surrounding project or protocol. It
         // needs a foreground subject/declaration frame, not mere existence.
         // Normalize the bounded Japanese naming copula before reusing the
         // existing declaration grammar ("X っていうデカいクラス" -> "X クラス").
         const typeSubjectQuery = args.query!.replace(/([A-Za-z_$][\w$]*)\s*(?:という|っていう)[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}ー]{0,12}?(?=クラス(?!タ))/gu, "$1 ");
-        const leadingSubject = /^\s*([A-Za-z]+)\s+(?:how\s+)?(?:the\s+)?([A-Za-z_$][\w$]*)\b/u.exec(args.query!);
+        const leadingSubject = /^\s*([A-Za-z]+)\s+(?:(?:how|what)\s+)?(?:the\s+)?([A-Za-z_$][\w$]*)\b/u.exec(args.query!);
         const foregroundTypes = new Set(declarationFramedNames(typeSubjectQuery));
+        for (const facet of facets) {
+          if (facet.facet === "flow" && facet.subjectIdentifiers.length === 1 && !(facet.qualifiedMembers?.length))
+            foregroundTypes.add(facet.subjectIdentifiers[0]!);
+        }
         const overviewSubject = /\boverview\s+of\s+([A-Za-z_$][\w$]*)\b/iu.exec(args.query!);
         if (asksForStructureMap(args.query!) && overviewSubject !== null) foregroundTypes.add(overviewSubject[1]!);
+        const definitionSubject = /^\s*where\s+is\s+([A-Za-z_$][\w$]*)\s+(?:defined|declared|implemented)\b/iu.exec(args.query!);
+        if (definitionSubject !== null) foregroundTypes.add(definitionSubject[1]!);
         if (leadingSubject !== null
           && (ANSWER_INTENT_EN_RE.test(leadingSubject[1]!) || hasRequestedMutationIntent(leadingSubject[1]!))) {
           foregroundTypes.add(leadingSubject[2]!);
         }
-        const japaneseSubject = /^\s*([A-Za-z_$][\w$]*)\s*の/u.exec(args.query!);
+        const japaneseSubject = /^\s*([A-Za-z_$][\w$]*)\s*(?:の|とは)/u.exec(args.query!);
         if (japaneseSubject !== null) foregroundTypes.add(japaneseSubject[1]!);
-        const confirmed = await hasConfirmedQueryCandidateAnchor(located, names, async candidatePath => {
+        const declarationsForPath = async (candidatePath: string): Promise<string[]> => {
           const source = candidateSources.read(workspace, candidatePath);
           const language = languageForPath(candidatePath);
           if (source === undefined || !language || source.length > 1024 * 1024) return [];
@@ -227,7 +287,23 @@ export async function buildTaskPackWithEngineConfiguration(
           // check when it is out of line or the parser labels it a function.
           return parsed.map(symbol => unqualifiedSymbolTail(symbol.name))
             .filter(name => !declaredTypes.has(name) || foregroundTypes.has(name));
-        });
+        };
+        let confirmed = await hasConfirmedQueryCandidateAnchor(located, names, declarationsForPath);
+        // Exact request subjects can be absent from lexical locator results.
+        // Reuse the bounded declaration resolver; rank and prose mentions still
+        // cannot admit a guessed implementation or grant readiness.
+        if (!confirmed) {
+          const exactNames = [...new Set([...directNames, ...facetNames, ...qualifiedNames, ...names.filter(name => foregroundTypes.has(name))])]
+            .filter(name => !projectNames.has(identityKey(name)) && !isFacetDescriptorTerm(name) && !isProseAcronym(name));
+          if (exactNames.length > 0) {
+            const resolved = await resolveAnchorDefinitions(packAnchorIO(workspace, candidateSources, undefined, args.query!), exactNames.slice(0, 8));
+            const definitions = resolved.definitions.filter(definition => exactNames.includes(definition.id));
+            const requested = new Set([...names, ...qualifiedNames.map(unqualifiedSymbolTail)]);
+            for (const candidatePath of [...new Set(definitions.map(definition => definition.path))].slice(0, QUERY_CANDIDATE_LIMIT)) {
+              if ((await declarationsForPath(candidatePath)).some(name => requested.has(name))) { confirmed = true; break; }
+            }
+          }
+        }
         if (!confirmed) {
           // A location proposal cannot discharge proof, but it must retain
           // requirements already declared by this authenticated task. Record
@@ -240,7 +316,7 @@ export async function buildTaskPackWithEngineConfiguration(
           recordNaturalQueryOrigin(workspace, args.query!);
           if (naturalRoute.evidence.gaps.length > 0 || naturalRoute.targets.length === 0) {
           const gaps = taskContractGapProjection(workspace, tokens);
-          return buildQueryCandidatePack(located,
+          return candidatePack(located,
           noteInheritedTaskProfile(bindTaskProfile(args.taskProfile, args.query!, args.writeAllowed), args),
           candidatePath => {
             const source = candidateSources.read(workspace, candidatePath);
@@ -306,7 +382,13 @@ export async function buildTaskPackWithEngineConfiguration(
       if (naturalRoute === undefined) return await runCore(args);
       const route = naturalRoute;
       return await runNaturalQueryRoute(args, route, async seeded => {
-        if (rebuildSpecializedNatural) seeded = {...seeded, path: args.path, paths: args.paths, symbol: args.symbol, forceServe: true};
+        if (rebuildSpecializedNatural) {
+          seeded = {...seeded, path: args.path, paths: args.paths ?? specializedFocalTargets, symbol: args.symbol, forceServe: true};
+          if (specializedFocalTargets?.length) {
+            delete seeded.naturalInferredTargets;
+            seeded.autoDiscoveredLocation = false;
+          }
+        }
         const profile = bindTaskProfile(seeded.taskProfile, route.evidence.query, seeded.writeAllowed).selected;
         const inspect = (result: TaskPackResult) => {
           const kind = deriveCanonicalTaskDecision(result)?.kind;

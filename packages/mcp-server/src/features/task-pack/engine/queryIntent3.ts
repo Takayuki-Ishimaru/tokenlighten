@@ -64,6 +64,15 @@ export function queryNamedWorkspaceFiles(
 ): string[] {
   if (query.trim().length === 0) return [];
   const tokens = queryNamedPathTokens(query);
+  // README is also a conventional document name without its extension. Only
+  // resolve a unique root document actually present in the ordinary inventory;
+  // never guess a nested project's README or choose among several root copies.
+  const prose = query.replace(/https?:\/\/\S+/g, "");
+  if (/(?<![A-Za-z0-9_/.-])README(?![A-Za-z0-9_/-]|\.[A-Za-z0-9])/i.test(prose)) {
+    const readmes = walkedFilesForQueryNamedResolution(workspace, false)
+      .filter(file => /^readme\.(?:md|markdown|txt)$/i.test(file));
+    if (readmes.length === 1 && !tokens.includes(readmes[0]!)) tokens.push(readmes[0]!);
+  }
   if (tokens.length === 0) return [];
   // R0 (2026-08-21, W4-A): a bare basename token (no directory component,
   // e.g. "server.ts") can suffix-match MULTIPLE workspace files when the
