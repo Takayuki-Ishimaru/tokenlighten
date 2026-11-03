@@ -203,10 +203,23 @@ still accepted and means the default. The hook commands name the launcher the
 way `.mcp.json` does (`${HOME}`, `${LOCALAPPDATA}` on Windows), so the files
 carry no machine path.
 
-| Hook | What it does | Claude Code | Copilot CLI / VS Code | Codex |
-|---|---|---|---|---|
-| Test/build output | After a recognised `npm test`, `npm run test*`/`build*`/`lint`, `vitest`, `jest`, `pytest`, `tsc`, `eslint`, `go test`, `cargo test`/`build` command (also via `npm.cmd`/`npx.cmd`) has run exactly as written, an output over about 4 KB is saved whole under `.tokenlighten/.runtime/run/` and replaced, for the model only, by the `tl run` compression: the failure blocks, the runner's summary and the log path. The command is never rewritten; permissions and prompts are untouched. Pipelines, redirections, background runs and anything else stay as they are. | PostToolUse `updatedToolOutput` for `Bash`. A command that exits non-zero fires PostToolUseFailure, which cannot replace output, so a failing run is shown whole | postToolUse `modifiedResult` for the `bash`, `powershell` and VS Code `run_in_terminal` tools; a failing run arrives as a result and is compressed with its exit-code line kept (VS Code's Local harness may ignore the replacement; the original output then stands) | Not available: no output-replacing hook is installed. Run `tl run -- <command>` by hand |
-| Compaction reset | Records `.tokenlighten/.runtime/compaction-epoch.json`; the MCP server `stat`s it once per tool call and, when it changed, serves content again instead of "already served" receipts for lines the model no longer sees | PreCompact, SessionStart (`clear`, `compact`) | preCompact, sessionStart (`new`) | PreCompact, SessionStart (`clear`, `compact`) |
+Supported test/build commands include `npm test`, `npm run test*` /
+`build*` / `lint`, `vitest`, `jest`, `pytest`, `tsc`, `eslint`,
+`go test` and `cargo test` / `build`. When supported output exceeds about
+4 KB, the hook saves the full output under `.tokenlighten/.runtime/run/`
+and shows the agent a compact result with failure details, the runner's
+summary and the log path. The command, permissions and prompts are unchanged.
+Pipelines, redirections, background commands and unsupported commands retain
+their original output.
+
+| Client | Automatic test/build output shortening | Context resend after compaction or reset |
+|---|---|---|
+| Claude Code | Successful commands; failed command output remains whole. | Supported. |
+| Copilot CLI / VS Code | Supported results, including failures. VS Code behavior depends on the selected agent harness; original output remains if replacement is unsupported. | Supported for the host's compaction and new-session events. |
+| Codex | Use `tl run -- <command>` directly. | Supported. |
+
+Compaction and session-reset hooks tell the MCP server when to resend source
+context the agent may no longer hold instead of acknowledging an earlier read.
 
 `tl run -- <command>` also works by hand, for any client, and is the way to get
 a failing run compressed on Claude Code. Refreshing setup also updates TokenLighten-managed hooks.
