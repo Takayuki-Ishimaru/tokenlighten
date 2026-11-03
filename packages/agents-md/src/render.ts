@@ -158,9 +158,9 @@ const COPILOT_STANDALONE_TEMPLATE = `${SENTINEL_START}
 
 Do not fetch AGENTS.md/CLAUDE.md for this protocol.
 
-1. FIRST source inspection: \`mcp__tokenlighten_tl_read_file\` with \`{"query":"<entire user request, verbatim>","task":{"epoch":"new"}}\`; read-only => add \`"profile":"answer"\` inside \`task\`. Paths: \`targets:[{path},...]\`. Finds AND serves; replaces grep_search/semantic_search/read_file.
+1. Unknown location, several files or documents: \`mcp__tokenlighten_tl_read_file\` with \`{"query":"<entire user request, verbatim>","task":{"epoch":"new"}}\`; read-only => add \`"profile":"answer"\` inside \`task\`. Paths: \`targets:[{path},...]\`. Finds AND serves; replaces grep_search/semantic_search/read_file.
 2. \`act.answer\` => answer from exact \`evidence[].body\`; \`whole:true\` means \`context\` is already read. No re-read of served files. Batch independent context calls with TL.
-3. Native search/read only when TL is unavailable, the user asks for native, or TL reports incomplete scope/verified absence. Identifier/reference/inventory-only => \`mcp__tokenlighten_tl_search_files\`. New task => new epoch.
+3. Native search/read: a user-named file + small local task, TL unavailable, user asks for native, or TL reports incomplete scope/verified absence. Identifier/reference/inventory-only => \`mcp__tokenlighten_tl_search_files\`. New task => new epoch.
 - Replies are \`{v:1,kind,...}\`; an unknown \`kind\` => stop and report. \`act.answer\`/\`act.edit\` => act NOW; \`discover\`/\`await_input\` => run its \`next\` (else re-pack ONCE with \`{qref, targets:[<candidate paths>]}\`, or ask); \`done\` => stop.
 - Run every \`next\` verbatim. \`refusal.retry\`: \`call\` => fix \`field\`; \`new-task\` => re-pack; \`user-input\` => ask; \`none\` => stop that shape. \`read.receipt\` => already served; lost context => same call with \`task.force_serve:true\`.
 - Edits: ONE \`mcp__tokenlighten_tl_edit_file\` call for all of them; \`edit.state_unknown\` => run its \`recovery\`; \`edit.rolled_back\` => nothing landed. Stop after a passing check.

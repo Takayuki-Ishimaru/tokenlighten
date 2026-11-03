@@ -11,6 +11,7 @@
 export interface NearestMatchInfo {
   nearest_match?: { range: string; code: string; note: string; out_of_range?: true };
   actual?: { range: string; code: string; note: string };
+  already_applied?: { range: string; note: string };
 }
 
 const FORENSICS_CAP_BYTES = 1200;
@@ -83,6 +84,39 @@ export function nearestMatchForensics(
         range: `${segmentStartLine}-${segmentStartLine + headCount - 1}`,
         code: capJoin(segLines.slice(0, headCount)),
         note: "scope head — the search's first line has no whitespace-normalized match here; compare content before retrying",
+      },
+    };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * 2026-11-02 (v0.16.4 field evaluation): an edit resent after it landed has
+ * no match for its search, and the refusal sent the caller to re-read the
+ * whole file. When the search is absent and the replacement occurs exactly
+ * once, the edit is already applied: name where, so the caller drops it.
+ * Returns {} otherwise (an empty or whitespace-only replacement included).
+ */
+export function alreadyAppliedForensics(
+  text: string,
+  search: string,
+  replace: string,
+): NearestMatchInfo {
+  try {
+    const lf = (value: string) => value.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    const body = lf(text);
+    const searchText = lf(search);
+    const replaceText = lf(replace);
+    if (replaceText.trim() === "" || searchText === "" || body.includes(searchText)) return {};
+    const at = body.indexOf(replaceText);
+    if (at === -1 || body.indexOf(replaceText, at + 1) !== -1) return {};
+    const first = body.slice(0, at).split("\n").length;
+    const last = first + replaceText.replace(/\n$/, "").split("\n").length - 1;
+    return {
+      already_applied: {
+        range: `${first}-${last}`,
+        note: "the search text is absent and the replacement is already here: this edit is applied; drop it rather than re-reading or resending",
       },
     };
   } catch {

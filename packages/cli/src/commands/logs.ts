@@ -45,13 +45,36 @@ structured usage counters and model ids from local AI logs. Export never uploads
 
 /**
  * What every per-call baseline (and so every "context avoided" figure) is:
- * the bytes a native, non-TL read of the same files/ranges would have returned.
- * Shown beside the savings numbers so an estimate is never read as billing.
+ * the bytes a native, non-TL read of the same files/ranges would have returned,
+ * bounded to what one native read returns (2,000 lines / 25,000 tokens per file;
+ * see `@tokenlighten/usage`'s nativeReadBaseline.ts). Shown beside the savings
+ * numbers so an estimate is never read as billing.
  */
 export const BASELINE_NOTE =
   "estimate of what native reads of the same files/ranges would have returned "
-  + "(whole-file reads at file size, ranged and symbol reads at their range), "
-  + "not billed cost";
+  + "(whole-file reads at file size, ranged and symbol reads at their range, "
+  + "each capped at one native read of 2,000 lines / 25,000 tokens), "
+  + "an estimated upper bound, not billed cost";
+
+/**
+ * The `Context avoided:` line of the text summary. The figure is signed: a log
+ * where TL returned more than the estimated native reads prints a negative
+ * number and says so, never a positive one. Short caveat on purpose, because
+ * the basis text that follows is long.
+ */
+export function formatContextAvoidedLine(tier: {
+  tokens: number | null;
+  status: string;
+  basis: string;
+}): string {
+  if (tier.tokens === null) {
+    return `Context avoided: unavailable (${tier.status}; basis: ${tier.basis})\n`;
+  }
+  const caveat = tier.tokens < 0
+    ? "net negative: TL returned more than the estimated native reads; not billing"
+    : "estimated upper bound, not billing";
+  return `Context avoided: ${tier.tokens} tokens [${caveat}] (${tier.status}; basis: ${tier.basis})\n`;
+}
 
 /** The `Baseline:` line of the text summary; counts are optional (older producers omit them). */
 export function formatBaselineLine(
@@ -164,11 +187,16 @@ export async function runLogs(args: string[]): Promise<void> {
     }));
     const decomposition = computeMeasurementDecomposition(measurementEvents);
     if (savingEventIndex >= 0) {
+      const cap = canonicalSummary.baselineCap;
+      const clampNote = cap !== undefined && cap.clampedCalls > 0
+        ? `; ${cap.clampedCalls} call(s) bounded to ${cap.maxTokensPerCall} baseline tokens each (${cap.clampedTokens} tokens removed)`
+        : "";
       decomposition.direct_context_saving.provenance.basis =
         "canonical task-grouped baseline minus successful responses in "
         + "baseline-anchored task groups; errors and unanchored task groups "
         + `excluded (${canonicalSummary.measuredBaselineCalls} baseline-bearing call(s)); `
-        + "the baseline is an estimate of native reads of the same files/ranges, not billed cost";
+        + "the baseline is an estimate of native reads of the same files/ranges, not billed cost, "
+        + `capped at one native read per call (2,000 lines / 25,000 tokens): an estimated upper bound${clampNote}`;
     }
     const summary = {
       ...canonicalSummary,
@@ -221,7 +249,7 @@ export async function runLogs(args: string[]): Promise<void> {
         + `TL response tokens: ~${summary.estimatedResponseTokens} (est.)\n`
         + `TL response measurement method: ${summary.method}\n`
         + formatBaselineLine(summary.measuredBaselineCallsByMethod)
-        + `Context avoided: ${summary.measurementDisplay.contextAvoided.tokens === null ? "unavailable" : `${summary.measurementDisplay.contextAvoided.tokens} tokens`} (${summary.measurementDisplay.contextAvoided.status}; basis: ${summary.measurementDisplay.contextAvoided.basis})\n`
+        + formatContextAvoidedLine(summary.measurementDisplay.contextAvoided)
         + `Session net: ${summary.measurementDisplay.session.net.tokens === null ? "unavailable" : `${summary.measurementDisplay.session.net.tokens} tokens`} (${summary.measurementDisplay.session.net.status}; basis: ${summary.measurementDisplay.session.net.basis})\n`
         + `By tool: tl_read_file ${summary.byTool.tl_read_file}, `
         + `tl_search_files ${summary.byTool.tl_search_files}, `

@@ -54,6 +54,9 @@ export default defineConfig({
       TL_DECISION_INVARIANT_STRICT: "1",
       // Legacy fixtures use the v0.13 compatibility escape hatch explicitly.
       TL_LEGACY_INPUT: "accept",
+      // 2026-11-02: specs expect a complete source index on their first pack;
+      // the suite runs the legacy synchronous build (see the package config).
+      TL_BACKGROUND_INDEX: "off",
     },
     // Memory (2026-09-27, measured): V8's optimizing compiler (TurboFan)
     // re-compiling tree-sitter's WebAssembly grammars takes ~0.5-1 GB of

@@ -369,6 +369,11 @@ export function supplyRefusalGuidance(result: Record<string, unknown>): Record<s
     // Leave retry:"call" to refine the failed edit; incomplete/relocated
     // diagnostics retain the ordinary read recovery below.
     const failedItem = refused["failed_item"];
+    // An edit that is already applied needs no read at all (editForensics.ts
+    // `alreadyAppliedForensics`).
+    if (codeRaw === "not-found" && refused["already_applied"] !== null && typeof refused["already_applied"] === "object") {
+      return refused;
+    }
     const nearest = refused["nearest_match"];
     if ((codeRaw === "search-not-unique" || codeRaw === "not-found")
       && failedItem !== null && typeof failedItem === "object"

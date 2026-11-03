@@ -3,7 +3,6 @@
   "kind": "read.task_pack",
   "task": {
     "id": "$TH",
-    "replay": "$QREF",
     "coverage": "complete"
   },
   "profile": "answer",
@@ -55,18 +54,13 @@
       "workspace": {
         "fingerprint": "$SHA1",
         "scope": "evidence-plus-inventory",
-        "evidence_files": 1,
-        "inventory_files": 1,
         "inventory_complete": true
       }
     }
   },
   "profile_binding": {
-    "requested": "auto",
     "selected": "answer",
-    "source": "inferred",
-    "confidence": 0.8,
-    "reason": "answer-shaped read-only query; task.profile overrides"
+    "source": "inferred"
   },
   "qref": "$QREF",
   "server_build": "$BUILD",

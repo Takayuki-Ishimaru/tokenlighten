@@ -9,6 +9,7 @@ import {
   BASELINE_NOTE,
   cliVersion,
   formatBaselineLine,
+  formatContextAvoidedLine,
   formatReductionRange,
   runLogs,
 } from "../commands/logs.js";
@@ -339,6 +340,90 @@ describe("tl logs summary scoping", () => {
     writes.length = 0;
     await runLogs(["summary", "--workspace-root", root]);
     expect(writes.join("")).toContain("[1 whole-file and 1 ranged/symbol baseline call(s)]");
+  });
+
+  // A log written before the native-read cap: each event carries the whole-file
+  // size of a large source file (the field report: ~397,000 tokens for one
+  // 1.59 MB server.ts). The summary bounds them itself, labels the result an
+  // estimated upper bound, and reports how much it removed.
+  it("bounds old whole-file baselines to one native read and labels the figure an estimated upper bound", async () => {
+    const root = join(logDirectory, "ws-old-wholefile");
+    mkdirSync(root, { recursive: true });
+    const workspaceId = usageWorkspaceId(root, logDirectory)!;
+    const rows = [
+      event(workspaceId, 0, 397_000),
+      event(workspaceId, 1, 150_000),
+      event(workspaceId, 2, 1_000),
+    ];
+    writeFileSync(
+      join(logDirectory, "usage-2026-08-11.ndjson"),
+      `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`,
+    );
+
+    await runLogs(["summary", "--json", "--workspace-root", root]);
+    const json = lastJson() as ReturnType<typeof lastJson> & {
+      measuredBaselineTokens: number;
+      baselineCap: { maxTokensPerCall: number; maxLinesPerFile: number; clampedCalls: number; clampedTokens: number };
+    };
+    // Counted: 25,000 + 25,000 + 1,000, each less its 10 response tokens.
+    expect(json.measuredBaselineTokens).toBe(51_000);
+    expect(json.estimatedSavedTokens).toBe(51_000 - 30);
+    expect(json.measurementDisplay.contextAvoided.tokens).toBe(51_000 - 30);
+    expect(json.baselineCap).toEqual({
+      maxTokensPerCall: 25_000,
+      maxLinesPerFile: 2_000,
+      clampedCalls: 2,
+      clampedTokens: (397_000 - 25_000) + (150_000 - 25_000),
+    });
+    expect(json.measurementDisplay.contextAvoided.basis).toContain("2 call(s) bounded to 25000 baseline tokens each");
+
+    writes.length = 0;
+    await runLogs(["summary", "--workspace-root", root]);
+    const text = writes.join("");
+    expect(text).toContain("Context avoided: 50970 tokens [estimated upper bound, not billing] (estimated; basis:");
+    expect(text).toContain("an estimated upper bound, not billed cost");
+    // Nothing near the ~550,000 the whole-file sizes would have claimed.
+    expect(text).not.toMatch(/Context avoided: \d{6,} /);
+  });
+
+  it("prints a negative Context avoided, never a positive one, when TL returned more than the estimated reads", async () => {
+    const root = join(logDirectory, "ws-net-negative");
+    mkdirSync(root, { recursive: true });
+    const workspaceId = usageWorkspaceId(root, logDirectory)!;
+    const rows = [
+      // Baseline 100, response 5,000: -4,900 each time.
+      { ...event(workspaceId, 0, 100), estimatedResponseTokens: 5_000, responseBytes: 20_000, estimatedSavedTokens: -4_900 },
+      // A big-file call that the cap now bounds, answered with a larger response.
+      { ...event(workspaceId, 1, 397_000), estimatedResponseTokens: 30_000, responseBytes: 120_000, estimatedSavedTokens: 367_000 },
+    ];
+    writeFileSync(
+      join(logDirectory, "usage-2026-08-11.ndjson"),
+      `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`,
+    );
+
+    await runLogs(["summary", "--json", "--workspace-root", root]);
+    const json = lastJson();
+    // (100 - 5,000) + (25,000 - 30,000): negative, and the display agrees.
+    expect(json.estimatedSavedTokens).toBe(-9_900);
+    expect(json.measurementDisplay.contextAvoided.tokens).toBe(-9_900);
+
+    writes.length = 0;
+    await runLogs(["summary", "--workspace-root", root]);
+    const text = writes.join("");
+    expect(text).toContain("Context avoided: -9900 tokens [net negative: TL returned more than the estimated native reads; not billing]");
+    expect(text).not.toMatch(/Context avoided: \d/);
+  });
+
+  it("formats the Context avoided line: signed, caveated, and unavailable stays unavailable", () => {
+    const tier = { status: "estimated", basis: "b" };
+    expect(formatContextAvoidedLine({ ...tier, tokens: 120 }))
+      .toBe("Context avoided: 120 tokens [estimated upper bound, not billing] (estimated; basis: b)\n");
+    expect(formatContextAvoidedLine({ ...tier, tokens: 0 }))
+      .toBe("Context avoided: 0 tokens [estimated upper bound, not billing] (estimated; basis: b)\n");
+    expect(formatContextAvoidedLine({ ...tier, tokens: -5 }))
+      .toBe("Context avoided: -5 tokens [net negative: TL returned more than the estimated native reads; not billing] (estimated; basis: b)\n");
+    expect(formatContextAvoidedLine({ status: "unavailable", basis: "b", tokens: null }))
+      .toBe("Context avoided: unavailable (unavailable; basis: b)\n");
   });
 
   it("shows sane zeros for the measured block on an empty store, without crashing", async () => {

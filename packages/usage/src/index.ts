@@ -43,8 +43,23 @@ import {
   SESSION_ESTIMATOR_CALIBRATION,
 } from "./calibration.js";
 import { recordDiagCall } from "./diagRing.js";
+import {
+  NATIVE_BASELINE_MAX_TOKENS_PER_CALL,
+  NATIVE_READ_MAX_LINES,
+  boundBaselineTokens,
+} from "./nativeReadBaseline.js";
 
 export { readAiUsageLogs } from "./aiLogs.js";
+// 2026-11-02: the native-read ceiling on a savings baseline, shared by the MCP
+// server (recording, per file) and `summarizeUsage` (per recorded call).
+export {
+  NATIVE_BASELINE_MAX_TOKENS_PER_CALL,
+  NATIVE_READ_BYTES_PER_TOKEN,
+  NATIVE_READ_MAX_BYTES,
+  NATIVE_READ_MAX_LINES,
+  NATIVE_READ_MAX_TOKENS,
+  boundBaselineTokens,
+} from "./nativeReadBaseline.js";
 export type { TokenLightenSummaryScope as SummaryScope } from "@tokenlighten/types";
 
 // ---------------------------------------------------------------------------
@@ -1138,6 +1153,12 @@ export function summarizeUsage(
   let measuredBaselineTokens = 0;
   let measuredResponseBytes = 0;
   let estimatedSavedTokens = 0;
+  // Native-read ceiling (see nativeReadBaseline.ts): a recorded baseline above
+  // one native read window is counted at the window. Logs written before the
+  // recorder applied the per-file rule carry whole-file sizes, so the summary
+  // bounds every baseline-bearing call itself rather than trusting the field.
+  let baselineClampedCalls = 0;
+  let baselineClampedTokens = 0;
   // Pass 1: per-event totals that are NOT part of the paired-baseline ratio.
   // Every event counts individually here, exactly as before task grouping —
   // these are not what the 2026-08-30 fix below changes.
@@ -1222,8 +1243,18 @@ export function summarizeUsage(
       if (firstOkClient === undefined) firstOkClient = event.client;
       groupResponseTokens += event.estimatedResponseTokens;
       groupResponseBytes += event.responseBytes;
-      if (event.baselineTokens !== null) groupBaselineTokens += event.baselineTokens;
+      if (event.baselineTokens !== null) {
+        const bounded = boundBaselineTokens(event.baselineTokens);
+        if (bounded < event.baselineTokens) {
+          baselineClampedCalls++;
+          baselineClampedTokens += event.baselineTokens - bounded;
+        }
+        groupBaselineTokens += bounded;
+      }
     }
+    // SIGNED on purpose: a group whose TL responses outweigh its bounded
+    // baseline subtracts from the total. Nothing below floors a saving at 0, so
+    // a net-negative log can never print a positive "context avoided".
     const signedSavedTokens = groupBaselineTokens - groupResponseTokens;
     const client = firstOkClient ?? "other";
     measuredResponseTokens += groupResponseTokens;
@@ -1265,6 +1296,12 @@ export function summarizeUsage(
     // The baseline is what native reads of the same files/ranges would have
     // returned: an estimate, never billed cost.
     baselineBasis: "native-read-estimate",
+    baselineCap: {
+      maxTokensPerCall: NATIVE_BASELINE_MAX_TOKENS_PER_CALL,
+      maxLinesPerFile: NATIVE_READ_MAX_LINES,
+      clampedCalls: baselineClampedCalls,
+      clampedTokens: baselineClampedTokens,
+    },
     measuredBaselineCallsByMethod,
     estimatedSavedTokens,
     estimatedReductionPercent: estimatedTokenReductionPercent,

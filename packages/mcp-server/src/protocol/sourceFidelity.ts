@@ -82,7 +82,7 @@ import { elideDocCommentsWithWindows } from "../util/formatCompress.js";
 import { handleTable } from "../util/handles.js";
 import { languageForPath } from "../util/languages.js";
 import { READ_PATH_MAX_BYTES, safeResolve } from "../util/safePath.js";
-import { isTokenlightenSentinelLine } from "../util/sentinelComment.js";
+import { isSymbolTargetLabelLine, isTokenlightenSentinelLine } from "../util/sentinelComment.js";
 import { servedTextOrUndefined } from "../util/textDecode.js";
 
 type Record_ = Record<string, unknown>;
@@ -483,21 +483,27 @@ function rebuildPlan(
 // renderings whose TARGET part is made verbatim, never split.
 // ---------------------------------------------------------------------------
 
-const TARGET_LABEL_RE = /^(?:\/\/|#)\s*target:$|^\/\*\s*target:\s*\*\/$/;
 const AST_FALLBACK_NOTE_RE = /^(?:\/\/|#)\s*note: AST-fallback mode/;
 
 /**
  * Separate a verified assembled view into its source target and supplementary
  * context. An unverified rendering is never guessed into a source range.
+ *
+ * A tiny file's view has no header and no label (`SMALL_FILE_SCOPE_HEADER_OMIT_BYTES`
+ * in getSymbolWithContext.ts), so a symbol found without the AST (a nested
+ * function, an unsupported grammar) ends in the AST-fallback note and nothing
+ * else of TokenLighten's own; that one trailing note is what is moved out.
  */
 function faithfulAssembledView(source: SourceText, bodyText: string, start: number, end: number): { body: string; range: string; note: string } | undefined {
   const { lines, trailingNewline } = bodyLinesOf(bodyText);
-  if (lines.length < 2 || !isTokenlightenSentinelLine(lines[0]!)) return undefined;
-  const label = lines.findIndex((line, index) => index > 0 && TARGET_LABEL_RE.test(line.trim()));
-  if (label < 0) return undefined;
+  if (lines.length < 2) return undefined;
+  const headed = isTokenlightenSentinelLine(lines[0]!);
+  const label = headed ? lines.findIndex((line, index) => index > 0 && isSymbolTargetLabelLine(line)) : -1;
+  if (headed && label < 0) return undefined;
   let tailStart = lines.length;
   if (tailStart - 1 > label && AST_FALLBACK_NOTE_RE.test(lines[tailStart - 1]!.trim())) tailStart -= 1;
-  const preamble = lines.slice(0, label).filter((line) => !MARKER_LINE_RE.test(line));
+  if (!headed && tailStart === lines.length) return undefined;
+  const preamble = headed ? lines.slice(0, label).filter((line) => !MARKER_LINE_RE.test(line)) : [];
   let target = lines.slice(label + 1, tailStart);
   const declaredEnd = Math.min(end, source.lines.length);
   if (target.length > 0 && declaredEnd >= start) {

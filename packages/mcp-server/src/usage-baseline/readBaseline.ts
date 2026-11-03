@@ -10,18 +10,34 @@
  * field report showed "about 71.5k tokens saved" on a task where TL had read
  * about twice as many bytes as the no-TL run.
  *
+ * v0.16.4 still over-stated a WHOLE-file read: it credited the file's entire
+ * byte size, so one read of a 1.59 MB source file was worth ~397,000 tokens of
+ * "avoided" context, although no client returns that much for one file (Claude
+ * Code's Read returns at most 2,000 lines per call and refuses a file over
+ * about 25,000 tokens unless given offset/limit). A paired field evaluation saw
+ * TL cost +43% in total while the summary printed 457,550 tokens avoided. Every
+ * per-file baseline below is therefore bounded to ONE native read window,
+ * `min(file bytes, bytes of the first 2,000 lines, 100,000 bytes = 25,000
+ * tokens)`; the constants live in `@tokenlighten/usage` (nativeReadBaseline.ts)
+ * so the summary applies the same rule to logs recorded before it existed. The
+ * result is an estimated upper bound on the context avoided, never billing.
+ *
  * What this module measures, per requested path:
  *
  * - whole-file read (no range, no symbol, a handle with no stored window, or a
- *   window that covers every line): the file's byte size, counted once per path
- *   per lane (the caller's `credited` ledger), method `"file-bytes"`;
+ *   window that covers every line): the first native read window of the file
+ *   (at most 2,000 lines and 25,000 tokens, never more than the file), counted
+ *   once per path per lane (the caller's `credited` ledger), method
+ *   `"file-bytes"`;
  * - ranged read (`range`, `ranges[]`, legacy `lines`/`start`+`end`, or the
- *   window a handle was minted with): the bytes of exactly those lines, never
- *   credited a second time as "whole file", method `"range-bytes"`;
- * - symbol read: the bytes of the symbol window the server SERVED. That window
- *   is only known from the response, so the symbol entry is reported as
- *   `pendingSymbols` and settled by `settleSymbolBaselines` once the result
- *   exists; an unsettled symbol contributes nothing (never the whole file);
+ *   window a handle was minted with): the bytes of exactly those lines, bounded
+ *   to one native read window, never credited a second time as "whole file",
+ *   method `"range-bytes"`;
+ * - symbol read: the bytes of the symbol window the server SERVED, bounded the
+ *   same way. That window is only known from the response, so the symbol entry
+ *   is reported as `pendingSymbols` and settled by `settleSymbolBaselines` once
+ *   the result exists; an unsettled symbol contributes nothing (never the whole
+ *   file);
  * - anything this module cannot size (unparsable range, file too large to
  *   scan, a path outside the workspace) contributes nothing. Under-crediting is
  *   the safe direction for a savings estimate.
@@ -33,9 +49,10 @@
  * handle table and the per-lane credited ledger are passed in.
  */
 
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import * as path from "node:path";
 import type { TokenLightenBaselineMethod } from "@tokenlighten/types";
+import { NATIVE_READ_MAX_BYTES, NATIVE_READ_MAX_LINES } from "@tokenlighten/usage";
 import { wholeOrOpenEndedRange } from "../util/rangeWords.js";
 
 /** Files above this size are not scanned for a range/symbol baseline. */
@@ -150,34 +167,105 @@ function lineStartOffsets(buffer: Buffer): number[] {
   return starts;
 }
 
+/**
+ * Merge inclusive line windows (clamped to `1..totalLines`) into disjoint,
+ * ascending ones. A window starting past the last line is dropped.
+ */
+function mergeWindows(
+  totalLines: number,
+  windows: ReadonlyArray<readonly [number, number]>,
+): Array<[number, number]> {
+  const clipped = windows
+    .filter(([start]) => start >= 1 && start <= totalLines)
+    .map(([start, end]) => [start, Math.min(end, totalLines)] as [number, number])
+    .sort((a, b) => a[0] - b[0]);
+  const merged: Array<[number, number]> = [];
+  for (const window of clipped) {
+    const last = merged[merged.length - 1];
+    if (last !== undefined && window[0] <= last[1] + 1) {
+      last[1] = Math.max(last[1], window[1]);
+    } else {
+      merged.push([window[0], window[1]]);
+    }
+  }
+  return merged;
+}
+
 /** Merge inclusive line windows (clamped to `1..totalLines`) and sum their bytes. */
 function windowBytes(
   starts: readonly number[],
   windows: ReadonlyArray<readonly [number, number]>,
 ): { bytes: number; lines: number } {
-  const totalLines = starts.length - 1;
-  const clipped = windows
-    .filter(([start]) => start >= 1 && start <= totalLines)
-    .map(([start, end]) => [start, Math.min(end, totalLines)] as [number, number])
-    .sort((a, b) => a[0] - b[0]);
   let bytes = 0;
   let lines = 0;
-  let current: [number, number] | undefined;
-  const flush = (): void => {
-    if (current === undefined) return;
-    bytes += starts[current[1]]! - starts[current[0] - 1]!;
-    lines += current[1] - current[0] + 1;
-  };
-  for (const window of clipped) {
-    if (current !== undefined && window[0] <= current[1] + 1) {
-      current[1] = Math.max(current[1], window[1]);
-    } else {
-      flush();
-      current = [window[0], window[1]];
+  for (const [start, end] of mergeWindows(starts.length - 1, windows)) {
+    bytes += starts[end]! - starts[start - 1]!;
+    lines += end - start + 1;
+  }
+  return { bytes, lines };
+}
+
+/**
+ * The bytes ONE native read of these windows can return: the merged windows in
+ * file order, cut after {@link NATIVE_READ_MAX_LINES} lines and at
+ * {@link NATIVE_READ_MAX_BYTES} (25,000 tokens). A client asking for more
+ * receives a refusal or a truncation, never the extra lines; a file's ranged
+ * reads are credited as at most one such window.
+ */
+function nativeWindowBytes(
+  starts: readonly number[],
+  windows: ReadonlyArray<readonly [number, number]>,
+): number {
+  let bytes = 0;
+  let lines = 0;
+  for (const [start, end] of mergeWindows(starts.length - 1, windows)) {
+    const take = Math.min(end - start + 1, NATIVE_READ_MAX_LINES - lines);
+    if (take <= 0) break;
+    bytes += starts[start - 1 + take]! - starts[start - 1]!;
+    lines += take;
+  }
+  return Math.min(bytes, NATIVE_READ_MAX_BYTES);
+}
+
+/**
+ * The bytes one native read of the WHOLE file at `absolute` returns:
+ * `min(size, bytes of its first 2,000 lines, 100,000 bytes)`. Only the first
+ * 100,000 bytes are read, so a multi-megabyte file costs no more than a small
+ * one. A file that cannot be read now is bounded by size alone.
+ */
+function nativeWholeFileBytes(absolute: string, size: number): number {
+  const windowSize = Math.min(size, NATIVE_READ_MAX_BYTES);
+  if (windowSize <= 0) return 0;
+  let fd: number | undefined;
+  try {
+    fd = openSync(absolute, "r");
+    const buffer = Buffer.allocUnsafe(windowSize);
+    let filled = 0;
+    while (filled < windowSize) {
+      const count = readSync(fd, buffer, filled, windowSize - filled, filled);
+      if (count === 0) break;
+      filled += count;
+    }
+    const head = buffer.subarray(0, filled);
+    let offset = 0;
+    for (let line = 0; line < NATIVE_READ_MAX_LINES; line++) {
+      const newline = head.indexOf(0x0a, offset);
+      // Fewer than 2,000 lines in the window: the byte limit (or EOF) ends it.
+      if (newline === -1) return filled;
+      offset = newline + 1;
+    }
+    return offset;
+  } catch {
+    return windowSize;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // Nothing left to release.
+      }
     }
   }
-  flush();
-  return { bytes, lines };
 }
 
 // ---------------------------------------------------------------------------
@@ -315,7 +403,11 @@ function resolvedRequest(
 // Measurement
 // ---------------------------------------------------------------------------
 
-/** Bytes of `specs` in the file at `absolute`; undefined when it cannot be scanned. */
+/**
+ * Bytes of `specs` in the file at `absolute`, bounded to one native read window;
+ * undefined when it cannot be scanned. `coversWholeFile` is about the lines
+ * asked for, before that bound.
+ */
 function scanRangeBaseline(
   absolute: string,
   specs: readonly string[],
@@ -333,8 +425,11 @@ function scanRangeBaseline(
     const parsed = parseBaselineRange(spec, totalLines);
     if (parsed !== undefined) windows.push(parsed);
   }
-  const { bytes, lines } = windowBytes(starts, windows);
-  return { bytes, coversWholeFile: totalLines > 0 && lines >= totalLines };
+  const { lines } = windowBytes(starts, windows);
+  return {
+    bytes: nativeWindowBytes(starts, windows),
+    coversWholeFile: totalLines > 0 && lines >= totalLines,
+  };
 }
 
 export function measureReadBaseline(options: MeasureReadBaselineOptions): ReadBaselineMeasurement {
@@ -400,7 +495,9 @@ export function measureReadBaseline(options: MeasureReadBaselineOptions): ReadBa
     measured++;
     if (credited.has(key) || seenWholeFiles.has(key)) continue;
     seenWholeFiles.add(key);
-    bytes += size;
+    // One native read window, not the file: a 1.59 MB source file is worth at
+    // most 25,000 tokens, what a native Read can return for it in one call.
+    bytes += nativeWholeFileBytes(absolute, size);
     uncreditedPaths.push(key);
   }
 
@@ -415,10 +512,11 @@ export function measureReadBaseline(options: MeasureReadBaselineOptions): ReadBa
 /**
  * Settle symbol reads once the response exists: each pending path is credited
  * the bytes of the windows the response served for it (`servedWindowsOf`'s
- * `{path, start, end}`), merged. Windows without a declared line range
- * (end = MAX_SAFE_INTEGER, "the whole file") are ignored for a symbol read: the
- * symbol was supposed to be a window, and a whole-file window here would
- * re-introduce the over-statement. No served window means 0 bytes.
+ * `{path, start, end}`), merged and bounded to one native read window. Windows
+ * without a declared line range (end = MAX_SAFE_INTEGER, "the whole file") are
+ * ignored for a symbol read: the symbol was supposed to be a window, and a
+ * whole-file window here would re-introduce the over-statement. No served
+ * window means 0 bytes.
  */
 export function settleSymbolBaselines(
   measurement: ReadBaselineMeasurement,
@@ -444,7 +542,7 @@ export function settleSymbolBaselines(
     }
     if (windows.length === 0) continue;
     try {
-      extra += windowBytes(lineStartOffsets(readFileSync(pending.absolute)), windows).bytes;
+      extra += nativeWindowBytes(lineStartOffsets(readFileSync(pending.absolute)), windows);
     } catch {
       // Unreadable now: the symbol contributes nothing.
     }

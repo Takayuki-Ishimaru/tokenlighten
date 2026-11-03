@@ -21,14 +21,7 @@ export async function readRegularFileUtf8(
   path: string,
   maxBytes = READ_PATH_MAX_BYTES,
 ): Promise<string> {
-  const before = await fs.stat(path);
-  if (!before.isFile()) {
-    throw new UnsafeReadPathError(path, "not-a-regular-file");
-  }
-  if (before.size > maxBytes) {
-    throw new UnsafeReadPathError(path, `file-too-large (${before.size} > ${maxBytes})`);
-  }
-
+  const before = await statBeforeRead(path, maxBytes);
   const content = await fs.readFile(path, "utf8");
   const contentBytes = Buffer.byteLength(content, "utf8");
   if (contentBytes > maxBytes) {
@@ -37,7 +30,36 @@ export async function readRegularFileUtf8(
       `content-too-large-after-read (${contentBytes} > ${maxBytes})`,
     );
   }
+  await statAfterRead(path, maxBytes, before.size);
+  return content;
+}
 
+/** `readRegularFileUtf8`'s guard around a binary read (the sharded index cache's gzip pieces). */
+export async function readRegularFileBytes(
+  path: string,
+  maxBytes = READ_PATH_MAX_BYTES,
+): Promise<Buffer> {
+  const before = await statBeforeRead(path, maxBytes);
+  const content = await fs.readFile(path);
+  if (content.length > maxBytes) {
+    throw new UnsafeReadPathError(path, `content-too-large-after-read (${content.length} > ${maxBytes})`);
+  }
+  await statAfterRead(path, maxBytes, before.size);
+  return content;
+}
+
+async function statBeforeRead(path: string, maxBytes: number): Promise<{ size: number }> {
+  const before = await fs.stat(path);
+  if (!before.isFile()) {
+    throw new UnsafeReadPathError(path, "not-a-regular-file");
+  }
+  if (before.size > maxBytes) {
+    throw new UnsafeReadPathError(path, `file-too-large (${before.size} > ${maxBytes})`);
+  }
+  return before;
+}
+
+async function statAfterRead(path: string, maxBytes: number, sizeBefore: number): Promise<void> {
   const after = await fs.stat(path);
   if (!after.isFile()) {
     throw new UnsafeReadPathError(path, "not-a-regular-file-after-read");
@@ -45,9 +67,7 @@ export async function readRegularFileUtf8(
   if (after.size > maxBytes) {
     throw new UnsafeReadPathError(path, `file-too-large-after-read (${after.size} > ${maxBytes})`);
   }
-  if (after.size > before.size) {
-    throw new UnsafeReadPathError(path, `file-grew-during-read (${before.size} -> ${after.size})`);
+  if (after.size > sizeBefore) {
+    throw new UnsafeReadPathError(path, `file-grew-during-read (${sizeBefore} -> ${after.size})`);
   }
-
-  return content;
 }

@@ -51,6 +51,12 @@ export default defineConfig({
       // The test suite intentionally exercises legacy fixtures; production
       // remains refuse-by-default and tests opt in explicitly/cross-platform.
       TL_LEGACY_INPUT: "accept",
+      // 2026-11-02: specs expect a complete source index on their first pack.
+      // The background build (features/indexing/sourceIndexAccess.ts) would
+      // answer a multi-fixture workspace from text search while it warms, so
+      // the suite runs the legacy synchronous build; backgroundSourceIndex.
+      // spec.ts opts its own servers and in-process calls back in explicitly.
+      TL_BACKGROUND_INDEX: "off",
     },
     // Memory (2026-09-27, measured): V8's optimizing compiler (TurboFan)
     // re-compiling tree-sitter's WebAssembly grammars takes ~0.5-1 GB of

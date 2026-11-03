@@ -61,7 +61,8 @@ export interface AtomicJsonWriteHooks {
 export async function writeJsonAtomic(
   root: string,
   targetPath: string,
-  serialized: string,
+  /** JSON text, or its already-encoded bytes (the sharded index cache's gzip pieces). */
+  serialized: string | Uint8Array,
   makeTmpPath: (dir: string) => string,
   hooks?: AtomicJsonWriteHooks,
 ): Promise<void> {

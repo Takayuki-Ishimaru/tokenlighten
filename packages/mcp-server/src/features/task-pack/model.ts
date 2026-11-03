@@ -266,8 +266,11 @@ export interface TaskPackResult {
    *   - "missing-roles": a required surface role is absent.
    *   - "concerns-uncovered": a query concern token is not addressed by any surface.
    *   - "diff-truncated": the working-tree diff had more changed files than fit.
+   *   - "index-warming": the symbol lookups ran while the source index was still
+   *     building (features/indexing/sourceIndexAccess.ts); the pack was served
+   *     from text search. Stamped at wire projection (decisionWire.ts), never here.
    */
-  coverage_reason?: "single-site" | "candidate-list" | "missing-roles" | "concerns-uncovered" | "diff-truncated";
+  coverage_reason?: "single-site" | "candidate-list" | "missing-roles" | "concerns-uncovered" | "diff-truncated" | "index-warming";
   // Code consumers retain the historical type; artifact objects are appended
   // only at the shared wire-emission choke point via TaskPackResultSurface[].
   surfaces: TaskPackSurface[];
@@ -496,6 +499,16 @@ export interface TaskPackResult {
     undetermined_reason?: string;
     empty?: boolean;
     empty_reason?: string;
+    /**
+     * 2026-11-02 (external evaluation T2): the request ASKS TO ADD this name
+     * ("add a SESSION_COOKIE_SALT config key", 「SESSION_COOKIE_SALT 設定を
+     * 追加」), so its absence is the expected starting state, not missing
+     * code. Neither reader renders it as `request-item-absent`:
+     * `buildCapabilityGaps` mints no gap for it, and the certificate reader
+     * words it `explicit-gap:request-item-create:<term> (<create_reason>)`.
+     */
+    create?: boolean;
+    create_reason?: string;
   }>;
   /**
    * FIXALL-A group D (2026-09-14) — THIS REQUEST NAMES NOTHING ADDRESSABLE.

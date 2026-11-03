@@ -23,6 +23,13 @@ import { readRegularFileUtf8 } from "./readGuard.js";
 import { writeJsonAtomic, type AtomicJsonWriteHooks } from "./atomicJson.js";
 import { readPublishJournal, writePendingPublishJournal, clearPublishJournal } from "./publishJournal.js";
 import { runConsistencyScan, consistencyScanEnabledFromEnv } from "./consistencyScan.js";
+import {
+  MAX_SHARDED_MANIFEST_BYTES,
+  loadShardedManifest,
+  removeShardedManifest,
+  shardedManifestTooLargeError,
+  writeShardedManifest,
+} from "./shardedManifest.js";
 
 export type { ChunkKind, IndexedChunkV1, SymbolKind };
 
@@ -198,6 +205,8 @@ export function getManifestCoverageSummary(manifest: SourceIndexManifestV1): Man
 
 export const CACHE_PATH = ".tokenlighten/cache/source-index.v1.json";
 export const MAX_CACHE_MANIFEST_BYTES = 32 * 1024 * 1024;
+/** How many files loadOrBuildSourceIndex reads ahead of the one it processes. */
+const READ_AHEAD = 16;
 
 export function getCachePath(root: string): string {
   return join(root, ".tokenlighten", "cache", "source-index.v1.json");
@@ -223,6 +232,8 @@ interface ManifestMemoEntry {
   ignoreHash: string;
   statFingerprint: string;
   manifest: SourceIndexManifestV1;
+  /** The `rootHash` this process last wrote to or loaded from the disk cache for this root. */
+  persistedRootHash?: string;
 }
 
 const manifestMemo = new Map<string, ManifestMemoEntry>();
@@ -330,6 +341,7 @@ export function invalidateCachedWorkspaceFiles(root: string, relPaths?: string[]
     ignoreHash: entry.ignoreHash,
     statFingerprint: INVALIDATED_STAT_FINGERPRINT,
     manifest,
+    ...(entry.persistedRootHash !== undefined ? { persistedRootHash: entry.persistedRootHash } : {}),
   });
 }
 
@@ -386,10 +398,15 @@ function sortKeys(value: unknown): unknown {
 // ---------------------------------------------------------------------------
 
 /**
- * Load the cached manifest from disk.
+ * Load the cached manifest from disk: the single-file cache, else the sharded
+ * one (shardedManifest.ts) a manifest over MAX_CACHE_MANIFEST_BYTES is kept in.
  * Returns null on any error (missing file, corrupt JSON, shape mismatch).
  */
 export async function loadManifest(root: string): Promise<SourceIndexManifestV1 | null> {
+  return (await loadSingleFileManifest(root)) ?? loadShardedManifest(root);
+}
+
+async function loadSingleFileManifest(root: string): Promise<SourceIndexManifestV1 | null> {
   const cachePath = getCachePath(root);
   try {
     assertSafeWriteTarget(root, cachePath);
@@ -495,7 +512,9 @@ function rememberManifestTooLarge(rootKey: string, fileCount: number): void {
 }
 
 /**
- * Write the manifest to the cache file atomically.
+ * Write the manifest to the cache atomically: the single file when it fits
+ * MAX_CACHE_MANIFEST_BYTES, else the sharded cache (shardedManifest.ts), and
+ * remove the other form. Throws past MAX_SHARDED_MANIFEST_BYTES.
  * Creates parent directories as needed.
  */
 export async function writeManifest(
@@ -506,21 +525,28 @@ export async function writeManifest(
   const cachePath = getCachePath(root);
   const rootKey = resolve(root);
   const fileCount = Object.keys(manifest.files).length;
-  const tooLargeError = () => new Error("source index manifest exceeds the 32 MiB cache limit");
+  // 2026-11-03: a manifest over the single-file cap used to throw here and was
+  // never persisted, so each new process rebuilt it (see shardedManifest.ts).
+  const writeSharded = async (minBytes = estimateManifestMinBytes(manifest)): Promise<void> => {
+    if (minBytes > MAX_SHARDED_MANIFEST_BYTES) throw shardedManifestTooLargeError();
+    await writeShardedManifest(root, manifest, hooks);
+    await removeSingleFileManifest(root, cachePath);
+  };
 
   // Fastest path: an earlier call for this SAME root already proved it too
   // large, and the file count has not shrunk materially since — skip every
   // remaining check, including the cheap estimate below.
   const remembered = manifestTooLargeMemo.get(rootKey);
   if (remembered !== undefined && fileCount >= remembered.fileCount * MANIFEST_TOO_LARGE_RECHECK_RATIO) {
-    throw tooLargeError();
+    return writeSharded();
   }
 
   // Cheap guaranteed-lower-bound pre-check: skip the real (expensive)
   // stringify when it is ALREADY certain to be futile.
-  if (estimateManifestMinBytes(manifest) > MAX_CACHE_MANIFEST_BYTES) {
+  const minBytes = estimateManifestMinBytes(manifest);
+  if (minBytes > MAX_CACHE_MANIFEST_BYTES) {
     rememberManifestTooLarge(rootKey, fileCount);
-    throw tooLargeError();
+    return writeSharded(minBytes);
   }
 
   // Compact (non-pretty) canonical JSON: readers only ever JSON.parse this
@@ -530,7 +556,7 @@ export async function writeManifest(
   const serialized = JSON.stringify(sortKeys(manifest));
   if (Buffer.byteLength(serialized, "utf8") > MAX_CACHE_MANIFEST_BYTES) {
     rememberManifestTooLarge(rootKey, fileCount);
-    throw tooLargeError();
+    return writeSharded(minBytes);
   }
   // A successful write proves this root currently fits — forget any stale
   // "too large" verdict so a FUTURE regrowth is judged on its own, not
@@ -547,6 +573,17 @@ export async function writeManifest(
     (dir) => join(dir, `source-index.v1.${process.pid}.${Date.now()}.tmp`),
     hooks,
   );
+  await removeShardedManifest(root);
+}
+
+/** Best-effort: the single-file cache, once the sharded one holds the index. */
+async function removeSingleFileManifest(root: string, cachePath: string): Promise<void> {
+  try {
+    assertSafeWriteTarget(root, cachePath);
+    await fs.unlink(cachePath);
+  } catch {
+    // absent, or not ours to remove
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -789,6 +826,36 @@ async function runOpportunisticConsistencyScan(
   }
 }
 
+/**
+ * The disk cache as an incremental seed, or null (recording why) when it is
+ * absent, or was built for another ignore set, engine version or root.
+ */
+async function loadTrustedDiskManifest(
+  root: string,
+  ignoreHash: string,
+  rootKey: string,
+  cacheRebuildReasons: string[],
+): Promise<SourceIndexManifestV1 | null> {
+  const cached = await loadManifest(root);
+  if (cached === null) return null;
+  // Discard cache if ignoreHash changed.
+  if (cached.ignoreHash !== ignoreHash) {
+    cacheRebuildReasons.push("ignore-hash");
+    return null;
+  }
+  // Discard cache if engineVersion changed.
+  if (cached.engineVersion !== CURRENT_ENGINE_VERSION) {
+    cacheRebuildReasons.push("engine-version");
+    return null;
+  }
+  // P1.3: Discard cache if repoRootRealpath doesn't match current root (foreign cache).
+  if (cached.repoRootRealpath !== rootKey) {
+    cacheRebuildReasons.push("foreign-cache");
+    return null;
+  }
+  return cached;
+}
+
 // ---------------------------------------------------------------------------
 // loadOrBuildSourceIndex
 // ---------------------------------------------------------------------------
@@ -869,37 +936,16 @@ export async function loadOrBuildSourceIndex(
   // check's own comment for the race this closes.
   const epochAtStart = manifestMemoEpoch.get(rootKey) ?? 0;
 
-  // 1) Try to load cached manifest.
-  let cachedManifest: SourceIndexManifestV1 | null = null;
-  if (!opts.noCache) {
-    cachedManifest = await loadManifest(root);
-    // Discard cache if ignoreHash changed.
-    if (cachedManifest !== null && cachedManifest.ignoreHash !== opts.ignoreHash) {
-      cachedManifest = null;
-      cacheRebuildReasons.push("ignore-hash");
-    }
-    // Discard cache if engineVersion changed.
-    if (cachedManifest !== null && cachedManifest.engineVersion !== CURRENT_ENGINE_VERSION) {
-      cachedManifest = null;
-      cacheRebuildReasons.push("engine-version");
-    }
-    // P1.3: Discard cache if repoRootRealpath doesn't match current root (foreign cache).
-    if (cachedManifest !== null) {
-      if (cachedManifest.repoRootRealpath !== rootKey) {
-        cachedManifest = null;
-        cacheRebuildReasons.push("foreign-cache");
-      }
-    }
-  }
-
-  // 2) Enumerate files.
+  // 1) Enumerate files.
   const matcher = await createIgnoreMatcher(root, opts.extraIgnorePatterns);
   const files = await enumerateFiles(root, matcher);
 
-  // 2b) In-process memo: an identical stat fingerprint (and compatible
+  // 2) In-process memo: an identical stat fingerprint (and compatible
   // options) means the previously built manifest is still current — skip the
   // per-file reads/validation and the cache/graph writes outright.
-  const diskManifest = cachedManifest;
+  let cachedManifest: SourceIndexManifestV1 | null = null;
+  // The `rootHash` the disk cache is known to hold (step 9 skips a rewrite of it).
+  let persistedRootHash: string | undefined;
   const statFingerprint = opts.noCache ? "" : statFingerprintOf(files);
   if (!opts.noCache) {
     const memoEntry = manifestMemo.get(rootKey);
@@ -934,26 +980,47 @@ export async function loadOrBuildSourceIndex(
         cacheRebuildReasons: [],
       };
     }
-    // A stale memo still beats an absent/failed disk cache as the incremental
-    // seed: unchanged files take the fast path below instead of a full
-    // re-extract when the disk manifest could not be persisted.
-    if (cachedManifest === null && memoEntry !== undefined && memoEntry.ignoreHash === opts.ignoreHash) {
+    // 2b) The seed for the per-file loop: a stale memo, else the disk cache.
+    // 2026-11-03: the disk cache is read only without a usable memo. It used
+    // to be read first on every call, a parse of the whole cached manifest (up
+    // to 32 MiB, and the sharded cache is far larger) that the memo then made
+    // moot; both seeds are validated per file by content hash below.
+    if (memoEntry !== undefined && memoEntry.ignoreHash === opts.ignoreHash) {
       cachedManifest = memoEntry.manifest;
+      persistedRootHash = memoEntry.persistedRootHash;
+    } else {
+      cachedManifest = await loadTrustedDiskManifest(root, opts.ignoreHash, rootKey, cacheRebuildReasons);
+      persistedRootHash = cachedManifest?.rootHash;
     }
   }
 
   // 3) Process each file.
   const fileEntries: Record<string, IndexedFileV1> = {};
+  // 2026-11-03: reads run up to READ_AHEAD files ahead of the loop. One at a
+  // time, reading was 6 of a warm 11 s reload of a 4.5k-file workspace on
+  // Windows (three syscalls a file, each awaited in turn). A test's midBuild
+  // hook edits files just before the loop reaches them, so it reads in order.
+  const readAhead = opts.__testHooks?.midBuild === undefined ? READ_AHEAD : 1;
+  const reads = new Map<number, Promise<string>>();
+  const startRead = (index: number): void => {
+    if (index >= files.length || reads.has(index)) return;
+    const read = readRegularFileUtf8(files[index]!.absPath);
+    read.catch(() => undefined); // awaited (and its error handled) when the loop reaches it
+    reads.set(index, read);
+  };
 
-  for (const f of files) {
+  for (const [index, f] of files.entries()) {
     opts.__testHooks?.midBuild?.(f.path);
+    for (let ahead = index; ahead < index + readAhead; ahead++) startRead(ahead);
     const cached = cachedManifest?.files[f.path];
 
     // Read file — needed for hash verification (fast path P1.4 gate and mid
     // path) and P1.3 symbol-line validation (fast path and mid path).
+    const read = reads.get(index)!;
+    reads.delete(index);
     let raw: string;
     try {
-      raw = await readRegularFileUtf8(f.absPath);
+      raw = await read;
     } catch (e) {
       warnings.push(`skeleton-index: failed to read ${f.path}: ${String(e)}`);
       cacheRebuildReasons.push(`file-read-error:${f.path}`);
@@ -1243,12 +1310,13 @@ export async function loadOrBuildSourceIndex(
   // already holds this exact index content (only stat metadata could have
   // been refreshed) — serializing a repo-scale manifest per call is a real
   // cost, and the next reader re-derives freshness from content hashes.
-  const diskCacheCurrent = diskManifest !== null
+  const diskCacheCurrent = persistedRootHash !== undefined
     && reparsed === 0
-    && manifest.rootHash === diskManifest.rootHash;
+    && manifest.rootHash === persistedRootHash;
   if (!opts.noCache && !diskCacheCurrent) {
     try {
       await writeManifest(root, manifest, { beforeRename: opts.__testHooks?.beforeManifestRename });
+      persistedRootHash = manifest.rootHash;
       // V11-09: manifest generation `generation` is now durable but the
       // paired graph write (step 10) has not confirmed yet. Record that so
       // a crash in exactly this window is detectable and self-healing on
@@ -1309,7 +1377,12 @@ export async function loadOrBuildSourceIndex(
         const oldest = manifestMemo.keys().next().value;
         if (oldest !== undefined) manifestMemo.delete(oldest);
       }
-      manifestMemo.set(rootKey, { ignoreHash: opts.ignoreHash, statFingerprint, manifest });
+      manifestMemo.set(rootKey, {
+        ignoreHash: opts.ignoreHash,
+        statFingerprint,
+        manifest,
+        ...(persistedRootHash !== undefined ? { persistedRootHash } : {}),
+      });
     }
   }
 

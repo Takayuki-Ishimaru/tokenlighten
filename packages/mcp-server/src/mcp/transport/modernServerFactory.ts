@@ -47,6 +47,8 @@ import { SERVER_INSTRUCTIONS } from "../../protocol/serverInstructions.js";
 // The startup warm-up, scheduled at the same handshake point as the
 // hand-rolled leg's `notifications/initialized` (server.ts's `handleRequest`).
 import { scheduleStartupWarmup } from "../../util/startupWarmup.js";
+import { prewarmSymbolIndex } from "../../tools/searchSymbols.js";
+import { exitAfterTransportCloseIfBuilding } from "../../features/indexing/sourceIndexAccess.js";
 import type { CallToolResult, ListToolsResult, Server } from "@modelcontextprotocol/server";
 
 /** The `Server` class as dynamically imported by a leg's own try/catch. */
@@ -137,6 +139,7 @@ export function makeModernServerFactory(
     let hostActivationWatch: HostActivationWatch | undefined;
     server.oninitialized = () => {
       scheduleStartupWarmup(activeRoot);
+      prewarmSymbolIndex(activeRoot);
       hostActivationWatch?.stop();
       hostActivationWatch = startHostActivationWatch(activeRoot, () => {
         void server.sendToolListChanged().catch(() => undefined);
@@ -145,6 +148,9 @@ export function makeModernServerFactory(
     server.onclose = () => {
       hostActivationWatch?.stop();
       hostActivationWatch = undefined;
+      // A source-index build still running would keep the process alive after
+      // the client closed the transport (features/indexing/sourceIndexAccess.ts).
+      exitAfterTransportCloseIfBuilding((exit) => { process.stdout.write("", exit); });
     };
 
     return server;

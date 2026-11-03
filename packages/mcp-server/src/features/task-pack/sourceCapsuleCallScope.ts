@@ -158,6 +158,11 @@ export function finalizeSourceCapsules(
   while (finalized.size > MAX_KEYS) finalized.delete(finalized.keys().next().value as string);
 }
 
+/** Every lane's capsules whose key names `root` (`belongsToRoot` decides; the compaction reset). */
+export function clearSourceCapsulesWhere(belongsToRoot: (key: string) => boolean): void {
+  for (const key of [...finalized.keys()]) if (belongsToRoot(key)) clearSourceCapsules(key);
+}
+
 export function clearSourceCapsules(key?: string): void {
   if (key === undefined) {
     finalized.clear();

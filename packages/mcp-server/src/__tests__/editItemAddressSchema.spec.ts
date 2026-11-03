@@ -102,7 +102,9 @@ const LEAN_SURFACES: ReadonlyArray<Surface & { bytes: number; sha256: string }> 
   {
     label: "Copilot CLI minimal (TL_LEAN_CALLS=1, TL_MINIMAL_TOOLS=1)", client: "copilot-cli", copilotAjv: true,
     env: { ...HOST_DEFAULTS, TL_PORTABLE_TOOLS: "0", TL_LEAN_CALLS: "1", TL_MINIMAL_TOOLS: "1" },
-    bytes: 2398, sha256: "4483608265d58729f99410c48858ca318c889f6fc89ad24649c983679486c535",
+    // 2026-11-03 (routing advice: the Copilot CLI tl_read_file description
+    // drops "FIRST", tl_search_files names the unknown-location case): 2398 -> 2392.
+    bytes: 2392, sha256: "97f28231b425b1b43d70035be1f5602354260a178e642713bcd8540e705a01a8",
   },
 ];
 

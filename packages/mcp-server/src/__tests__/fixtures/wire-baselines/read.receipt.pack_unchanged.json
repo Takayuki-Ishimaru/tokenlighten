@@ -3,7 +3,6 @@
   "kind": "read.task_pack",
   "task": {
     "id": "$TH",
-    "replay": "$QREF",
     "coverage": "partial",
     "coverage_reason": "candidate-list"
   },
@@ -41,10 +40,8 @@
     ]
   },
   "profile_binding": {
-    "requested": "auto",
     "selected": "generic",
-    "source": "inferred",
-    "confidence": 0.4
+    "source": "inferred"
   },
   "qref": "$QREF"
 }

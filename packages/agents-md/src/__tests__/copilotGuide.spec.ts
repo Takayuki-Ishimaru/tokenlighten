@@ -81,7 +81,7 @@ describe("standalone Copilot stubs", () => {
   });
 
   it("puts a ready first inspection call before lookup alternatives and gates native fallback", () => {
-    const first = standalone.split("\n").find((line) => line.startsWith("1. FIRST source inspection:"))!;
+    const first = standalone.split("\n").find((line) => line.startsWith("1. Unknown location, several files or documents:"))!;
     expect(first).toContain("mcp__tokenlighten_tl_read_file");
     expect(standalone).not.toContain("tool_search");
     const example = JSON.parse(first.split("`")[3]);
@@ -90,7 +90,7 @@ describe("standalone Copilot stubs", () => {
     expect(first).toContain("targets:[{path},...]");
     expect(first).toContain("replaces grep_search/semantic_search/read_file");
     expect(standalone).toContain("Batch independent context calls with TL.");
-    expect(standalone).toContain("Native search/read only when TL is unavailable, the user asks for native, or TL reports incomplete scope/verified absence.");
+    expect(standalone).toContain("Native search/read: a user-named file + small local task, TL unavailable, user asks for native, or TL reports incomplete scope/verified absence.");
     expect(standalone).toContain("mcp__tokenlighten_tl_search_files");
     expect(standalone).toContain("mcp__tokenlighten_tl_edit_file");
     expect(standalone).toContain("`whole:true` means `context` is already read");

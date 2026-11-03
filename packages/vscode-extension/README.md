@@ -24,6 +24,11 @@ If TokenLighten causes a problem, clear **Enable TL in this workspace** and save
 
 To remove TokenLighten from the machine entirely — not just this workspace — run **TokenLighten: Uninstall TokenLighten from This Machine** from the Command Palette. It removes the staged runtime and host identity, and TokenLighten-managed registrations for Claude Code and Codex. For every workspace this machine install set up, it also removes TokenLighten's managed guide blocks and managed MCP entries (keeping a `.tl-backup` copy next to each edited MCP file); your own content, other servers' entries, and workspaces it never set up are left untouched.
 
+Workspace setup installs TokenLighten agent hooks for the clients it configures.
+They follow the client's trust and hook settings. For opt-out and removal,
+use CLI setup with `--no-hooks` or `--remove-hooks`. See [Agent hooks](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.5/release-docs/getting-started.md#agent-hooks)
+for output-shortening limits and local log storage.
+
 ## How token reduction works
 
 Coding agents often spend many tokens reading entire files, repeating searches, and asking predictable follow-up questions before they can make a small change. TokenLighten moves that context-selection work into a local MCP server.
@@ -50,7 +55,7 @@ TokenLighten performs repository indexing and context selection locally. Optiona
 The optional model token counter is disabled by default. When configured for
 reply selection, it passes candidate reply text to the selected provider's
 counting API. Review the provider's data handling and the
-[privacy guide](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.4/release-docs/privacy-security-support.md)
+[privacy guide](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.5/release-docs/privacy-security-support.md)
 before enabling it.
 
 Workspace-changing actions require a trusted VS Code workspace.
@@ -61,7 +66,7 @@ Open **TokenLighten: Manage Local Analysis Engines** to configure typed symbol r
 compound requests and local multilingual semantic search. Typed resolution
 and semantic search are off by default; model weights require an explicit
 download. The panel also offers language-server configuration and licenses.
-See the [local analysis guide](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.4/release-docs/local-analysis.md).
+See the [local analysis guide](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.5/release-docs/local-analysis.md).
 
 ## Settings
 
@@ -75,7 +80,7 @@ See the [local analysis guide](https://github.com/Takayuki-Ishimaru/tokenlighten
 | `tokenlighten.guideProfile` | `compact` | Shared guide written during workspace setup; explicit `full` or `medium` choices take precedence. |
 | `tokenlighten.toolSurface` | `full` | MCP capabilities: `full` or the smaller code/plain-text/config `code` surface. Reconnect after changing it. |
 | `tokenlighten.copilotGuide` | `standalone` | Copilot instructions: dedicated guide, shared AGENTS.md, or keep existing configuration. |
-| `tokenlighten.hostTokenCounter.modelFamily` | empty | Optional model family for reply token counting; candidate reply text reaches the selected provider's counting API when reply selection is enabled. See the [MCP settings](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.4/release-docs/mcp-tools.md#optional-reply-and-table-settings). |
+| `tokenlighten.hostTokenCounter.modelFamily` | empty | Optional model family for reply token counting; candidate reply text reaches the selected provider's counting API when reply selection is enabled. See the [MCP settings](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.5/release-docs/mcp-tools.md#optional-reply-and-table-settings). |
 
 ## Main workflow
 
@@ -105,4 +110,4 @@ npm run package -w tokenlighten-vscode-extension
 code --install-extension packages/vscode-extension/tokenlighten-vscode-extension-<version>.vsix
 ```
 
-See the [project README](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.4/README.md) and [public release documentation](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.4/release-docs/README.md) for setup, MCP tools, language support, privacy, and licensing.
+See the [project README](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.5/README.md) and [public release documentation](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.16.5/release-docs/README.md) for setup, MCP tools, language support, privacy, and licensing.

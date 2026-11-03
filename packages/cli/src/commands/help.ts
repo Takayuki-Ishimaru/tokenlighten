@@ -37,7 +37,7 @@ Commands:
   skeleton check           Verify AGENTS.md skeleton block is current (CI gate)
   agents update            Write AGENTS.md stubs (delegates to @tokenlighten/agents-md)
   setup [--check]          Interactive prereq detection + install (Node/Python/git); --check aliases 'doctor --json'
-  workspace setup          One-step AI rules + project-scoped MCP setup
+  workspace setup          One-step AI rules + project-scoped MCP setup + agent hooks
   clients status           Inspect machine registration for Claude Code and Codex
   clients activate         Auto-register capability-confirmed hosts only
   clients select           Plan a profile from a request (add --apply to write)
@@ -57,6 +57,16 @@ Commands:
   install-hooks [--uninstall]
                            Add/remove 'tl skeleton check' pre-commit hook (opt-in) — unrelated
                            to 'install' above (that installs TokenLighten; this installs a git hook)
+  run -- <command...>      Run a test/build command, save its full output under
+                           .tokenlighten/.runtime/run/, print failures + summary + log path
+  hook <event> [--client claude-code|codex|copilot]
+                           Agent-host hook handler (stdin JSON): post-tool-use compresses
+                           a test/build command's output after it ran (Claude Code,
+                           Copilot); pre-compact, post-compact
+                           and session-start record the compaction marker. Installed by
+                           'tl install' / 'tl workspace setup' by default; --no-hooks
+                           skips them, --remove-hooks removes them. Codex and Copilot
+                           load them only once the folder is trusted
   version                  Print CLI version
   help                     Print this help
 

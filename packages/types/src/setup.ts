@@ -1,3 +1,5 @@
+import type { AgentHooksReport } from "./hooks.js";
+
 export type TokenLightenSetupClient = "vscode" | "codex" | "claude-code";
 
 // VS Code Copilot Chat hides any MCP tool result over its own
@@ -91,6 +93,8 @@ export interface TokenLightenWorkspaceSetupResult {
   copilotInlineResults?: CopilotInlineResultsReport;
   /** Copilot standard-setup evaluation (2026-10-02); absent only for a schema that predates it. */
   copilotGuide?: CopilotGuideReport;
+  /** Agent hooks (2026-11-03): installed by default for the clients set up; absent when the run passed `--no-hooks` (or set up no client). */
+  agentHooks?: AgentHooksReport;
 }
 
 export interface TokenLightenWorkspaceSummary {

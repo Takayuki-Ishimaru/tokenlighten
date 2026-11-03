@@ -30,6 +30,7 @@ import { fileURLToPath } from "node:url";
 import { removeAll } from "@tokenlighten/agents-md";
 import { usageLogDirectory } from "@tokenlighten/usage";
 import type {
+  AgentHooksReport,
   CopilotGuideReport,
   CopilotInlineResultsReport,
   InstallHostEntry,
@@ -41,6 +42,7 @@ import type {
   InstallWorkspaceEntry,
   ToolSurface,
   TokenLightenRegistrationClient,
+  TokenLightenSetupClient,
 } from "@tokenlighten/types";
 import { makeTmpPath, retryRename } from "../atomicWrite.js";
 import { readConfig, writeConfig } from "../config.js";
@@ -81,25 +83,31 @@ import {
 } from "./clients.js";
 import { evaluateDoctorAsync as defaultEvaluateDoctor, type DoctorResult } from "./doctor.js";
 import {
+  AGENT_HOOK_FLAGS,
   COPILOT_AGENTS_MD_KEY,
   COPILOT_GUIDE_VALUES,
   COPILOT_INLINE_RESULTS_VALUES,
   COPILOT_RAISED_THRESHOLD_BYTES,
   COPILOT_SETTINGS_KEY,
+  configuredWorkspaceClients,
   defaultCopilotGuideRequest,
+  formatAgentHooksLines,
   formatCopilotGuideLine,
   formatCopilotInlineResultsLine,
+  formatWorkspaceSharingLines,
   isCopilotGuideRequest,
   isCopilotInlineResultsMode,
   recordWorkspaceSetup as defaultRecordWorkspaceSetup,
   removeCopilotGuideSettingsIfManaged,
   removeCopilotThresholdIfManaged,
   setupWorkspace as defaultSetupWorkspace,
+  workspaceFileSharing,
   workspacePathsEqual,
   type CopilotGuideRequest,
   type CopilotInlineResultsMode,
 } from "./workspace.js";
 import { removeCopilotSessionHook } from "../copilotSessionHooks.js";
+import { removeAgentHooks } from "../agentHooksSetup.js";
 
 const INSTALL_USAGE = `\
 Usage:
@@ -114,6 +122,20 @@ Options:
   --workspace <path>       Workspace to set up (repeatable; positionals work too)
   --source <dir>           Bundle/source directory (default: directory of the running CLI)
   --clients <list>|auto|none   Which vendor-CLI hosts to register (default: auto)
+  --workspace-clients <list>|auto|all
+                             Which per-workspace files to write (default: auto).
+                             auto: only for the hosts --clients detected or
+                             selected (claude-code: .mcp.json; codex:
+                             .codex/config.toml; copilot-cli: .vscode/mcp.json,
+                             .github/* and the other VS Code files), plus any
+                             client the workspace already has a TokenLighten
+                             entry for; AGENTS.md and CLAUDE.md are always
+                             written. all: vscode, codex and claude-code. A
+                             list such as claude-code,codex writes exactly
+                             those. auto also writes the full set when no
+                             detected host maps to a client (nothing detected,
+                             --clients none, only Gemini CLI) and under
+                             --from-extension. Existing files are never removed.
   --read-only               Generated entries omit --allow-write
   --tool-surface code|full  Advertised tool surface for generated entries
   --guide-profile full|medium|compact|portable
@@ -128,6 +150,16 @@ Options:
                              TokenLighten's block; agents-md: Copilot reads
                              AGENTS.md; keep: leave that Copilot setting untouched
                              (the default under --copilot-inline-results keep)
+  --no-hooks                Leave agent hooks alone (nothing written, nothing
+                             removed). By default setup writes TokenLighten's agent
+                             hooks into each workspace client's own hook
+                             configuration (.claude/settings.json, .codex/hooks.json,
+                             .github/hooks/tokenlighten-hooks.json): test/build output
+                             compressed after the run and the compaction marker; see
+                             'tl workspace setup --help'. Codex and Copilot load them
+                             only once the folder is trusted, which setup does not do.
+                             --hooks is accepted and means the default
+  --remove-hooks            Remove TokenLighten's agent hooks from those files
   --home <dir>              Override the machine-install home
   --use <version>           Re-point bin/tl.js at an already-staged version
   --prune                   Remove staged app/<version> directories other than current
@@ -138,7 +170,11 @@ Options:
   --force                    Overwrite foreign entries / re-stage identical build stamps
   --from-extension            This install is staged from the VS Code extension's bundle
   --dev                       This install is a source checkout (packages/cli/dist)
-  --allow-root                 Allow running as root/uid 0 (POSIX only)
+  --allow-root                 Allow running as root/uid 0 (POSIX only). Without it
+                               a root run is refused, because the install would
+                               land in the administrator's profile; pass it for a
+                               root devcontainer or CI job, where root is the
+                               account that runs your agents
 
 Exit codes:
   0   success (or --clients none, even with no host registered — that is
@@ -158,6 +194,10 @@ export interface ParsedInstallArgs {
   workspaces: string[];
   source?: string;
   clientsMode: "auto" | "none" | string[];
+  /** `--workspace-clients`: which per-workspace client files to write. Unchecked
+   * strings at parse time, validated by `runInstall` (like `copilotGuide`
+   * below) before anything else happens. */
+  workspaceClients: "auto" | "all" | string[];
   readOnly: boolean;
   toolSurface?: ToolSurface;
   guideProfile?: "full" | "medium" | "compact";
@@ -169,6 +209,14 @@ export interface ParsedInstallArgs {
   /** Unchecked cast at parse time, validated by `runInstall` like
    * `copilotInlineResults` above. Undefined defaults to "standalone". */
   copilotGuide?: CopilotGuideRequest;
+  /**
+   * Agent hooks (2026-11-03, default-on): installed unless `--no-hooks`
+   * (hook files left alone) or `--remove-hooks` (taken out); `--hooks` is the
+   * explicit spelling of the default. `runInstall` refuses more than one.
+   */
+  hooks: boolean;
+  noHooks: boolean;
+  removeHooks: boolean;
   home?: string;
   use?: string;
   prune: boolean;
@@ -186,11 +234,15 @@ export function parseInstallArgs(args: readonly string[]): ParsedInstallArgs {
   const workspaces: string[] = [];
   let source: string | undefined;
   let clientsMode: "auto" | "none" | string[] = "auto";
+  let workspaceClients: "auto" | "all" | string[] = "auto";
   let readOnly = false;
   let toolSurface: ToolSurface | undefined;
   let guideProfile: "full" | "medium" | "compact" | undefined;
   let copilotInlineResults: CopilotInlineResultsMode | undefined;
   let copilotGuide: CopilotGuideRequest | undefined;
+  let hooks = false;
+  let noHooks = false;
+  let removeHooks = false;
   let home: string | undefined;
   let use: string | undefined;
   let prune = false;
@@ -219,6 +271,20 @@ export function parseInstallArgs(args: readonly string[]): ParsedInstallArgs {
           : value.split(",").map((v) => v.trim()).filter(Boolean);
         break;
       }
+      case "--workspace-clients": {
+        // A missing value (end of argv, or the next flag) is kept as an empty
+        // list so `runInstall` rejects it instead of swallowing a flag.
+        const value = args[i + 1];
+        if (value === undefined || value.startsWith("--")) {
+          workspaceClients = [];
+          break;
+        }
+        i++;
+        workspaceClients = value === "auto" || value === "all"
+          ? value
+          : value.split(",").map((v) => v.trim()).filter(Boolean);
+        break;
+      }
       case "--read-only":
         readOnly = true;
         break;
@@ -233,6 +299,15 @@ export function parseInstallArgs(args: readonly string[]): ParsedInstallArgs {
         break;
       case "--copilot-guide":
         copilotGuide = args[++i] as CopilotGuideRequest;
+        break;
+      case "--hooks":
+        hooks = true;
+        break;
+      case "--no-hooks":
+        noHooks = true;
+        break;
+      case "--remove-hooks":
+        removeHooks = true;
         break;
       case "--home":
         home = args[++i];
@@ -273,8 +348,8 @@ export function parseInstallArgs(args: readonly string[]): ParsedInstallArgs {
     }
   }
   return {
-    workspaces, source, clientsMode, readOnly, toolSurface, guideProfile, copilotInlineResults, copilotGuide,
-    home, use, prune, uninstall, dryRun, json, yes, force, fromExtension, dev, allowRoot,
+    workspaces, source, clientsMode, workspaceClients, readOnly, toolSurface, guideProfile, copilotInlineResults, copilotGuide,
+    hooks, noHooks, removeHooks, home, use, prune, uninstall, dryRun, json, yes, force, fromExtension, dev, allowRoot,
   };
 }
 
@@ -831,6 +906,108 @@ function migrateLegacyShim(
 // Plan
 // ---------------------------------------------------------------------------
 
+/** Every per-workspace client, in the order `tl workspace setup` writes them. */
+const ALL_WORKSPACE_CLIENTS: readonly TokenLightenSetupClient[] = ["vscode", "codex", "claude-code"];
+
+/** `--workspace-clients` problem, or undefined when the request is acceptable. */
+export function invalidWorkspaceClients(request: ParsedInstallArgs["workspaceClients"]): string | undefined {
+  if (request === "auto" || request === "all") return undefined;
+  if (request.length === 0) return "(no value)";
+  const bad = request.filter((client) => !(ALL_WORKSPACE_CLIENTS as readonly string[]).includes(client));
+  return bad.length > 0 ? bad.join(",") : undefined;
+}
+
+/**
+ * Which per-workspace client a detected host needs files for. VS Code itself is
+ * not a detectable host, so Copilot CLI stands for the Copilot side (the
+ * `vscode` set carries `.github/copilot-instructions.md`, which Copilot CLI
+ * also reads); Gemini CLI reads only the machine-level entry and AGENTS.md.
+ */
+const WORKSPACE_CLIENT_FOR_HOST: Readonly<Record<TokenLightenRegistrationClient, TokenLightenSetupClient | undefined>> = {
+  "claude-code": "claude-code",
+  "codex": "codex",
+  "copilot-cli": "vscode",
+  "gemini": undefined,
+};
+
+const inCanonicalOrder = (clients: Iterable<TokenLightenSetupClient>): TokenLightenSetupClient[] => {
+  const wanted = new Set(clients);
+  return ALL_WORKSPACE_CLIENTS.filter((client) => wanted.has(client));
+};
+
+export type WorkspaceClientsReason =
+  /** `--workspace-clients a,b`: exactly the listed clients. */
+  | "explicit"
+  /** `--workspace-clients all`. */
+  | "all"
+  /** `--from-extension`: the extension's own call always needs the full set. */
+  | "from-extension"
+  /** auto: the clients of the detected/selected hosts (plus `preserved`). */
+  | "detected"
+  /** auto: no host maps to a client (nothing detected, `--clients none`, only Gemini): full set, as before. */
+  | "nothing-detected";
+
+/** The per-workspace client set one `--workspace` receives (§4.2). */
+export interface WorkspaceClientsPlan {
+  root: string;
+  clients: TokenLightenSetupClient[];
+  reason: WorkspaceClientsReason;
+  /** Hosts whose workspace client selected `clients` (reason "detected"). */
+  hosts: TokenLightenRegistrationClient[];
+  /** Clients kept only because the workspace already has their TokenLighten entry. */
+  preserved: TokenLightenSetupClient[];
+}
+
+/**
+ * DESIGN-v0.14-mcp-only-install.md §4.2: the per-workspace client set.
+ * `--clients` still governs ONLY machine-wide host registration, but under the
+ * default `--workspace-clients auto` its outcome (the detected or selected
+ * hosts) now also narrows the workspace files, so a Claude Code-only machine
+ * gets `.mcp.json` rather than thirteen files for editors it does not have.
+ * Everything that must keep writing the full set still does: the VS Code
+ * extension's `--from-extension --clients none` call (the v0.14.3 fix), any
+ * run where no host maps to a workspace client, and an explicit `all`.
+ */
+export function resolveWorkspaceClients(
+  args: Pick<ParsedInstallArgs, "workspaceClients" | "fromExtension">,
+  hostsToRegister: readonly TokenLightenRegistrationClient[],
+  root: string,
+  configured: (root: string) => TokenLightenSetupClient[] = configuredWorkspaceClients,
+): WorkspaceClientsPlan {
+  if (Array.isArray(args.workspaceClients)) {
+    return {
+      root,
+      clients: inCanonicalOrder(args.workspaceClients as TokenLightenSetupClient[]),
+      reason: "explicit",
+      hosts: [],
+      preserved: [],
+    };
+  }
+  if (args.workspaceClients === "all") {
+    return { root, clients: [...ALL_WORKSPACE_CLIENTS], reason: "all", hosts: [], preserved: [] };
+  }
+  if (args.fromExtension) {
+    return { root, clients: [...ALL_WORKSPACE_CLIENTS], reason: "from-extension", hosts: [], preserved: [] };
+  }
+  const hosts = hostsToRegister.filter((host) => WORKSPACE_CLIENT_FOR_HOST[host] !== undefined);
+  const detected = inCanonicalOrder(
+    hosts.map((host) => WORKSPACE_CLIENT_FOR_HOST[host]!),
+  );
+  if (detected.length === 0) {
+    return { root, clients: [...ALL_WORKSPACE_CLIENTS], reason: "nothing-detected", hosts: [], preserved: [] };
+  }
+  // A workspace set up earlier keeps refreshing the files it already has, so an
+  // upgrade never leaves a stale identity or schema stamp in an unchanged file.
+  const preserved = configured(root).filter((client) => !detected.includes(client));
+  return {
+    root,
+    clients: inCanonicalOrder([...detected, ...preserved]),
+    reason: "detected",
+    hosts: [...hosts],
+    preserved: inCanonicalOrder(preserved),
+  };
+}
+
 export interface InstallPlan {
   version: string;
   installedBy: InstallSource;
@@ -841,6 +1018,8 @@ export interface InstallPlan {
   writePosture: "allow-write" | "read-only";
   hostsToRegister: readonly TokenLightenRegistrationClient[];
   workspaces: readonly string[];
+  /** Per `workspaces[]` entry (same order): the per-workspace client files it will receive. */
+  workspaceClients: readonly WorkspaceClientsPlan[];
   /** Recorded workspaces that no longer exist on disk and were dropped. */
   workspaceWarnings: readonly string[];
   /** PID of a live `tl mcp start` background server this run will stop. */
@@ -859,13 +1038,15 @@ export interface InstallPlan {
   /** Review S1: disclosed BEFORE the rewrite happens (also in --dry-run) —
    * `migrateLegacyShim` performs the write described here, unchanged. */
   legacyShim?: { path: string; action: "migrate-to-forwarder"; target: string };
-  /** Resolved from `--copilot-inline-results` (default "raise") — every
-   * `--workspace` always gets the full per-workspace client set (§4.2),
-   * so this alone (with `workspaces.length > 0`) decides whether
-   * `formatPlan` discloses the pending `.vscode/settings.json` write. */
+  /** Resolved from `--copilot-inline-results` (default "raise") — together
+   * with whether any workspace's `workspaceClients` include `vscode` (§4.2),
+   * this decides whether `formatPlan` discloses the pending
+   * `.vscode/settings.json` write. */
   copilotInlineResultsMode: CopilotInlineResultsMode;
   /** Resolved from `--copilot-guide` (default "standalone"; "keep" under `--copilot-inline-results keep`). */
   copilotGuideRequest: CopilotGuideRequest;
+  /** Agent hooks (2026-11-03): "install" by default, "remove" under `--remove-hooks`; absent (`--no-hooks`) leaves every hook file untouched. */
+  agentHooks?: "install" | "remove";
 }
 
 function resolveInstalledBy(args: ParsedInstallArgs): InstallSource {
@@ -969,6 +1150,8 @@ async function computePlan(
       return exists;
     });
   const workspaces = [...args.workspaces, ...recordedWorkspaces];
+  const workspaceClients = workspaces.map((workspace) =>
+    resolveWorkspaceClients(args, hostsToRegister, resolvePathAbs(workspace)));
 
   const pidPath = resolvePath("runtime", "mcp.pid");
   const pidData = readPidFile(pidPath);
@@ -988,6 +1171,7 @@ async function computePlan(
     writePosture: args.readOnly ? "read-only" : "allow-write",
     hostsToRegister,
     workspaces,
+    workspaceClients,
     workspaceWarnings,
     ...(runningServerPid !== undefined ? { runningServerPid } : {}),
     hostSpawnedProcesses: listHostSpawnedProcesses(deps.platform),
@@ -997,7 +1181,29 @@ async function computePlan(
     ...(extensionDeferred ? { extensionDeferred } : {}),
     copilotInlineResultsMode: args.copilotInlineResults ?? "raise",
     copilotGuideRequest: args.copilotGuide ?? defaultCopilotGuideRequest(args.copilotInlineResults),
+    // Agent hooks are default-on (2026-11-03); `--hooks` changes nothing.
+    ...(args.removeHooks ? { agentHooks: "remove" as const } : args.noHooks ? {} : { agentHooks: "install" as const }),
   };
+}
+
+function formatWorkspaceClientsLine(entry: WorkspaceClientsPlan): string {
+  const list = entry.clients.join(", ");
+  const rest = ALL_WORKSPACE_CLIENTS.filter((client) => !entry.clients.includes(client));
+  const widen = rest.length > 0 ? `; --workspace-clients all adds ${rest.join(", ")}` : "";
+  switch (entry.reason) {
+    case "explicit":
+      return `Workspace files: ${entry.root}: ${list} (--workspace-clients)`;
+    case "all":
+      return `Workspace files: ${entry.root}: ${list} (--workspace-clients all)`;
+    case "from-extension":
+      return `Workspace files: ${entry.root}: ${list} (--from-extension writes the full set)`;
+    case "nothing-detected":
+      return `Workspace files: ${entry.root}: ${list} (no detected host selects a narrower set)`;
+    case "detected":
+      return `Workspace files: ${entry.root}: ${list} (detected: ${entry.hosts.join(", ")}`
+        + (entry.preserved.length > 0 ? `; kept, already set up: ${entry.preserved.join(", ")}` : "")
+        + `)${widen}`;
+  }
 }
 
 function formatPlan(plan: InstallPlan): string {
@@ -1032,12 +1238,15 @@ function formatPlan(plan: InstallPlan): string {
           + "reload VS Code or restart agent sessions after upgrading to pick up the new version",
       ]
       : []),
-    // Every `--workspace` always gets the full per-workspace client set
-    // (§4.2), so vscode's config is written whenever there is a workspace
-    // at all — this line is the user's consent for that write, shown
-    // before the confirmation prompt, unless they opted out with
+    // What each workspace receives, and why (§4.2): shown before the
+    // confirmation prompt so a narrowed set never surprises anyone.
+    ...plan.workspaceClients.map((entry) => formatWorkspaceClientsLine(entry)),
+    // vscode's config is written whenever a workspace's client set includes
+    // it — this line is the user's consent for that write, shown before the
+    // confirmation prompt, unless they opted out with
     // --copilot-inline-results keep.
-    ...(plan.workspaces.length > 0 && plan.copilotInlineResultsMode !== "keep"
+    ...(plan.workspaceClients.some((entry) => entry.clients.includes("vscode"))
+      && plan.copilotInlineResultsMode !== "keep"
       ? [
         `Copilot inline results: will raise ${COPILOT_SETTINGS_KEY} to `
           + `${COPILOT_RAISED_THRESHOLD_BYTES} in each workspace's .vscode/settings.json `
@@ -1046,7 +1255,8 @@ function formatPlan(plan: InstallPlan): string {
       : []),
     // Copilot standard-setup evaluation (2026-10-02): the same consent line
     // for the Copilot guide's settings write.
-    ...(plan.workspaces.length > 0 && plan.copilotGuideRequest !== "keep"
+    ...(plan.workspaceClients.some((entry) => entry.clients.includes("vscode"))
+      && plan.copilotGuideRequest !== "keep"
       ? [
         plan.copilotGuideRequest === "standalone"
           ? "Copilot guide:  compact, in .github/copilot-instructions.md; will set "
@@ -1054,6 +1264,16 @@ function formatPlan(plan: InstallPlan): string {
             + "where AGENTS.md holds only TokenLighten's block (pass --copilot-guide keep to skip)"
           : "Copilot guide:  AGENTS.md; will remove only the Copilot attachment setting TokenLighten turned off "
             + "(pass --copilot-guide keep to skip)",
+      ]
+      : []),
+    // Agent hooks (2026-11-03, default-on): the consent line for the hook files.
+    ...(plan.agentHooks !== undefined && plan.workspaces.length > 0
+      ? [
+        plan.agentHooks === "install"
+          ? "Agent hooks:    will write TokenLighten's hooks into each workspace client's hook configuration "
+            + "(.claude/settings.json, .codex/hooks.json, .github/hooks/tokenlighten-hooks.json), keeping your entries "
+            + "(pass --no-hooks to skip)"
+          : "Agent hooks:    will remove TokenLighten's hooks from each workspace client's hook configuration, keeping your entries",
       ]
       : []),
   ];
@@ -1082,8 +1302,16 @@ export interface InstallWorkspaceReport {
   root: string;
   files: string[];
   guideBlock: boolean;
+  /** The per-workspace clients this run configured (`--workspace-clients`, §4.2). */
+  clients: TokenLightenSetupClient[];
+  /** Why that set: see {@link WorkspaceClientsReason}. */
+  clientsReason: WorkspaceClientsReason;
+  /** Which generated files can be committed and which embed this machine's paths. */
+  fileSharing: { portable: string[]; machineSpecific: string[] };
   copilotInlineResults?: CopilotInlineResultsReport;
   copilotGuide?: CopilotGuideReport;
+  /** Agent hooks (2026-11-03): present unless `--no-hooks` (or the workspace got no client). */
+  agentHooks?: AgentHooksReport;
 }
 
 export interface InstallVerifyReport {
@@ -1154,11 +1382,16 @@ function writeReportHuman(report: InstallReport, write: (s: string) => void): vo
     write(`  host ${host.client}: ${host.state}${host.manualCommand ? ` (manual: ${host.manualCommand})` : ""}\n`);
   }
   for (const workspace of report.workspaces) {
-    write(`  workspace ${workspace.root}: ${workspace.files.length} file(s), guide_block=${workspace.guideBlock}\n`);
+    write(
+      `  workspace ${workspace.root}: ${workspace.files.length} file(s), guide_block=${workspace.guideBlock}, `
+        + `clients=${workspace.clients.join(",") || "(none)"}\n`,
+    );
+    for (const line of formatWorkspaceSharingLines(workspace.fileSharing)) write(`    ${line}\n`);
     const copilotLine = formatCopilotInlineResultsLine(workspace.root, workspace.copilotInlineResults);
     if (copilotLine !== undefined) write(`    ${copilotLine}\n`);
     const copilotGuideLine = formatCopilotGuideLine(workspace.root, workspace.copilotGuide);
     if (copilotGuideLine !== undefined) write(`    ${copilotGuideLine}\n`);
+    for (const line of formatAgentHooksLines(workspace.agentHooks)) write(`    ${line}\n`);
   }
   if (report.verify) {
     write(`  verify: doctor=${report.verify.doctorOk ? "ok" : "FAIL"} handshake=${report.verify.handshakeOk ? "ok" : "FAIL"}${report.verify.error ? ` (${report.verify.error})` : ""}\n`);
@@ -1586,6 +1819,17 @@ async function performUninstall(
       } catch { /* preserve a replacement, malformed file, or user-added setting */ }
     }
     workspaceWarnings.push(...removeCopilotSessionHook(workspace.root).warnings);
+    // Agent hooks (2026-11-03): TokenLighten's own entries leave every hook
+    // file; a file setup created that is `{}` afterwards goes with them, any
+    // file with other content (or one setup did not create) stays.
+    const hooks = removeAgentHooks(workspace.root);
+    workspaceWarnings.push(...hooks.warnings.map((warning) => `agent hooks: ${warning}`));
+    for (const file of hooks.emptied) {
+      if (!(workspace.created_files?.includes(file) ?? false)) continue;
+      try {
+        if (lstatSync(file).isFile() && JSON.stringify(JSON.parse(readFileSync(file, "utf8"))) === "{}") unlinkSync(file);
+      } catch { /* preserve a replacement or anything that is not provably empty */ }
+    }
   }
 
   // The dangling legacy forwarder goes first: it is identified by the managed
@@ -1843,25 +2087,32 @@ async function performInstall(
   // --- Workspaces ------------------------------------------------------------
   // DESIGN-v0.14-mcp-only-install.md §4.2: `--clients` governs ONLY
   // machine-wide host registration (`plan.hostsToRegister` above — vendor
-  // CLIs / user-scope config files). Every `--workspace` always receives
-  // the full per-workspace client set, exactly like `tl workspace setup`'s
-  // own default (achieved here simply by not overriding `clients`/
-  // `rulesOnly` at all) — deliberately decoupled from `args.clientsMode`.
-  // v0.14.3 fix: `--clients none` used to also suppress `.vscode/mcp.json`,
-  // `.mcp.json`, and `.codex/config.toml`, breaking
+  // CLIs / user-scope config files). Each `--workspace` receives the
+  // per-workspace client set `plan.workspaceClients` resolved
+  // (`resolveWorkspaceClients`): under the default `--workspace-clients auto`
+  // only the clients of the detected/selected hosts, plus any client the
+  // workspace already has set up; the full set (what `tl workspace setup`
+  // writes by default) when nothing narrower is known — nothing detected,
+  // `--clients none`, `--from-extension` — or when `all` is requested.
+  // v0.14.3 fix, still guaranteed: `--clients none` used to also suppress
+  // `.vscode/mcp.json`, `.mcp.json`, and `.codex/config.toml`, breaking
   // `--from-extension --clients none` (the VS Code extension's own call).
   const workspaceReports: InstallWorkspaceReport[] = [];
   const registryWarnings: string[] = [];
-  for (const workspace of plan.workspaces) {
+  for (const [workspaceIndex, workspace] of plan.workspaces.entries()) {
     const root = resolvePathAbs(workspace);
+    const clientsPlan = plan.workspaceClients[workspaceIndex]
+      ?? resolveWorkspaceClients(args, plan.hostsToRegister, root);
     const setupResult = await deps.setupWorkspace({
       root,
+      clients: [...clientsPlan.clients],
       launcher: { command: identity.command, argsPrefix: [...identity.argsPrefix], env: identity.env },
       installHomeDefault: isDefaultInstallHome({ home: args.home }),
       ...(args.toolSurface !== undefined ? { toolSurface: args.toolSurface } : {}),
       ...(args.guideProfile !== undefined ? { guideProfile: args.guideProfile } : {}),
       copilotInlineResults: plan.copilotInlineResultsMode,
       copilotGuide: plan.copilotGuideRequest,
+      ...(plan.agentHooks !== undefined ? { agentHooks: plan.agentHooks } : {}),
     });
     const previousWorkspace = record.workspaces.find((priorWorkspace) =>
       workspacePathsEqual(priorWorkspace.root, setupResult.workspaceRoot));
@@ -1903,12 +2154,18 @@ async function performInstall(
         : {}),
     };
     record = writeInstallRecordSafely(plan.installHome, upsertInstallWorkspace(record, entry));
+    const workspaceSetupClients = setupResult.clients ?? clientsPlan.clients;
+    const fileSharing = workspaceFileSharing(setupResult.workspaceRoot, workspaceSetupClients);
     workspaceReports.push({
       root: entry.root,
       files: [...entry.files],
       guideBlock: entry.guide_block,
+      clients: [...workspaceSetupClients],
+      clientsReason: clientsPlan.reason,
+      fileSharing: { portable: [...fileSharing.portable], machineSpecific: [...fileSharing.machineSpecific] },
       ...(setupResult.copilotInlineResults ? { copilotInlineResults: setupResult.copilotInlineResults } : {}),
       ...(setupResult.copilotGuide ? { copilotGuide: setupResult.copilotGuide } : {}),
+      ...(setupResult.agentHooks ? { agentHooks: setupResult.agentHooks } : {}),
     });
     // B5 fix: install.json's workspaces[] (just upserted above) is a
     // different store from the workspace REGISTRY (config.toml
@@ -2039,6 +2296,21 @@ export async function runInstall(argv: string[], injectedDeps: InstallDeps = {})
     return;
   }
   const args = parseInstallArgs(argv);
+  const hookFlags = AGENT_HOOK_FLAGS.filter((flag) =>
+    flag === "--hooks" ? args.hooks : flag === "--no-hooks" ? args.noHooks : args.removeHooks);
+  if (hookFlags.length > 1) {
+    process.stderr.write(`tl install: choose one of ${AGENT_HOOK_FLAGS.join(", ")} (got ${hookFlags.join(" and ")})\n`);
+    process.exitCode = 1;
+    return;
+  }
+  const badWorkspaceClients = invalidWorkspaceClients(args.workspaceClients);
+  if (badWorkspaceClients !== undefined) {
+    process.stderr.write(
+      `tl install: unrecognized --workspace-clients value '${badWorkspaceClients}' (expected auto | all | a list of ${ALL_WORKSPACE_CLIENTS.join(",")})\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
   // Mirrors --guide-profile/--tool-surface's validation style in `tl
   // workspace setup` (workspace.ts's runWorkspace): a clear stderr message
   // plus exit code 1, checked before any other flag-dependent work so a

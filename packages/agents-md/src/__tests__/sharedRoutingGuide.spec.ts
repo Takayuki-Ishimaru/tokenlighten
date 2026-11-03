@@ -47,7 +47,9 @@ describe("r12: shared routing reaches Codex and Claude without a second guide co
             expect(agents).toMatch(/without re-reading served bytes|no re-?read|without rereading/);
             // v115: compact says "Native only if the user asks"; full/medium keep the older wording.
             // v119-v128: compact drops the article ("Native only if user asks").
-            expect(agents).toMatch(/the user requests native|Native only if (?:the )?user asks|native tools if requested/);
+            // 2026-11-03: compact says "Native Read/Grep/Edit: ..., or if requested, ..."; full and
+            // medium keep "if the user requests native".
+            expect(agents).toMatch(/the user requests native|Native only if (?:the )?user asks|native tools if requested|Native Read[/]Grep[/]Edit:[^.]*or if requested/);
           } else {
             expect(agents).toContain("<依頼全文を逐語で>");
             // v119-v128: compact "引用/制約込みでquery逐語" replaces "キーワード化・引用/制約文の省略禁止".

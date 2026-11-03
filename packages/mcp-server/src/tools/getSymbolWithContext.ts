@@ -15,10 +15,10 @@ import type { McpToolResult } from "@tokenlighten/types";
 import { languageForPathWithContent } from "../util/languages.js";
 import { treeSitterSkeleton, treeSitterSupports } from "../skeleton/treeSitter.js";
 import type { TreeSitterPaths } from "../skeleton/types.js";
-import { compressFormat } from "../util/formatCompress.js";
+import { compressFormat, elideDocCommentsForDisplay, elideDocCommentsWithWindows } from "../util/formatCompress.js";
 import { collectSymbols, collectSymbolsChecked, type CollectedSymbol } from "../symbols/collectSymbols.js";
 import { renderSymbolSkeleton } from "../symbols/renderSymbolSkeleton.js";
-import { commentNote, isTokenlightenSentinelLine } from "../util/sentinelComment.js";
+import { commentNote, isSymbolTargetLabelLine, isTokenlightenSentinelLine } from "../util/sentinelComment.js";
 import { escapeRegExp, MAX_REGEX_QUERY_CHARS } from "../features/search/find/findText.js";
 
 // ---------------------------------------------------------------------------
@@ -665,6 +665,46 @@ export function isTargetElidedSignatureLine(line: string, targetName: string): b
 }
 
 /**
+ * Cut `lines` back to before a multi-line doc block (a `/* ... *\/` or a
+ * triple-quoted docstring) that they open and never close.
+ *
+ * The skeleton of an enclosing class keeps its doc blocks (the class's own
+ * docstring in Python, every sibling's JSDoc/Javadoc), and the cap on the
+ * sibling list counts raw LINES, so a class with a long docstring or a few
+ * documented methods is cut in the middle of a block. The dangling opener
+ * used to reach the doc-comment elider with the rest of the assembled view,
+ * which paired it with the NEXT delimiter in the text: the target's own
+ * docstring (or JSDoc) opening. That collapsed everything in between,
+ * including the `target:` label and the symbol's `def` line, into one marker
+ * with view-relative numbers (flask `handle_url_build_error`: `# doc elided
+ * L12-27` over a `range` of 982-1014). A half block carries nothing a reader
+ * can use, so it is dropped rather than closed.
+ */
+function withoutOpenDocBlock(lines: string[], lang: string): string[] {
+  const python = lang === "python";
+  let open = -1;
+  let closer = "";
+  for (let index = 0; index < lines.length; index++) {
+    const text = lines[index]!.trim();
+    if (open >= 0) {
+      if (text.includes(closer)) open = -1;
+      continue;
+    }
+    if (python) {
+      const quote = text.startsWith('"""') ? '"""' : text.startsWith("'''") ? "'''" : undefined;
+      if (quote !== undefined && !text.includes(quote, 3)) {
+        open = index;
+        closer = quote;
+      }
+    } else if (text.startsWith("/*") && !text.includes("*/", 2)) {
+      open = index;
+      closer = "*/";
+    }
+  }
+  return open < 0 ? lines : lines.slice(0, open);
+}
+
+/**
  * Extract sibling method signatures from the same enclosing class (bodies elided).
  *
  * DESIGN-v0.8 B4.1: uses signatureStartLine (falling back to startLine for
@@ -705,7 +745,7 @@ async function extractSiblingSignatures(
               !isTargetElidedSignatureLine(l, targetName),
           )
           .slice(0, cap);
-        return sigs;
+        return withoutOpenDocBlock(sigs, lang);
       }
     } catch {
       // fall through
@@ -1027,5 +1067,47 @@ export async function getSymbolWithContext(
       language,
       range: { start: found.startLine, end: found.endLine },
     },
+  };
+}
+
+/**
+ * The comment-elided DISPLAY of a {@link getSymbolWithContext} `code` view
+ * (`select.comments:"elide"`, the default), with the preamble and the target
+ * elided as two separate texts.
+ *
+ * `code` is an assembled view: scope header, used imports, enclosing scope and
+ * sibling signatures, then the `target:` label, then the symbol's own source.
+ * The doc-comment elider pairs delimiters across the whole text it is given, so
+ * running it over the assembled view let a half-open block in the preamble
+ * swallow the label and the target's first lines (see `withoutOpenDocBlock`).
+ * The preamble is synthesized text and the target is the symbol's source; the
+ * two are different documents and never share an elision. Here the target is
+ * elided exactly as the same lines would be on their own, which is what
+ * `protocol/sourceFidelity.ts` verifies the served target against, so the wire
+ * body is always the symbol's source lines for `range`.
+ *
+ * Marker numbers are view-relative, as they always were for an assembled view
+ * (its lines do not map to file lines); on the wire the source-fidelity seam
+ * drops them and ships the verbatim target. Without a header and label (a tiny
+ * file's bare body) the whole text is the target.
+ *
+ * Same result shape as `elideDocCommentsForDisplay`, including its doc-only
+ * fallback for the target.
+ */
+export function elideSymbolContextForDisplay(
+  code: string,
+  lang: string | undefined,
+): { content: string; note?: string; elided: Array<[number, number]> } {
+  const lines = code.split("\n");
+  const label = isTokenlightenSentinelLine(lines[0] ?? "")
+    ? lines.findIndex((line, index) => index > 0 && isSymbolTargetLabelLine(line))
+    : -1;
+  if (label < 0) return elideDocCommentsForDisplay(code, lang, false, 1);
+  const preamble = elideDocCommentsWithWindows(lines.slice(0, label + 1).join("\n"), lang, 1);
+  const target = elideDocCommentsForDisplay(lines.slice(label + 1).join("\n"), lang, false, label + 2);
+  return {
+    content: `${preamble.text}\n${target.content}`,
+    ...(target.note !== undefined ? { note: target.note } : {}),
+    elided: [...preamble.elided, ...target.elided],
   };
 }

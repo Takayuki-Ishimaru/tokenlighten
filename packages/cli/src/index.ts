@@ -29,6 +29,8 @@ import { runWorkspace } from "./commands/workspace.js";
 import { runLogs } from "./commands/logs.js";
 import { runClients } from "./commands/clients.js";
 import { runEngines, runModels } from "./commands/engines.js";
+import { runRun } from "./commands/run.js";
+import { runHook } from "./commands/hook.js";
 
 // Resolve a path's real (symlink-free) location, tolerating paths that
 // don't exist on disk (falls back to a lexical resolve instead of throwing,
@@ -147,6 +149,16 @@ async function main(): Promise<void> {
 
     case "clients":
       await runClients(filteredRest);
+      break;
+
+    // Agent hooks (2026-11-03): `run` compresses a test/build command's
+    // output; `hook` is the process the agent hosts call on their hook events.
+    case "run":
+      await runRun(filteredRest);
+      break;
+
+    case "hook":
+      await runHook(filteredRest);
       break;
 
     default:

@@ -66,3 +66,18 @@ export function commentNote(lang: string, text: string): string {
 export function isTokenlightenSentinelLine(line: string): boolean {
   return /^(?:\/\/|#|\/\*)\s*tokenlighten:/.test(line.trim());
 }
+
+const SYMBOL_TARGET_LABEL_RE = /^(?:\/\/|#)\s*target:$|^\/\*\s*target:\s*\*\/$/;
+
+/**
+ * True when `line` is the `target:` label get_symbol_with_context puts between
+ * its context preamble (imports, enclosing scope, sibling signatures) and the
+ * symbol's own source (`commentNote(lang, "target:")`: `// target:`,
+ * `# target:` or css's `/* target: *\/`). The one definition of the label shape:
+ * the producer splits its elision on it (`elideSymbolContextForDisplay`) and the
+ * wire's source-fidelity seam splits the served view on it
+ * (`protocol/sourceFidelity.ts`), and both must find the same line.
+ */
+export function isSymbolTargetLabelLine(line: string): boolean {
+  return SYMBOL_TARGET_LABEL_RE.test(line.trim());
+}

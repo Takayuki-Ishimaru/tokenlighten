@@ -196,6 +196,25 @@
  *       A read-only lookup those rows answer ends in `act.answer` rather than a search.
  *       Explicit `0`/`off` restores the sample and the search.
  *
+ *       TL_PACK_BODYLESS_DISCOVER (2026-11-03; see `packBodylessDiscoverEnabled` and
+ *       features/task-pack/bodylessDiscover.ts): a task's FIRST pathless-query reply
+ *       that is a `discover` over `coverage:"partial"` ships its candidate rows
+ *       body-less (`handle`/`path`/`range`/`remaining`), default ON. Explicit
+ *       `0`/`off` restores the bodies byte-for-byte. Content only: no kind, field or
+ *       tool argument changes; explicit `targets`, continuations, receipts and
+ *       office/csv/archive packs are untouched, and the reply's `next` stands.
+ *
+ *       TL_LITERAL_FIRST_SEEDS (2026-11-03; see `literalFirstSeedsEnabled` and
+ *       features/task-pack/literalSeeds.ts): a pathless answer-profile query that
+ *       names a distinctive exact literal (an UPPER_SNAKE constant, a quoted string,
+ *       a long lowercase dotted key) is first run through the `find`
+ *       engine, and when its hits concentrate in a few files those files' hit
+ *       windows seed the pack, product source ahead of bench/tests/docs; default
+ *       ON. Explicit `0`/`off` restores the fuzzy-ranked first pack byte-for-byte.
+ *       Content only: no kind, field or tool argument changes; explicit `targets`
+ *       and every query without such a literal, or whose literal has no code hit,
+ *       are untouched.
+ *
  *       TL_EFF_FIND_SNIPPET_CAP (2026-10-19, after the v0.16.0 decision run
  *       bench/workflows/runs/2026-10-18-v016-decision-6t-3; see
  *       `effFindSnippetCapEnabled`'s doc block for the evidence): a `find`
@@ -261,6 +280,22 @@
  *       optional. (An obligation's `path`/`range`/`role` restated from its
  *       evidence row was part of this set until the wire-compaction review of
  *       2026-10-23 moved it behind TL_EFF_EVIDENCE_PATH_GROUPS, below.)
+ *
+ *       TL_EFF_REPLY_TRIM (2026-11-03, external billing analysis of Claude Code
+ *       sessions — 22.5 % of `tl_read_file` reply bytes were not source; the
+ *       rules are in protocol/wireTrim.ts): the members of a `read.task_pack`
+ *       or `read.receipt` reply that no dispatch, guide or recovery reads back
+ *       leave the wire after `compactReplyEnvelope`, default ON for every
+ *       client — `task.replay` when the top-level `qref` carries the same
+ *       value, `profile_binding.confidence`, its `"auto"` request and a
+ *       reason that only explains an inference, and the certificate's
+ *       workspace marker shortened to its identity (`sha256:` + 12 hex, the
+ *       write path's spelling), scope and completeness. Explicit `0`/`off` restores the
+ *       previous reply byte-for-byte and remains the rollback path. It adds no
+ *       kind, field or tool argument; every omitted member is one a caller
+ *       already reads as optional, and `task.id`, handles, ranges, `next`,
+ *       `qref`, `certificate.id`/`obligations`/`gaps`, `remaining`, `why` and
+ *       `edit_rules` are untouched.
  *
  *   (B) out-of-contract, experiment-only (default OFF; D10(b)). Turning one on
  *       is an unfrozen capability addition, not a supported posture:
@@ -372,6 +407,15 @@
  *       post-handshake startup warm-up (util/startupWarmup.ts): process-local
  *       CPU work in idle time that reads no request, writes nothing and
  *       prints nothing, so no response byte depends on it.
+ *       TL_BACKGROUND_INDEX (2026-11-02, tri-state, default `auto`) with
+ *       TL_BACKGROUND_INDEX_MIN_FILES and TL_BACKGROUND_INDEX_WAIT_MS decide
+ *       whether a task pack's symbol lookups wait for skeleton-engine's
+ *       whole-workspace index build or answer from text search while it
+ *       warms (features/indexing/sourceIndexAccess.ts; `off` is the legacy
+ *       synchronous build). A pack served meanwhile carries the existing
+ *       `task.coverage:"partial"` with the additive reason `index-warming`.
+ *       TL_TEST_INDEX_BUILD_DELAY_MS / TL_TEST_INDEX_BUILD_FAIL are that
+ *       module's test-harness seams (backgroundSourceIndex.spec.ts).
  *
  *   (C) elsewhere in the tree, recorded here so the inventory is complete:
  *       TL_INDEX_CONSISTENCY_SCAN (v0.11.0, V11-09: skeleton-engine's
@@ -945,6 +989,23 @@ export function traceEnabled(): boolean {
 }
 
 /**
+ * D10 (C): the compaction-marker check (state/compactionEpoch.ts), default
+ * ON. Once per tool call the server `stat`s
+ * `.tokenlighten/.runtime/compaction-epoch.json`, which the agent hosts'
+ * hooks (`tl hook pre-compact` / `session-start`) rewrite when a
+ * conversation is compacted or cleared; a changed stat drops the session's
+ * "the client already holds these bytes" claims (served-range ledger, held
+ * window receipts, find/search dedupe, verification-kit dedupe, prior-pack
+ * obligations, served surfaces) so the model is served again. Operational:
+ * it selects WHETHER content the server would otherwise withhold as already
+ * held is sent, never a kind, field or tool argument, and it reads no client
+ * id. Explicit `0`/`off` disables the check (2026-11-03).
+ */
+export function compactionMarkerEnabled(): boolean {
+  return parseBool(process.env["TL_COMPACTION_MARKER"], true);
+}
+
+/**
  * D10 (C): startup warm-up (util/startupWarmup.ts), default ON. Once the
  * client has completed the MCP handshake, the server uses the idle time
  * before its first tools/call to pre-pay the one-time costs of a first task
@@ -957,6 +1018,76 @@ export function traceEnabled(): boolean {
  */
 export function startupWarmupEnabled(): boolean {
   return parseBool(process.env["TL_STARTUP_WARMUP"], true);
+}
+
+/**
+ * Background source-index build (features/indexing/sourceIndexAccess.ts;
+ * 2026-11-02): how a task pack's symbol lookups obtain skeleton-engine's
+ * whole-workspace index while it is not built yet. `off` — the legacy direct
+ * call (the first lookup builds the whole index before the reply); `on` — a
+ * lookup never waits for a build; `auto` (default) — a workspace the locator
+ * walked as fewer than `backgroundIndexMinFiles()` files waits for its
+ * (sub-second) build, any other waits at most `backgroundIndexWaitMs()` and
+ * then answers from text search with `coverage_reason:"index-warming"`.
+ * Operational: it changes when a reply is served and what it discloses, never
+ * a byte of a complete index's results.
+ */
+export function backgroundIndexMode(): "auto" | "on" | "off" {
+  const raw = process.env["TL_BACKGROUND_INDEX"];
+  if (raw === undefined) return "auto";
+  switch (raw.toLowerCase()) {
+    case "1": case "true": case "yes": case "on": return "on";
+    case "0": case "false": case "no": case "off": return "off";
+    default: return "auto";
+  }
+}
+
+/** TL_BACKGROUND_INDEX_MIN_FILES: below this walk size `auto` waits for the build (default 400). */
+export function backgroundIndexMinFiles(): number {
+  return nonNegativeIntegerEnv("TL_BACKGROUND_INDEX_MIN_FILES", 400);
+}
+
+/**
+ * TL_FIRST_PACK_MAX_BYTES (2026-11-03, external billing analysis), class (C)
+ * operational: the byte ceiling of a task's FIRST task pack on a token-billed
+ * client (Claude Code, Codex). There, bytes newly entering context are most of
+ * the bill (cache writes 42-78% of it) while re-reading context already held
+ * costs a tenth as much, and a first pack is the server's guess: 29.7 KB
+ * shipped with 18% of it cited. A continuation (a `task.handle`, a `qref`
+ * replay, explicit targets, `force_serve`) keeps the client's response
+ * ceiling. Never below the 6,144 B a task pack is admitted at (server.ts
+ * clamps).
+ *
+ * Default 0 (off), measured 2026-11-03 over eight first questions on this
+ * repository, flask and express, with body-less low-confidence packs and
+ * literal-first seeds already on: 8,192 B and 12,288 B lowered no session's
+ * total. Five sessions were unchanged (their first pack was already small);
+ * the TOKENLIGHTEN_TOOL_SURFACE lookup took 3 turns instead of 2 (+0.5-0.6 KB),
+ * the flask SESSION_COOKIE_SALT edit 2 instead of 1 (+2.1 KB), and flask
+ * url_for at 8,192 B ended at `await_input` instead of `act.answer`. Kept as
+ * an experiment knob for a cohort that wants to measure a smaller first pack.
+ */
+export function firstPackMaxBytes(): number {
+  return nonNegativeIntegerEnv("TL_FIRST_PACK_MAX_BYTES", 0);
+}
+
+/** TL_BACKGROUND_INDEX_WAIT_MS: the most `auto` waits for a large workspace's build (default 1500). */
+export function backgroundIndexWaitMs(): number {
+  return nonNegativeIntegerEnv("TL_BACKGROUND_INDEX_WAIT_MS", 1500);
+}
+
+/**
+ * A non-negative integer from `name`, else `fallback`. An unset or blank
+ * value is the fallback, not 0: `Number("")` is 0, which made both background
+ * index knobs default to "never wait" (2026-11-02).
+ */
+function nonNegativeIntegerEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  // Digits only, as clientProfile.ts reads its byte overrides: "1e3", "0x10"
+  // and "+5" are not a count anyone types by hand.
+  if (raw === undefined || !/^[0-9]+$/.test(raw)) return fallback;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) ? parsed : fallback;
 }
 
 /**
@@ -2327,6 +2458,76 @@ export function csvLookupEnabled(): boolean {
   return parseBool(process.env["TL_CSV_LOOKUP"], true);
 }
 
+/**
+ * TL_PACK_BODYLESS_DISCOVER (2026-11-03), (S) supported pack policy, DEFAULT
+ * ON for every client; explicit `0`/`off` is the rollback path and restores
+ * today's pack byte-for-byte.
+ *
+ * A task's FIRST reply to a pathless `query` whose canonical decision is
+ * `discover` over `coverage:"partial"` — the locator was not confident — ships
+ * its rows without bodies: `handle`, `path`, `range`, `role`, `symbol` and a
+ * `remaining` that covers the withheld window, so one `targets:[{handle,range}]`
+ * read fetches any body the agent wants, and the reply's own `next` stands.
+ * The rule and its nine clauses — including the rows it never touches: a
+ * query-named file, an anchor the request resolved to, a row the contract
+ * cites as proof, and a `next` that pages fixed windows — are in
+ * features/task-pack/bodylessDiscover.ts, together with the late half that
+ * restores every withheld body when a builder's tail firms the reply up to
+ * `act.*`/`await_input` after the early pass.
+ *
+ * Why: the 2026-11-03 billing analysis of Claude Code sessions — cache WRITES
+ * (new tokens entering context) are 42-78% of cost, cached re-reads 3-11%; a
+ * first reply on a large repository sent 29.7 KB of which 18% was used, and a
+ * wrong first guess with bodies was abandoned outright. Measured on this
+ * repository: a 25,450 B `discover` first reply with 20,999 body bytes becomes
+ * a 3,935 B candidate form with the same `next`, and the three-turn chain to
+ * the `act.answer` falls from 45,794 B to 33,634 B; `act.answer` first replies
+ * (flask, express) do not move. A `discover` whose `next` pages fixed windows
+ * of the files it already located (a cursor, handles, ranged targets — the
+ * structure map's owed members, a change frontier) keeps its bodies: that is
+ * page one of a plan, not a guess. Adds no kind, field or tool argument: a
+ * body-less row with `remaining` is A.8.2 E-8's existing shape.
+ */
+export function packBodylessDiscoverEnabled(): boolean {
+  return parseBool(process.env["TL_PACK_BODYLESS_DISCOVER"], true);
+}
+
+/**
+ * TL_LITERAL_FIRST_SEEDS (2026-11-03), (S) supported pack policy, DEFAULT ON
+ * for every client; explicit `0`/`off` is the rollback path and restores the
+ * fuzzy-ranked first pack byte-for-byte.
+ *
+ * A pathless answer-profile `query` that names a DISTINCTIVE EXACT LITERAL —
+ * an UPPER_SNAKE constant or env var (`SESSION_COOKIE_SAMESITE`), a quoted
+ * string (`'trust proxy'`), a long lowercase dotted key (`tokenlighten.status`)
+ * — is first run through TL's own `find` engine (the exact `action:"find"`
+ * universe). A camelCase/PascalCase identifier is not a literal here: the
+ * locator's symbol layer already finds a declared name, and seeding its
+ * mentions bypassed the structure map (copilotCompactWorkflow's T03 pages).
+ * When its whole-token hits concentrate in a few files, those files' hit
+ * windows seed the pack through the seeded builder, product source ahead of
+ * bench/tests/examples ahead of docs, so the defining and reading sites arrive
+ * with bodies in the first reply. The rule, its caps and its classification
+ * are in features/task-pack/literalSeeds.ts; the routing site is
+ * readCodeTaskPack.ts `buildTaskPackCore` beside the family-member seeds.
+ *
+ * Why: the 2026-11-03 billing analysis of Claude Code sessions — cost is
+ * driven by NEW tokens entering context. Measured on this repository, "Where
+ * is <the tool-surface env var> read and what values does it accept?" (server.ts
+ * `resolveToolSurface`; not spelled here, so this block never joins its hit set) ranked a
+ * bench experiment's scripts ahead of `server.ts`'s `resolveToolSurface` and
+ * took three turns and 33.6 KB to `act.answer`; `find` for the token found the
+ * reading site in 2.7 KB. A literal with no code-position hit (zero hits, a
+ * comment-only or changelog mention) seeds nothing, so the quoted-literal
+ * absence reporting stands; a literal spread over more files than the caps is
+ * an inventory `find` answers better, and seeds nothing either. Adds no kind,
+ * field or tool argument: the seeded rows are the seeded builder's existing
+ * ranged surfaces and the advisory is the pack's existing optional `advisory`.
+ */
+export function literalFirstSeedsEnabled(): boolean {
+  return parseBool(process.env["TL_LITERAL_FIRST_SEEDS"], true);
+}
+
 // ---------------------------------------------------------------------------
 // v0.15 W-CORE-FLAGS: Semantic Frontier v2 program flags (2026-09-02)
 // ---------------------------------------------------------------------------
@@ -3189,6 +3390,58 @@ export function effEditDietEnabled(cliHost = false): boolean {
  */
 export function effReplyCompactEnabled(): boolean {
   return parseBool(process.env["TL_EFF_REPLY_COMPACT"], true);
+}
+
+/**
+ * TL_EFF_REPLY_TRIM (2026-11-03, external billing analysis of Claude Code
+ * sessions: 22.5 % of `tl_read_file` reply bytes were task ids, handles,
+ * decision and certificate data and provenance, not source; on Claude Code
+ * every NEW token entering the context is paid for). The members of a
+ * `read.task_pack` or `read.receipt` reply that no dispatch, guide or recovery
+ * reads back leave the wire in one pass right after `compactReplyEnvelope`
+ * (protocol/wireTrim.ts `trimReplyMetadata`, called from protocol/emit.ts).
+ * Everything upstream — the pack builder, the ladder, the ledger binding and
+ * settlement, the act floor — keeps seeing the full envelope, and the size
+ * previews run this same funnel, so they price what ships; which rows and
+ * decisions a call produces does not depend on this flag, only the bytes do:
+ *   - `task.replay`, when the top-level `qref` carries the same value (the
+ *     one the guide teaches: "re-pack with the returned qref"). Every
+ *     server-side reader of `task.replay` runs before the pass
+ *     (`ledgerCertificateBindingValid`, `repackCall`, the receipt's `prior`
+ *     text, the cursor plan) and no dispatch reads it off a call;
+ *   - `profile_binding.confidence`, a `requested:"auto"` (nothing was
+ *     requested, so nothing is read back) and a `reason` that only explains an
+ *     inference (`INFERENCE_EXPLANATION_REASONS`); the advice that names a
+ *     declaration to send stays, as do `selected` (bench/workflows/lib/
+ *     general_capability_microbench.mjs reads it) and `source`;
+ *   - the certificate's workspace marker, kept as its identity, scope and
+ *     completeness: `fingerprint` in the write path's own `sha256:` + 12 hex
+ *     spelling, `scope`, and `inventory_complete` (the act floor reads it on
+ *     the shipped payload: an empty-evidence absence certificate stands only
+ *     on a complete inventory, decisionWire.ts `exhaustiveAbsenceCertified`);
+ *     `evidence_files` and `inventory_files` go. No follow-up validates the
+ *     fingerprint or the counts — `task.challenge` names the certificate id,
+ *     and the fence compares the server's own `contract.workspace_state`.
+ * Untouched, each for a reader: `task.id` (a `next`'s `task.handle`),
+ * handles, ranges, `decision.kind`/`next`, `certificate.id`/`obligations`
+ * (`task.challenge`), `certificate.gaps`, `remaining`, `elided`, `symbol`,
+ * `coverage_reason`, `frontier_index`, `advisory`, `edit_rules`, the refusal
+ * fields, and `evidence[].why` (the three review origins ride it, and the
+ * replay corpus's relevance expectations read it). Not reported by
+ * `activeExperimentFlags`: a shipped default is not an active experiment.
+ * Default ON; explicit `0`/`off` restores the previous reply byte-for-byte.
+ * Measured on real first replies over stdio (bytes, the default against the
+ * rolled-back reply; the non-body share of the reply in parentheses): flask
+ * "Explain url_for and what happens on BuildError" 9,011 -> 8,762 (-249;
+ * 33.5 % -> 31.6 %); express "How does res.redirect('back') handle the
+ * 'back' location?" 3,555 -> 3,305 (-250; 41.0 % -> 36.6 %); the flask
+ * SESSION_COOKIE_SALT edit pack 14,391 -> 14,207 (-184); on this repo's
+ * TOKENLIGHTEN_TOOL_SURFACE chain each act reply lost the same 249 B and each
+ * certificate-less discover reply 131 B. The `why` rows (4-5 % of an answer
+ * reply) are the largest member left, kept for the readers named above.
+ */
+export function effReplyTrimEnabled(): boolean {
+  return parseBool(process.env["TL_EFF_REPLY_TRIM"], true);
 }
 
 /**

@@ -98,6 +98,7 @@ import { ledgerCertificateBindingValid } from "./ledgerCertificateBinding.js";
 import { omitCoveredFrontierIndex } from "./frontierIndexDedup.js";
 import { attachEditRulesOnce } from "./editRules.js";
 import { compactReplyEnvelope, restateObligationsFromEvidence } from "./wireCompaction.js";
+import { trimReplyMetadata } from "./wireTrim.js";
 import { groupEvidencePaths } from "./evidencePathGroups.js";
 import { trace, isTraceEnabled } from "../util/trace.js";
 
@@ -981,6 +982,14 @@ export function emitFinalizedPayload(
     // The call as the dispatch knew it: its arguments and whether the task it continues passed `surfaceRoles`.
     const compacted = compactReplyEnvelope(current, onWire, context);
     if (compacted !== current) { current = compacted; text = JSON.stringify(current); }
+    // 2026-11-03 (TL_EFF_REPLY_TRIM, default ON): the members no reader
+    // downstream of the wire echoes — `task.replay` beside the same `qref`,
+    // the binding's `confidence`/`"auto"` request/inference reason, the
+    // certificate marker's counts and full fingerprint — leave here too, after
+    // the compaction above and before the edit rules price their headroom
+    // (wireTrim.ts names the readers each rule was checked against).
+    const trimmed = trimReplyMetadata(current, onWire, context);
+    if (trimmed !== current) { current = trimmed; text = JSON.stringify(current); }
     // An edit reply's `limit` is its calibrated row, so the client's ceiling, which its post-edit windows were cut to, binds here.
     const ruled = attachEditRulesOnce(current, onWire, context.clientId, context.workspace ?? context.codecTraceWorkspace, Math.min(limit, resolveReadReplyCeiling(context.clientId) ?? limit) - measureResponseBytes(text));
     if (ruled !== current) { current = ruled; text = JSON.stringify(current); }

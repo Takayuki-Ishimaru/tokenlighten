@@ -123,13 +123,14 @@ describe("loadManifest / writeManifest", () => {
 
 // ---------------------------------------------------------------------------
 // Perf (2026-09-27, large-workspace task_pack cost, item D): writeManifest
-// must reach the SAME "exceeds the 32 MiB cache limit" throw for an
-// oversized manifest WITHOUT calling the expensive JSON.stringify(sortKeys(
-// manifest)) that today's (unfixed) code always ran first only to discard
-// the result. See estimateManifestMinBytes's own doc comment for why a
-// cheap lower-bound sum can decide "too large" safely.
+// must decide that a manifest is over the single-file cap WITHOUT calling the
+// expensive JSON.stringify(sortKeys(manifest)) of the whole manifest. See
+// estimateManifestMinBytes's own doc comment for why a cheap lower-bound sum
+// can decide "too large" safely. 2026-11-03: such a manifest is no longer
+// dropped; it goes to the sharded cache (shardedManifest.ts), which
+// serializes per piece.
 // ---------------------------------------------------------------------------
-describe("writeManifest — item D: skip the doomed full stringify for an oversized manifest", () => {
+describe("writeManifest — item D: an oversized manifest goes to the sharded cache without a full stringify", () => {
   function makeOversizedManifest(fileCount = 1): SourceIndexManifestV1 {
     const files: SourceIndexManifestV1["files"] = {};
     // ONE symbol whose signature alone is already well over
@@ -153,69 +154,86 @@ describe("writeManifest — item D: skip the doomed full stringify for an oversi
     return makeManifest({ files });
   }
 
-  it("throws the SAME error as today's real-stringify path, and never calls JSON.stringify", async () => {
+  /** JSON.stringify calls whose argument is a whole manifest (both `version` and `files`). */
+  function wholeManifestStringifies(spy: { mock: { calls: unknown[][] } }): number {
+    return spy.mock.calls.filter(([value]) => value !== null && typeof value === "object"
+      && "version" in (value as object) && "files" in (value as object)).length;
+  }
+  /** JSON.stringify calls that serialized a sharded piece of `files`. */
+  function pieceStringifies(spy: { mock: { calls: unknown[][] } }): number {
+    return spy.mock.calls.filter(([value]) => value !== null && typeof value === "object"
+      && !("version" in (value as object)) && "files" in (value as object)).length;
+  }
+  const singleFilePath = (): string => join(tmpDir, ".tokenlighten", "cache", "source-index.v1.json");
+  const shardedHeadPath = (): string => join(tmpDir, ".tokenlighten", "cache", "source-index.v1.shards", "head.json");
+
+  it("writes the sharded cache, loads it back whole, and never stringifies the whole manifest", async () => {
+    const manifest = makeOversizedManifest(2);
     const spy = vi.spyOn(JSON, "stringify");
     try {
-      await expect(writeManifest(tmpDir, makeOversizedManifest())).rejects.toThrow(
-        /exceeds the 32 MiB cache limit/,
-      );
-      expect(spy).not.toHaveBeenCalled();
+      await writeManifest(tmpDir, manifest);
+      expect(wholeManifestStringifies(spy)).toBe(0);
     } finally {
       spy.mockRestore();
     }
+    await expect(fs.stat(singleFilePath())).rejects.toThrow();
+    const loaded = await loadManifest(tmpDir);
+    expect(loaded).toEqual(manifest);
   });
 
-  it("does not create/replace the on-disk cache file", async () => {
-    await expect(writeManifest(tmpDir, makeOversizedManifest())).rejects.toThrow();
-    await expect(loadManifest(tmpDir)).resolves.toBeNull();
-  });
-
-  it("a SECOND write attempt for the SAME root reuses the remembered verdict — still no JSON.stringify call, no per-file estimate walk needed", async () => {
-    await expect(writeManifest(tmpDir, makeOversizedManifest(3))).rejects.toThrow();
+  it("a SECOND write of the same content reuses the remembered verdict and serializes no piece again", async () => {
+    await writeManifest(tmpDir, makeOversizedManifest(3));
 
     const spy = vi.spyOn(JSON, "stringify");
     try {
       // A near-identical file count (not materially smaller) -- the
-      // remembered verdict must short-circuit immediately.
-      await expect(writeManifest(tmpDir, makeOversizedManifest(3))).rejects.toThrow(
-        /exceeds the 32 MiB cache limit/,
-      );
-      expect(spy).not.toHaveBeenCalled();
+      // remembered verdict must short-circuit to the sharded writer, whose
+      // pieces already exist under the same names.
+      await writeManifest(tmpDir, makeOversizedManifest(3));
+      expect(wholeManifestStringifies(spy)).toBe(0);
+      expect(pieceStringifies(spy)).toBe(0);
     } finally {
       spy.mockRestore();
     }
+    await expect(loadManifest(tmpDir)).resolves.toEqual(makeOversizedManifest(3));
   });
 
-  it("a MATERIAL shrink in file count re-checks instead of trusting a stale verdict, and a now-small manifest writes successfully", async () => {
+  it("a MATERIAL shrink in file count re-checks instead of trusting a stale verdict: the now-small manifest takes the single file and the sharded cache is removed", async () => {
     // First: a genuinely oversized manifest at a "large" file count.
-    await expect(writeManifest(tmpDir, makeOversizedManifest(10))).rejects.toThrow();
+    await writeManifest(tmpDir, makeOversizedManifest(10));
+    await expect(fs.stat(shardedHeadPath())).resolves.toBeTruthy();
 
     // Second: the SAME root, but now a tiny, well-under-cap manifest (file
     // count dropped from 10 to 1, and this one carries no huge signature at
-    // all) -- must NOT be refused on the strength of the old verdict alone.
+    // all) -- must NOT be routed by the old verdict alone.
     const small = makeManifest({ files: {} });
     await writeManifest(tmpDir, small);
+    await expect(fs.stat(singleFilePath())).resolves.toBeTruthy();
+    await expect(fs.stat(shardedHeadPath())).rejects.toThrow();
+    await expect(fs.readdir(join(tmpDir, ".tokenlighten", "cache", "source-index.v1.shards"))).resolves.toEqual([]);
     const loaded = await loadManifest(tmpDir);
     expect(loaded).not.toBeNull();
     expect(loaded!.rootHash).toBe(small.rootHash);
   });
 
-  it("a successful write forgets a PRIOR 'too large' verdict for the same root (no permanent poisoning)", async () => {
-    await expect(writeManifest(tmpDir, makeOversizedManifest(1))).rejects.toThrow();
+  it("a successful single-file write forgets a PRIOR 'too large' verdict, and growing back is judged freshly", async () => {
+    await writeManifest(tmpDir, makeOversizedManifest(1));
     const small = makeManifest({ builtFromCommit: "now-small" });
     await writeManifest(tmpDir, small); // fileCount 0 < 1 * 0.5 -> real re-check, fits, writes
-    await expect(loadManifest(tmpDir)).resolves.not.toBeNull();
+    await expect(loadManifest(tmpDir)).resolves.toMatchObject({ builtFromCommit: "now-small" });
 
-    // Growing back to oversized must be judged freshly, not against a
-    // memo that a later successful write already cleared.
+    // Growing back to oversized: the estimate (not a remembered verdict)
+    // routes it, again without a whole-manifest stringify, and the
+    // single-file cache it replaces is removed.
     const spy = vi.spyOn(JSON, "stringify");
     try {
-      await expect(writeManifest(tmpDir, makeOversizedManifest(1))).rejects.toThrow(
-        /exceeds the 32 MiB cache limit/,
-      );
+      await writeManifest(tmpDir, makeOversizedManifest(1));
+      expect(wholeManifestStringifies(spy)).toBe(0);
     } finally {
       spy.mockRestore();
     }
+    await expect(fs.stat(singleFilePath())).rejects.toThrow();
+    await expect(loadManifest(tmpDir)).resolves.toEqual(makeOversizedManifest(1));
   });
 });
 

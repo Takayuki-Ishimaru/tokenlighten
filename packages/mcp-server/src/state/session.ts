@@ -10064,6 +10064,38 @@ export function resetWorkspace(workspaceRoot: string): void {
   }
 }
 
+/**
+ * Compaction reset (2026-11-03, state/compactionEpoch.ts): in every lane of
+ * `workspaceRoot`, drops exactly the state that says "the client already
+ * holds this content" — the served-range ledgers (file and artifact), the
+ * spans/extents staged for the current response, the already-served find
+ * ledger, the search-dedupe ledger and the verification-kit dedupe sets. The
+ * host compacted or cleared its conversation, so each of these would answer a
+ * repeat request with a receipt for bytes the model no longer has. Task
+ * handles, plans, cursors, admissible-edit authority and every other field
+ * stay: they are valid server-side whatever the model remembers. Returns the
+ * number of lane sessions touched.
+ */
+export function clearServedContentState(workspaceRoot: string): number {
+  let touched = 0;
+  for (const [key, session] of _sessions) {
+    if (rootOfSessionKey(key) !== workspaceRoot) continue;
+    touched += 1;
+    session.servedRangeLedger.clear();
+    session.artifactServedRangeLedger.clear();
+    session.pendingServeSpans.length = 0;
+    session.pendingElidedSpans.length = 0;
+    session.pendingRenderedExtent.clear();
+    session.servedFindLedger = undefined;
+    session.searchDedupLedger.clear();
+    session.verificationManifestPathsServed.clear();
+    session.verificationSurfacesServed.clear();
+    session.verificationKitEntriesSent.clear();
+    _pendingServeSessionKeys.delete(key);
+  }
+  return touched;
+}
+
 /** Clears all session state. Test hook. */
 export function resetAll(): void {
   receiptExecutionAddresses = new WeakMap();

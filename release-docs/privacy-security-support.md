@@ -13,6 +13,23 @@ The provider determines how it processes that text. This setting is empty
 by default; no counting bridge starts until a model family is explicitly
 configured. Review the provider's data handling before enabling it.
 
+## Agent hooks and local command logs
+
+Workspace setup installs TokenLighten hooks for the clients it configures.
+Hooks can shorten supported test/build output after execution and record
+compaction or session-reset events so that source context can be sent again.
+They run under the host client's trust and hook settings. Use `--no-hooks`
+to leave hook configuration unchanged or `--remove-hooks` to remove
+TokenLighten's entries; setup preserves unrelated hooks.
+
+`tl run` and supported output-shortening hooks save full command output
+locally under `.tokenlighten/.runtime/run/`. These logs can contain source
+text, paths, credentials or other sensitive information printed by a command.
+Review them before exporting or sharing them. Index caches also remain local
+under `.tokenlighten/cache/`. Neither feature sends these files to a service;
+your agent can still transmit the context it receives according to its settings.
+See [Agent hooks](getting-started.md#agent-hooks) for host limitations.
+
 ## Write permission
 
 A manually started MCP server is read-only by default. File and structured-artifact changes require `--allow-write`. First workspace setup enables writes by default, CLI refresh preserves existing per-client permissions, and explicit `--read-only` or `--allow-write` flags override them. The extension's setup enables writes.

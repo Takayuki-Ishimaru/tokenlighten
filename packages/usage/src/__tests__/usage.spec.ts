@@ -1308,8 +1308,8 @@ describe("privacy-preserving usage recording", () => {
         ...base,
         eventId: "ok",
         outcome: "ok" as const,
-        baselineTokens: 1_000_000,
-        estimatedSavedTokens: 1_000_000,
+        baselineTokens: 20_000,
+        estimatedSavedTokens: 20_000,
       },
       {
         ...base,
@@ -1359,9 +1359,9 @@ describe("privacy-preserving usage recording", () => {
     expect(summary.schemaVersion).toBe(2);
     expect(summary.scope).toEqual({ kind: "workspace", workspaceId: "workspace-id" });
     expect(summary.measuredBaselineCalls).toBe(1);
-    expect(summary.measuredBaselineTokens).toBe(1_000_000);
-    expect(summary.estimatedSavedTokens).toBe(1_000_000);
-    expect(summary.sessionEstimate.predictedSavedTokens).toBe(11_000_000);
+    expect(summary.measuredBaselineTokens).toBe(20_000);
+    expect(summary.estimatedSavedTokens).toBe(20_000);
+    expect(summary.sessionEstimate.predictedSavedTokens).toBe(220_000);
     expect(summary.sessionEstimate.predictedSavedCostUsd).toBeNull();
     expect(summary.sessionEstimate.actualTotalCostUsd).not.toBeNull();
     expect(summary.sessionEstimate.costReductionPercent).toBeNull();
@@ -1375,7 +1375,7 @@ describe("privacy-preserving usage recording", () => {
     });
 
     const manual = summarizeUsage(events, 5, aiLogs);
-    expect(manual.sessionEstimate.predictedSavedCostUsd).toBeCloseTo(55);
+    expect(manual.sessionEstimate.predictedSavedCostUsd).toBeCloseTo(1.1);
 
     const allUnpriced = summarizeUsage(events, null, {
       ...aiLogs,

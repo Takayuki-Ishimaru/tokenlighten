@@ -21,8 +21,8 @@
  */
 
 import { spawn, spawnSync } from "child_process";
-import { dirname, join } from "path";
-import { existsSync } from "fs";
+import { dirname, isAbsolute, join } from "path";
+import { existsSync, statSync } from "fs";
 import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { resolvePath } from "../paths.js";
@@ -50,6 +50,10 @@ Usage: tl mcp <start|stop|status>
                     archive/credential inputs); "full" keeps every existing
                     capability. Fixed for the life of the server process —
                     changing it requires restarting with the new flag.
+                    Without --workspace the server root is the launch
+                    directory; a Claude Code entry (TOKENLIGHTEN_CLIENT=
+                    claude-code) uses the CLAUDE_PROJECT_DIR that Claude
+                    Code sets, which keeps a committed .mcp.json portable.
   stop              Stop a running background MCP server.
   status            Report whether a background MCP server is running.
 `;
@@ -80,6 +84,47 @@ export function serverNodeFlags(execPath: string = process.execPath): string[] {
     timeout: 3_000,
   });
   return probe.status === 0 ? ["--liftoff-only"] : [];
+}
+
+/**
+ * Workspace root for a `tl mcp start` launched WITHOUT `--workspace`.
+ *
+ * The portable project `.mcp.json` that `tl workspace setup` writes (default
+ * install home) names no workspace path, so the host has to supply the root.
+ * Claude Code documents (code.claude.com/docs/en/mcp, "Add a local stdio
+ * server") that it "sets `CLAUDE_PROJECT_DIR` in the spawned server's
+ * environment to the project root" and that a server should read it
+ * "without depending on the working directory"; the stdio working directory
+ * itself is not documented, so the variable ("the project root where the
+ * session started", code.claude.com/docs/en/hooks) is the only documented
+ * contract. `${CLAUDE_PROJECT_DIR:-.}`
+ * in `.mcp.json` cannot carry it: Claude Code expands that reference against
+ * its OWN environment, where the variable is not set.
+ *
+ * Applies only when the entry declares itself a Claude Code entry
+ * (`TOKENLIGHTEN_CLIENT=claude-code`, set by every generated Claude Code
+ * entry and by `tl clients register`), no explicit root is configured
+ * (`TOKENLIGHTEN_ROOT`), and the variable names an existing absolute
+ * directory; anything else keeps the server's own default (the launch
+ * directory).
+ */
+export function implicitWorkspaceRoot(
+  env: NodeJS.ProcessEnv = process.env,
+  isDirectory: (path: string) => boolean = defaultIsDirectory,
+): string | undefined {
+  if (env["TOKENLIGHTEN_CLIENT"] !== "claude-code") return undefined;
+  if (env["TOKENLIGHTEN_ROOT"]) return undefined;
+  const projectDir = env["CLAUDE_PROJECT_DIR"];
+  if (!projectDir || !isAbsolute(projectDir) || !isDirectory(projectDir)) return undefined;
+  return projectDir;
+}
+
+function defaultIsDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 function mcpPidPath(): string {
@@ -212,7 +257,8 @@ async function runMcpStart(args: string[]): Promise<void> {
   // Build argv — shell:false, array form; node/V8 flags before the entry.
   const argv: string[] = [...serverNodeFlags(), mcpBin];
   if (opts.allowWrite) argv.push("--allow-write");
-  if (opts.workspace) argv.push("--workspace", opts.workspace);
+  const workspace = opts.workspace ?? implicitWorkspaceRoot();
+  if (workspace) argv.push("--workspace", workspace);
   for (const parent of opts.allowedParents) argv.push("--allowed-parent", parent);
   if (opts.toolSurface !== undefined) argv.push("--tool-surface", opts.toolSurface);
 

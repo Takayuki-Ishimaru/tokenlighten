@@ -230,6 +230,12 @@ function spawnEnv(on: boolean): NodeJS.ProcessEnv {
   delete env["TL_SF_STATEFUL"];
   delete env["TL_SF_DEMOTE"];
   delete env["TL_SF_STRUCTURAL_CONCERNS"];
+  // 2026-11-03 (TL_PACK_BODYLESS_DISCOVER, default ON): this spec measures the
+  // SF pre-booking seam against its flag-off control, whose first pack is a
+  // `discover` over partial coverage — the shape the body-less policy would
+  // also strip, which would make the control indistinguishable from the
+  // treatment. The policy is pinned off here; bodylessDiscover.spec.ts owns it.
+  env["TL_PACK_BODYLESS_DISCOVER"] = "0";
   if (on) {
     env["TL_SF_STATEFUL"] = "1";
     env["TL_SF_DEMOTE"] = "1";
@@ -384,6 +390,11 @@ describe("FX-I-A: a demoted row's handle never becomes an editable target (spawn
 
 describe("FX-I-A: the edit admissibility union is booked from the SHIPPED pack", () => {
   beforeEach(() => {
+    // 2026-11-03 (TL_PACK_BODYLESS_DISCOVER, default ON): same reason as
+    // `spawnEnv` above — the flag-off control's first pack is a `discover` over
+    // partial coverage, which the body-less policy would also strip. Pinned
+    // off so the booking contract is measured against the SF seam alone.
+    process.env["TL_PACK_BODYLESS_DISCOVER"] = "0";
     resetSfStateForTests();
     resetAllSessions();
   });
@@ -393,6 +404,7 @@ describe("FX-I-A: the edit admissibility union is booked from the SHIPPED pack",
     delete process.env["TL_SF_DEMOTE"];
     delete process.env["TL_SF_STRUCTURAL_CONCERNS"];
     delete process.env["TL_SEMANTIC_FRONTIER_GUARD"];
+    delete process.env["TL_PACK_BODYLESS_DISCOVER"];
     resetSfStateForTests();
     resetAllSessions();
   });

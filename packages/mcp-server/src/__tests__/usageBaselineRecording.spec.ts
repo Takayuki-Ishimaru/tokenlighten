@@ -109,6 +109,35 @@ describe("usage recorder baseline for ranged reads", () => {
     expect(second!.baselineTokens).toBe(0);
   });
 
+  it("caps a 1.59 MB file's whole-file read at one native read window, not its size", async () => {
+    const { root, callTool, events } = await harness();
+    // 20,000 lines of 80 bytes = 1.6 MB, the size of the field-report server.ts.
+    const lines: string[] = [];
+    for (let index = 1; index <= 20_000; index++) {
+      lines.push(`${`// huge ${String(index).padStart(5, "0")} `.padEnd(79, ".")}\n`);
+    }
+    lines.push("export function lastOne(): number {\n  return 1;\n}\n");
+    const content = lines.join("");
+    const totalBytes = Buffer.byteLength(content);
+    expect(totalBytes).toBeGreaterThan(1_590_000);
+    writeFileSync(join(root, "huge.ts"), content);
+
+    await callTool("tl_read_file", { mode: "full", path: "huge.ts", cwd: root });
+    await callTool("tl_read_file", { mode: "full", path: "huge.ts", cwd: root });
+
+    const [first, second] = events();
+    expect(first!.outcome).toBe("ok");
+    expect(first!.baselineMethod).toBe("file-bytes");
+    // 25,000 tokens (100,000 bytes): what one native Read can return.
+    expect(first!.baselineTokens).toBe(25_000);
+    expect(first!.baselineTokens!).toBeLessThan(totalBytes / 4 / 10);
+    // The saving can no longer exceed that window, whatever the file's size.
+    expect(first!.estimatedSavedTokens!).toBeLessThanOrEqual(25_000);
+    expect(first!.estimatedSavedTokens).toBe(25_000 - first!.estimatedResponseTokens);
+    // Credited once per lane: the repeat adds nothing.
+    expect(second!.baselineTokens).toBe(0);
+  });
+
   it("credits a ranged read only the requested lines, labelled range-bytes", async () => {
     const { root, callTool, events } = await harness();
     const source = bigSource();
@@ -169,6 +198,26 @@ describe("usage recorder baseline for ranged reads", () => {
     expect(event!.baselineTokens!).toBeLessThan(source.totalBytes / 4 / 20);
     // The served symbol window is lines 701-704 of the file.
     expect(event!.baselineTokens).toBe(Math.ceil(source.lineBytes(701, 704) / 4));
+  });
+
+  it("records no baseline for a search call, however large the file it searched", async () => {
+    const { root, callTool, events } = await harness();
+    writeFileSync(join(root, "big.ts"), bigSource().content);
+
+    const result = await callTool("tl_search_files", {
+      cwd: root,
+      action: "find",
+      queries: ["targetFunction"],
+    });
+    expect(JSON.parse(result.content[0]!.text)).not.toMatchObject({ kind: "refusal" });
+
+    const [event] = events();
+    expect(event!.outcome).toBe("ok");
+    // A search is answered from the index: there is no whole-file native read
+    // to compare it with, so it carries no baseline and so no "saving".
+    expect(event!.baselineTokens).toBeNull();
+    expect(event!.estimatedSavedTokens).toBeNull();
+    expect(event!.baselineMethod).toBeNull();
   });
 
   it("records no baseline for a query-only task_pack", async () => {

@@ -41,6 +41,7 @@ import {
   type RpcResponse,
 } from "../../server.js";
 import { RequestCancelledError, runWithRequestSignal } from "../../util/requestCancellation.js";
+import { exitAfterTransportCloseIfBuilding } from "../../features/indexing/sourceIndexAccess.js";
 import { startHostActivationWatch, type HostActivationWatch } from "../hostActivation.js";
 
 // SECURITY (TL-SECURITY-REVIEW-2026-08-15 finding 7, CWE-400): this transport
@@ -165,6 +166,13 @@ export function runLegacyStdio(
   };
   rl.on("close", () => {
     hostActivationWatch?.stop();
+    // A source-index build still running (features/indexing/sourceIndexAccess.ts)
+    // would keep the process alive after the client closed the pipe. Once the
+    // queued requests have been answered, end the process; the exit waits for
+    // the output to flush first. Nothing changes when no build is in flight.
+    void queueTail.finally(() => {
+      exitAfterTransportCloseIfBuilding((exit) => { output.write("", exit); });
+    });
   });
 
   rl.on("line", (line) => {

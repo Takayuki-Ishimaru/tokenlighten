@@ -27,6 +27,7 @@ import { resetServerStateForSessionReset } from "../server.js";
 import { resetAll as resetSessions, resetClockForTest } from "../state/session.js";
 import { handleTable } from "../util/handles.js";
 import { resetStateStoresForTests } from "../state/stateStore.js";
+import { resetCompactionMarkerForTest } from "../state/compactionEpoch.js";
 import { resetReadCallDispatchForTests } from "../state/readCallDispatch.js";
 import {resetReadCallBatchGroupsForTests} from "../state/readCallBatchGroup.js";
 import { resetPendingHandleEntriesForTests } from "../state/stateHandles.js";
@@ -71,6 +72,7 @@ import { resetLexicalSegmentsCache } from "../tools/lexicalRanges.js";
 import { resetGitignorePatternsCache, resetTokenlightenIgnoreCache } from "../tools/walkRepo.js";
 import { resetProofCompletionLiveCounterForTest } from "../util/flags.js";
 import { noteToolCallStarted, resetStartupWarmupForTest, startupWarmupSettledForTest } from "../util/startupWarmup.js";
+import { resetSourceIndexAccessForTest, sourceIndexBuildsSettledForTest } from "../features/indexing/sourceIndexAccess.js";
 import { resetTraceStateForTests } from "../util/trace.js";
 import { resetVerificationKitDedupeForTest } from "../util/verificationPack.js";
 import { resetPythonProbeCacheForTest } from "../util/pythonInterpreter.js";
@@ -108,10 +110,15 @@ export async function resetServerSessionForTests(params: unknown): Promise<Sessi
   // can revive the old pass and let it mutate caches after the stderr barrier.
   noteToolCallStarted();
   await startupWarmupSettledForTest();
+  // A source-index build the old session started must finish before its
+  // workspace is released, and the next session starts from no recorded state.
+  await sourceIndexBuildsSettledForTest();
+  resetSourceIndexAccessForTest();
 
   // Session, lane and task state.
   resetSessions();
   resetClockForTest();
+  resetCompactionMarkerForTest();
   handleTable.reset();
   resetPendingHandleEntriesForTests();
   resetHandleKeyRingForTests();

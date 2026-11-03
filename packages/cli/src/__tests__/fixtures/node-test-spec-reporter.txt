@@ -1,0 +1,116 @@
+
+> hooklive@1.0.0 test
+> node --test --test-reporter=spec
+
+noise line for case 0: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 1: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 2: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 3: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 4: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 5: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 6: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 7: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 8: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 9: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 10: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 11: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 12: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 13: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 14: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 15: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 16: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 17: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 18: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 19: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 20: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 21: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 22: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 23: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 24: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 25: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 26: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 27: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 28: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 29: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 30: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 31: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 32: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 33: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 34: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 35: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 36: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 37: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 38: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+noise line for case 39: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+✔ passing case 0 (1.4447ms)
+✔ passing case 1 (0.1651ms)
+✔ passing case 2 (0.0869ms)
+✔ passing case 3 (0.0789ms)
+✔ passing case 4 (0.1275ms)
+✔ passing case 5 (0.0733ms)
+✔ passing case 6 (0.1004ms)
+✔ passing case 7 (0.1084ms)
+✔ passing case 8 (0.1192ms)
+✔ passing case 9 (0.2593ms)
+✔ passing case 10 (0.1962ms)
+✔ passing case 11 (0.0977ms)
+✔ passing case 12 (0.96ms)
+✔ passing case 13 (0.0889ms)
+✔ passing case 14 (0.0908ms)
+✔ passing case 15 (0.0355ms)
+✔ passing case 16 (0.0239ms)
+✔ passing case 17 (0.0353ms)
+✔ passing case 18 (0.0295ms)
+✔ passing case 19 (0.0235ms)
+✔ passing case 20 (0.0217ms)
+✔ passing case 21 (0.0227ms)
+✔ passing case 22 (0.0236ms)
+✔ passing case 23 (0.0222ms)
+✔ passing case 24 (0.0369ms)
+✔ passing case 25 (0.0258ms)
+✔ passing case 26 (0.0214ms)
+✔ passing case 27 (0.0225ms)
+✔ passing case 28 (0.0291ms)
+✔ passing case 29 (0.0229ms)
+✔ passing case 30 (0.031ms)
+✔ passing case 31 (0.0485ms)
+✔ passing case 32 (0.1185ms)
+✔ passing case 33 (0.0337ms)
+✔ passing case 34 (0.0242ms)
+✔ passing case 35 (0.0372ms)
+✔ passing case 36 (0.0269ms)
+✔ passing case 37 (0.0236ms)
+✔ passing case 38 (0.0837ms)
+✔ passing case 39 (0.0322ms)
+✖ adds two numbers (0.7077ms)
+ℹ tests 41
+ℹ suites 0
+ℹ pass 40
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 107.3751
+
+✖ failing tests:
+
+test at test\math.test.js:4:1
+✖ adds two numbers (0.7077ms)
+  AssertionError [ERR_ASSERTION]: EXPECTED_FAILURE_MARKER sum is wrong
+  
+  2 !== 3
+  
+      at TestContext.<anonymous> (C:\Users\user\AppData\Local\Temp\claude\C--Users-user-git-TokenLighten\53218586-3f77-47e9-a218-56c5c83a2994\scratchpad\hooklive\ws\test\math.test.js:4:41)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1402:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:974:18)
+      at Test.postRun (node:internal/test_runner/test:1542:19)
+      at Test.run (node:internal/test_runner/test:1467:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 2,
+    expected: 3,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

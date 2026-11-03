@@ -106,8 +106,10 @@ export type AdvertisedToolName = "tl_read_file" | "tl_edit_file" | "tl_search_fi
  * (2) retired 2026-10-02 — the sentence "bare read_file/edit_file/search_files
  * mean these, never the built-in read_file": the tl_ prefix makes the names
  * distinct, so nothing is left to disambiguate; (3) the same essential routing
- * SERVER_INSTRUCTIONS carries (TL first for code/doc/config; unknown-
- * location/multi-file => tl_read_file {query:...}; act on act.answer/act.edit;
+ * SERVER_INSTRUCTIONS carries (unknown location, several files, Office/CSV/
+ * archive or large files => tl_read_file {query:...}, a user-named file with a
+ * small change => native (2026-11-03, replacing "TL first for code/doc/config",
+ * same 1000 B ceiling); act on act.answer/act.edit;
  * batch edits in one edits[] call; the full protocol is in the model's own
  * instructions — "Protocol: in your instructions.", never a file to fetch:
  * since the Copilot standard-setup evaluation (2026-10-02), setup's default
@@ -130,7 +132,7 @@ export type AdvertisedToolName = "tl_read_file" | "tl_edit_file" | "tl_search_fi
  * targets instead of asking the model to drop it.
  */
 export const VSCODE_SERVER_INSTRUCTIONS =
-  `TokenLighten tools are MCP tools ending in tl_read_file/tl_edit_file/tl_search_files; if the needed definitions are loaded, call TL directly. Otherwise load once with tool_search {query:"tokenlighten"}, then call TL. Stop tool_search once loaded; reload only missing definitions, including after a conversation summary. Batch independent context calls with TL. TL first for code/doc/config. Unknown-location/multi-file=>tl_read_file {query:"<request>"}. Pass the entire user request verbatim as query; preserve every requirement. Turns cost more than bytes: every known file/range in ONE targets:[...] call or one parallel batch; reread served evidence via targets:[{handle,range}], no qref. On tl_read_file/tl_search_files omit cwd and task.handle (qref carries the task); targets[].purpose only on a directory. Act on act.answer/act.edit: use served evidence, batch edits in one edits[] call, stop after passing verification. Protocol: in your instructions.`;
+  `TokenLighten tools are MCP tools ending in tl_read_file/tl_edit_file/tl_search_files; if the needed definitions are loaded, call TL directly. Otherwise load once with tool_search {query:"tokenlighten"}, then call TL. Stop tool_search once loaded; reload only missing definitions, including after a conversation summary. Batch independent context calls with TL. Unknown location, multi-file, Office/CSV/archive/large=>tl_read_file {query:"<request>"}; user-named file + small change=>native. Pass the entire user request verbatim as query; preserve every requirement. Turns cost more than bytes: every known file/range in ONE targets:[...] call or one parallel batch; reread served evidence via targets:[{handle,range}], no qref. On tl_read_file/tl_search_files omit cwd and task.handle (qref carries the task); targets[].purpose only on a directory. Act on act.answer/act.edit: use served evidence, batch edits in one edits[] call, stop after passing verification. Protocol: in your instructions.`;
 
 /**
  * VS Code-specific tool descriptions — richer than the ~30-40 char defaults
@@ -228,9 +230,9 @@ export function isCliCodingHost(clientId: string | undefined): boolean {
 
 /** CLI eagerly sends definitions, so put routing rules here and avoid duplication. */
 const COPILOT_CLI_TOOL_DESCRIPTIONS: Readonly<Record<AdvertisedToolName, string>> = {
-  tl_read_file: 'FIRST source lookup instead of grep/view: {cwd,query:"<entire user request, verbatim>",task:{epoch:"new"}}. Read-only: add task.profile:"answer". Locates and serves needed code; act.answer means answer now; otherwise run next verbatim.',
+  tl_read_file: 'Source lookup instead of grep/view: {cwd,query:"<entire user request, verbatim>",task:{epoch:"new"}}. Read-only: add task.profile:"answer". Locates and serves needed code; act.answer means answer now; otherwise run next verbatim.',
   tl_edit_file: 'Batch edits[] with served handles; pass cwd. For one known replacement use precondition:"unique-match",allowPathFallback:false. Writes require --allow-write.',
-  tl_search_files: 'Source tasks: use tl_read_file first. Find/references/diff/tree via action and queries[]; scope.path narrows the search.',
+  tl_search_files: 'Unknown location: tl_read_file first. Find/references/diff/tree via action and queries[]; scope.path narrows the search.',
 };
 
 /** True when `clientId` resolves (via clientProfile.ts's `resolveClientProfile`) to VS Code's built-in MCP client. */

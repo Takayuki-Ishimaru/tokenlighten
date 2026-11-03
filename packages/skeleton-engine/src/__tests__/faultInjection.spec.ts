@@ -138,9 +138,12 @@ describe("fault (b): duplicate invalidation", () => {
 
     const second = await loadOrBuildSourceIndex(tmpDir, { commit: "c", ignoreHash: "h" });
     // Same observable contract as a SINGLE invalidate: memo busted (a new
-    // manifest object), disk content unchanged so nothing needed re-parse.
+    // manifest object). The invalidated path left the memo seed, and since
+    // 2026-11-03 the memo (not the disk cache) seeds the rebuild, so that one
+    // file re-extracts and nothing else does.
     expect(second.manifest).not.toBe(first.manifest);
-    expect(second.reparsed).toBe(0);
+    expect(second.reparsed).toBe(1);
+    expect(second.reused).toBe(Object.keys(first.manifest.files).length - 1);
     expect(second.manifest.files["src/a.ts"]!.symbols[0]!.name).toBe("hello");
   });
 

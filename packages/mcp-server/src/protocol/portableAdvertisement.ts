@@ -27,9 +27,9 @@ const fields: Record<string, readonly string[]> = {
 // projection deletes only the TOP-level oneOf/anyOf, so the item-level one
 // survives and `compact()` only strips descriptions inside it).
 const descriptions: Record<string, string> = {
-  tl_read_file: 'Read workspace files here. FIRST source lookup: {cwd,query:"<entire user request, verbatim>",task:{epoch:"new"}}. Same request: targets[] (path/handle, range), task.handle; no query or epoch:"new". Read-only: task.profile:"answer". act.answer/act.edit: act; discover: run next, never answer; receipt: reuse.',
+  tl_read_file: 'Read workspace files here. Source lookup: {cwd,query:"<entire user request, verbatim>",task:{epoch:"new"}}. Same request: targets[] (path/handle, range), task.handle; no query or epoch:"new". Read-only: task.profile:"answer". act.answer/act.edit: act; discover: run next, never answer; receipt: reuse.',
   tl_edit_file: 'Edit/Write: ONE edits[] batch for all ready obligations, including style across stages. Each item: its own path (or served handle whose window covers search; multiple windows: prefer path) + search/replace + precondition:"unique-match". New: path,create:true,content. Copy top-level cwd. Requires --allow-write. Follow recovery before retrying.',
-  tl_search_files: 'Replaces grep/rg/find/ls; first use tl_read_file. find: one literal identifier per queries[]; scope.path narrows. references=call sites, tree=listing, diff. Run next verbatim.',
+  tl_search_files: 'Unknown location: tl_read_file first. find: one literal identifier per queries[]; scope.path narrows. references=call sites, tree=listing, diff. Run next verbatim.',
 };
 function pick(record: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
   return Object.fromEntries(keys.filter(key => Object.hasOwn(record, key)).map(key => [key, record[key]]));
@@ -66,7 +66,11 @@ function slimmed(name: string, schema: PortableToolDefinition["inputSchema"]): v
   if (edit) {
     // The item's `anyOf` stays: it is what stopped address-less items (note above `descriptions`).
     delete edit["oneOf"];
-    edit["properties"] = { ...pick(object(edit["properties"]) ?? {}, ["path", "handle", "search", "replace", "create", "content"]), precondition: { type: "string" } };
+    // 2026-11-02 (v0.16.4 field evaluation): the `{required:["intent"]}` alternative
+    // read as a demand for a field this projection never listed. It stays (an
+    // address-less intent item is valid on every surface), so `intent` is named,
+    // collapsed like `scope` and `select`.
+    edit["properties"] = { ...pick(object(edit["properties"]) ?? {}, ["path", "handle", "search", "replace", "create", "content"]), precondition: { type: "string" }, intent: { type: "object" } };
   }
   const scope = object(properties["scope"]);
   if (scope) scope["properties"] = pick(object(scope["properties"]) ?? {}, ["path", "regex"]);

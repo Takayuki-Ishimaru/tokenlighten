@@ -17,23 +17,25 @@
 
 It exposes exactly three tools: `tl_read_file`, `tl_search_files`, and `tl_edit_file`.
 
-## v0.16.4 release
+## v0.16.5 release
 
-**Public Beta.** TokenLighten v0.16.4 improves CSV lookups, focused code discovery, continued reads and edits, and MCP server startup. Interfaces and supported workflows may change as feedback is incorporated.
+**Public Beta.** TokenLighten v0.16.5 improves focused code discovery, exact symbol reads, large-workspace startup, usage estimates and setup. Interfaces and supported workflows may change as feedback is incorporated.
 
-The main improvements in v0.16.4 are:
+The main improvements in v0.16.5 are:
 
-- supported read-only questions naming a CSV can receive matching rows and a whole-table match count in the first reply;
-- discovery prioritizes named code, recognizes more English and Japanese questions, and avoids repeatedly paging unrelated documentation;
-- continued reads preserve table ranges and omitted comments, while edit replies retain useful surrounding code;
-- client tool definitions and workspace guides are smaller, with edit instructions supplied when needed; and
-- direct MCP launches use the same memory setting as CLI launches to prevent a startup failure when many servers run together.
+- discovery prioritizes named product code and exact literals, follows relevant method calls, and locates related configuration definitions and uses;
+- method reads preserve exact source lines, and edit retries identify changes already applied;
+- large workspaces can answer initial discovery through text search while a reusable symbol index builds in the background;
+- setup installs client-specific hooks for compact test/build output and context resends after compaction, with opt-out and removal options; and
+- usage summaries bound estimated context avoided by equivalent native reads and clearly distinguish estimates from billing.
 
 The three MCP tools remain `tl_read_file`, `tl_search_files`, and `tl_edit_file`. A manually started server is read-only unless passed `--allow-write`; first workspace setup enables writes by default.
 
 The public release includes four platform install archives (win-x64, darwin-arm64, darwin-x64, linux-x64) with the CLI, MCP server and a bundled Node.js runtime, source code with public package tests, and a self-contained VS Code VSIX. Model weights are downloaded separately when requested. The desktop application is not included.
 
-**Upgrade:** install the v0.16.4 archive or VSIX, refresh workspace setup, then start a new agent session or reconnect your MCP client. CLI workspace refresh preserves existing per-client write permissions; use `--read-only` or `--allow-write` to change them explicitly. The extension's **Set up this workspace** enables writes. Non-interactive install maintenance continues to require `--yes`; `--dry-run` previews these operations. The three tool names and supported canonical top-level request fields are unchanged from v0.16.3. Follow returned `next` calls and any supplied `edit_rules`. See the [v0.16.4 release notes](release-docs/github-release-v0.16.4.md) and [Local analysis engines](release-docs/local-analysis.md).
+**Upgrade:** install the v0.16.5 archive or VSIX, refresh workspace setup, then start a new agent session or reconnect your MCP client. CLI workspace refresh preserves existing per-client write permissions; use `--read-only` or `--allow-write` to change them explicitly. The extension's **Set up this workspace** enables writes. Non-interactive install maintenance continues to require `--yes`; `--dry-run` previews these operations. The three tool names and supported canonical top-level request fields are unchanged from v0.16.4. Follow returned `next` calls and any supplied `edit_rules`. See the [v0.16.5 release notes](release-docs/github-release-v0.16.5.md) and [Local analysis engines](release-docs/local-analysis.md).
+
+Setup installs agent hooks for the clients it configures. Hooks can shorten supported test/build output after execution and reset served-context tracking after compaction; commands and permission checks are unchanged. Use `--no-hooks` to leave hook configuration unchanged or `--remove-hooks` to remove TokenLighten hooks. Client trust and hook settings still apply. Full command logs stay under `.tokenlighten/.runtime/run/` and may contain sensitive output. See [Agent hooks](release-docs/getting-started.md#agent-hooks) for client limitations.
 
 ## Why TokenLighten
 
@@ -70,7 +72,7 @@ The headline compares summed costs; the table compares each configuration's medi
 
 A complementary estimate retained **16 pairs** by charging missing TokenLighten output at a conservative upper bound inferred from the following request's input, while keeping the baseline cost as recorded. Its conservative result was **35.2% lower cost**; two pairs without usable bounds remain excluded. This estimate is separate from the complete-record comparison above.
 
-The Sonnet candidate preceded the final request-handling fixes, which were not separately remeasured on Sonnet. Savings have not been remeasured for v0.16.4.
+The Sonnet candidate preceded the final request-handling fixes, which were not separately remeasured on Sonnet. Savings have not been remeasured for v0.16.5.
 
 ### Tasks that may benefit less
 
@@ -94,11 +96,19 @@ tl-setup C:\path\to\workspace       # Windows
 
 Each archive bundles its own copy of Node.js — no separate runtime install, no editor extension. This registers TokenLighten as a machine-scoped MCP server for every detected AI-agent host (Claude Code, Codex, Gemini CLI, Copilot CLI, and GitHub Copilot Chat in VS Code) and sets up the given workspace. See [Getting started](release-docs/getting-started.md) for verification, upgrade, rollback, and uninstall.
 
+On macOS and Linux, `tl-setup` refuses to run as root (uid 0): the install would land in the administrator's profile instead of the profile of the user who runs your agents. In a devcontainer or CI job where root is that user, pass `--allow-root`, for example `./tl-setup /path/to/workspace --allow-root`. It has no effect on Windows.
+
+`tl-setup` writes a workspace's client files only for the hosts it detects: `.mcp.json` for Claude Code, `.codex/config.toml` for Codex, and the VS Code and Copilot files (`.vscode/`, `.github/`) for Copilot CLI, plus `AGENTS.md` and `CLAUDE.md`. If it detects none (or only Gemini CLI), it writes all three sets; `--workspace-clients all`, or a list such as `claude-code,codex`, chooses explicitly, and a workspace set up earlier keeps refreshing the files it already has. With the default install location, `.mcp.json` is portable: it names the launcher as `${HOME}` (`${LOCALAPPDATA}` on Windows) and stores no workspace path, because Claude Code hands the project root to the server, so it can be committed for teammates on the same OS who have also run `tl-setup`. `.vscode/mcp.json` and `.codex/config.toml` contain this machine's absolute workspace path, so keep them out of version control and have each developer run `tl-setup`. With a custom `--home`, `.mcp.json` is machine-specific as well.
+
+Agent hooks are installed by default: `tl-setup <workspace>` (and `tl workspace setup`) also writes TokenLighten's hooks into the own hook configuration of every client it sets up, `.claude/settings.json` for Claude Code, `.codex/hooks.json` for Codex and `.github/hooks/tokenlighten-hooks.json` for Copilot CLI and VS Code, merging with your own entries and changing nothing on a re-run; a hook file you edited by hand is preserved with a warning. Pass `--no-hooks` to set up without them: setup then neither writes nor removes a hook file. `--remove-hooks` or `tl install --uninstall` takes TokenLighten's entries out again and leaves yours; `--hooks` is still accepted and means the default. Two hooks are installed. The first compresses the output of recognised test and build commands (`npm test`, `npm run test*`/`build*`/`lint`, `vitest`, `jest`, `pytest`, `tsc`, `eslint`, `go test`, `cargo test`/`build`, also through the Windows `npm.cmd`/`npx.cmd` launchers) after the command has run. The command runs exactly as the agent wrote it, under your own permission rules: TokenLighten rewrites nothing, makes no permission decision and adds no prompt. When the output is longer than about 4 KB, the hook keeps it whole in `.tokenlighten/.runtime/run/` and replaces what the model sees with the `tl run` compression: the failure blocks, the runner's summary and the log path. Pipelines, redirections, background runs and anything it cannot parse are left alone. Claude Code receives the replacement on PostToolUse (`updatedToolOutput`); a command that exits non-zero reaches Claude Code's PostToolUseFailure event instead, which cannot replace output, so a failing run is shown whole there (run `tl run -- <command>` when you want it compressed). Copilot CLI receives it on postToolUse (`modifiedResult`), where a failing run arrives as a result too, so it is compressed and its exit-code line kept; VS Code's Local harness may ignore the replacement, and the original output then stands. Codex has no such hook, so there the agent runs `tl run -- <command>` by hand. Re-running setup replaces the command-rewriting pre-tool-use hooks that earlier versions installed. The second hook records a compaction marker (`.tokenlighten/.runtime/compaction-epoch.json`) on each host's compaction, clear or new-session event, and the MCP server checks it with one `stat` per tool call: after a compaction the model is served the content again instead of "already served" receipts for lines it can no longer see. `TL_COMPACTION_MARKER=0` turns that check off.
+
+Each host decides when project hooks run, and setup never trusts a folder for you, so installed hooks stay inactive until you do: Claude Code holds back hooks from every settings file until you accept its workspace trust dialog for the folder (a `-p` or SDK session treats the folder as trusted). Codex and Copilot load project hooks only once the folder is trusted: Codex loads project-local hooks only when the project's `.codex/` layer is trusted, and non-managed hooks must be reviewed and trusted with `/hooks` in the Codex CLI before they run; Copilot CLI and VS Code load `.github/hooks/*.json` only in a folder you trusted (Copilot CLI's folder trust, VS Code's Workspace Trust). In VS Code, `chat.useHooks` (Preview, on by default, left unchanged by setup) switches hooks for the Local agent harness only, while Copilot sessions and Copilot CLI load `.github/hooks/*.json` whatever its value.
+
 Prefer VS Code's own extension instead? See the next section.
 
 ## Install the VS Code extension (no build required)
 
-Download **[tokenlighten-vscode-extension-0.16.4.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.16.4/tokenlighten-vscode-extension-0.16.4.vsix)** from the v0.16.4 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
+Download **[tokenlighten-vscode-extension-0.16.5.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.16.5/tokenlighten-vscode-extension-0.16.5.vsix)** from the v0.16.5 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
 
 Then:
 
@@ -109,7 +119,7 @@ Then:
 Or install it from a terminal:
 
 ```sh
-code --install-extension tokenlighten-vscode-extension-0.16.4.vsix
+code --install-extension tokenlighten-vscode-extension-0.16.5.vsix
 ```
 
 Open a trusted project folder, select the TokenLighten view, and choose **Set up this workspace**. The packaged VSIX includes the CLI, MCP server, parsers, and required assets; a separate global installation is not required. This performs the same machine install as the archive above (`tl install --from-extension`) and sets up the current workspace, but leaves other hosts on the machine — Claude Code, Codex — unregistered (`--clients none`); register them separately with `tl clients activate`, or with an archive's `tl-setup`.

@@ -199,6 +199,32 @@ const CLAUDE_CODE_MAX_REPLY_BYTES = 45_056;
  * digits and commas passes 25,000, and it reaches the model through that file.
  */
 const CLAUDE_CODE_BYTES_PER_TOKEN = 1.2;
+/**
+ * 2026-11-03 (v0.16.4 field evaluation, MAX_MCP_OUTPUT_TOKENS=5000 refused everything):
+ * the smallest reply ceiling Claude Code is given, whatever MAX_MCP_OUTPUT_TOKENS says.
+ * 5000 tokens x 1.2 = 6,000 B, under the 6,144 B that `admitTaskPackBudget`
+ * (features/task-pack/readCodeTaskPack.ts, REQUIRED_MIN_TASK_PACK_BYTES) accepts, and
+ * server.ts's `taskPackAdmission` passes this ceiling to it as the call's own `maxBytes`:
+ * every query-bearing `tl_read_file` came back `budget-below-minimum` with
+ * `required_min_bytes: 6144`, a budget the caller never declared and so could not raise.
+ * A smaller value was worse (MAX_MCP_OUTPUT_TOKENS=1 gave a 1 B ceiling, which turned
+ * every page and every find into a `cap-exceeded` refusal too). A host cap asks for a
+ * smaller answer, not for none: below the floor the pack, the page and the find already
+ * shrink to their existing smaller forms (a partial pack with its paging call, a
+ * cursor page), and those are what a 6,144 B ceiling now buys. The floor is the
+ * pack-admission minimum, not a larger guess: 6,144 B is about 1,500 tokens of source
+ * or a pack on o200k_base (2,700 at the 2.3 B/token the T03 replies measured), so a
+ * reply at the floor is inside any cap of a few thousand tokens and only a cap below
+ * that moves it to a file, which costs a turn and beats a refusal. A value of 5,120 or
+ * more is untouched (5,120 x 1.2 = 6,144 B), and so is the default.
+ *
+ * Must equal REQUIRED_MIN_TASK_PACK_BYTES and, in protocol/emit.ts,
+ * READ_BATCH_TASK_PACK_PROMOTION_FLOOR_BYTES (not imported: this module sits below
+ * both); claudeCodeLowOutputTokens.spec.ts fails if they drift apart. A content-dependent
+ * floor above it (a docx's first page, a broad find's inventory) is still the bounded
+ * `cap-exceeded` of every ceiling-bearing client, not something a flat floor can name.
+ */
+export const CLAUDE_CODE_MIN_REPLY_BYTES = 6144;
 
 function claudeCodeProfile(): ClientProfile {
   const raw = process.env["MAX_MCP_OUTPUT_TOKENS"];
@@ -209,7 +235,7 @@ function claudeCodeProfile(): ClientProfile {
     profileVersion: "2",
     lastValidated: "2026-11-02",
     allowedCodecIds: [],
-    responseByteCeiling: Math.min(CLAUDE_CODE_MAX_REPLY_BYTES, Math.max(1, Math.floor(tokens * CLAUDE_CODE_BYTES_PER_TOKEN))),
+    responseByteCeiling: Math.min(CLAUDE_CODE_MAX_REPLY_BYTES, Math.max(CLAUDE_CODE_MIN_REPLY_BYTES, Math.floor(tokens * CLAUDE_CODE_BYTES_PER_TOKEN))),
   };
 }
 

@@ -41,11 +41,14 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import {
-  loadOrBuildSourceIndex,
-  searchIndexSymbols,
-} from "@tokenlighten/skeleton-engine";
+import { searchIndexSymbols } from "@tokenlighten/skeleton-engine";
 import type { SearchContext } from "@tokenlighten/skeleton-engine";
+import {
+  obtainSourceIndex,
+  prewarmSourceIndex,
+  type SourceIndexAccess,
+  type SourceIndexBuildOptions,
+} from "../features/indexing/sourceIndexAccess.js";
 import type { McpLang } from "@tokenlighten/types";
 import { isSourceOnlyExcludedPath } from "./walkRepo.js";
 import { applyRoles, deriveFileRole } from "../features/search/find/findText.js";
@@ -94,6 +97,14 @@ export interface SearchSymbolsInput {
   offset?: number;
   /** Internal only: use the filtered, complete ranked universe for public cursor paging. */
   cursorPage?: true;
+  /**
+   * How this lookup obtains the source index while it is not built yet
+   * (features/indexing/sourceIndexAccess.ts). Default `"wait"`: await the
+   * build. `"background"` (the locator's lookups): follow TL_BACKGROUND_INDEX
+   * and, while the index warms, answer with no locations so the pack is served
+   * from text search and discloses `coverage_reason:"index-warming"`.
+   */
+  indexAccess?: SourceIndexAccess;
 }
 
 export type SymbolKind = "function" | "class" | "method" | "const" | "type";
@@ -473,6 +484,20 @@ function computeSymbolCoverage(finalLocations: readonly SymbolLocationInternal[]
  *   the real installed WASM files, proving the labeled-fallback path stays
  *   honest and never hard-errors.
  */
+/** The index options every lookup here uses, the request's scan scope aside. */
+function symbolIndexBuildOptions(): SourceIndexBuildOptions {
+  return { ignoreHash: "", graphIndexMode: graphIndexMode(), graphIndexMaxBytes: GRAPH_INDEX_MAX_BYTES };
+}
+
+/**
+ * Start `workspace`'s index build once the MCP handshake completes, with the
+ * options the lookups below use, so their first call finds it built
+ * (features/indexing/sourceIndexAccess.ts `prewarmSourceIndex`).
+ */
+export function prewarmSymbolIndex(workspace: string): void {
+  prewarmSourceIndex(workspace, symbolIndexBuildOptions());
+}
+
 export async function searchSymbols(
   input: SearchSymbolsInput,
   workspace: string,
@@ -491,12 +516,20 @@ export async function searchSymbols(
   // (2026-10-30: 5,451 reads in one T03 first call). The first lookup of a
   // request still scans; the next request scans again.
   const requestScope = currentRequestSignal();
-  const { manifest } = await loadOrBuildSourceIndex(workspace, {
-    ignoreHash: "",
-    graphIndexMode: graphIndexMode(),
-    graphIndexMaxBytes: GRAPH_INDEX_MAX_BYTES,
+  // 2026-11-02: the index is obtained through sourceIndexAccess.ts, which runs
+  // one build per workspace at a time and, for a `"background"` lookup, may
+  // answer that the index is still warming instead of blocking the reply on
+  // the whole-workspace build (see that module's header for the policy).
+  const indexOutcome = await obtainSourceIndex(workspace, {
+    ...symbolIndexBuildOptions(),
     ...(requestScope !== undefined ? { consistencyScanScope: requestScope } : {}),
-  });
+  }, input.indexAccess ?? "wait");
+  if (indexOutcome.warming) {
+    // Nothing ran: no candidate exists yet to label, count or page. The pack's
+    // `task.coverage` discloses the warming index (protocol/decisionWire.ts).
+    return { locations: [], truncated: false, total: 0 };
+  }
+  const { manifest } = indexOutcome;
 
   // 2) Build fileScores from manifest symbol counts (Phase C proxy).
   const fileScores = buildFileScoresFromManifest(manifest.files);

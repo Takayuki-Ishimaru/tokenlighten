@@ -117,6 +117,7 @@ afterEach(() => {
   delete process.env["TL_SF_DEMOTE"];
   delete process.env["TL_SF_STRUCTURAL_CONCERNS"];
   delete process.env["TL_SEMANTIC_FRONTIER_GUARD"];
+  delete process.env["TL_PACK_BODYLESS_DISCOVER"]; // pinned off by setFlags/spawnEnv (2026-11-03)
   // NOTE: the SF state adapter's LRU is deliberately NOT reset here. Its own
   // spec pins a consumer allowlist this file stays off, and no reset is
   // needed: every case builds its OWN temp workspace, so no per-pack SF state
@@ -238,6 +239,9 @@ function spawnEnv(on: boolean): NodeJS.ProcessEnv {
   delete env["TL_SF_STATEFUL"];
   delete env["TL_SF_DEMOTE"];
   delete env["TL_SF_STRUCTURAL_CONCERNS"];
+  // 2026-11-03 (TL_PACK_BODYLESS_DISCOVER): pinned off for the same reason
+  // `setFlags` states — the R1 flag-off control must keep its bodies.
+  env["TL_PACK_BODYLESS_DISCOVER"] = "0";
   if (on) {
     env["TL_SF_STATEFUL"] = "1";
     env["TL_SF_DEMOTE"] = "1";
@@ -250,6 +254,12 @@ const rowsOf = (res: RawResponse): WireRow[] =>
   Array.isArray(res.body["evidence"]) ? res.body["evidence"] as WireRow[] : [];
 
 function setFlags(on: boolean): void {
+  // 2026-11-03 (TL_PACK_BODYLESS_DISCOVER, default ON): this spec measures
+  // FX-J's booking contract against its R1 flag-off control, whose first pack
+  // is a `discover` over partial coverage — the shape the body-less policy also
+  // strips, which would make the control indistinguishable from the lever.
+  // Pinned off for both arms; bodylessDiscover.spec.ts owns the policy.
+  process.env["TL_PACK_BODYLESS_DISCOVER"] = "0";
   if (on) {
     process.env["TL_SF_STATEFUL"] = "1";
     process.env["TL_SF_DEMOTE"] = "1";
@@ -497,11 +507,13 @@ describe("FX-J: a withheld body stays reachable for READS", () => {
 
     const first = await callTool("tl_read_file", { query: QUESTION, task: { epoch: "new" }, cwd: ws });
     const firstBody = JSON.parse(first.content[0]?.text ?? "{}") as {
-      evidence?: WireRow[]; task?: { replay?: string };
+      evidence?: WireRow[]; task?: { replay?: string }; qref?: string;
     };
     const supporting = (firstBody.evidence ?? []).find((row) => row.path === SUPPORTING);
     expect(supporting?.body, "precondition: demoted").toBeUndefined();
-    const qref = firstBody.task?.replay;
+    // 2026-11-03: the replay token is the top-level `qref`; `task.replay` was
+    // its duplicate and the wire trim (TL_EFF_REPLY_TRIM) no longer carries it.
+    const qref = firstBody.qref ?? firstBody.task?.replay;
     expect(typeof qref, "the pack must publish a replay token").toBe("string");
 
     // The change pack is what leaves a certificate behind; its working set is

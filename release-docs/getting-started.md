@@ -77,6 +77,9 @@ files or changing host registrations. For example:
 | Flag | Effect |
 |---|---|
 | `--clients <list>\|auto\|none` | Which hosts to register (default `auto`: whatever this machine has). |
+| `--workspace-clients auto\|all\|<list>` | Which clients get files in the workspace (default `auto`: the hosts found above; the full set when none is found or with `--from-extension`). |
+| `--no-hooks` / `--remove-hooks` | Agent hooks are installed by default into the hook configuration of each client the workspace is set up for. `--no-hooks` leaves every hook file as it is (nothing written, nothing removed); `--remove-hooks` takes TokenLighten's hooks out. `--hooks` is accepted and means the default — see [Agent hooks](#agent-hooks) below. |
+| `--allow-root` | Allow installing as root/uid 0, e.g. in a root devcontainer or CI job (POSIX only). |
 | `--read-only` | Generated entries omit `--allow-write`. |
 | `--dry-run` | Print the plan and exit without writing anything. |
 | `--json` | Emit a structured report instead of the human-readable summary. |
@@ -87,7 +90,7 @@ files or changing host registrations. For example:
 
 ## Install the VS Code extension without building
 
-Users can download **[tokenlighten-vscode-extension-0.16.4.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.16.4/tokenlighten-vscode-extension-0.16.4.vsix)** from the v0.16.4 GitHub Release and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
+Users can download **[tokenlighten-vscode-extension-0.16.5.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.16.5/tokenlighten-vscode-extension-0.16.5.vsix)** from the v0.16.5 GitHub Release and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
 
 Open a trusted project folder, open the TokenLighten view, and choose **Set up this workspace**. This runs the same machine install described above (`tl install --from-extension --clients none`), using VS Code's own Node.js runtime instead of a bundled one: it stages the extension's bundled CLI as the machine install and sets up the current workspace, all in one operation — it does not register other hosts on the machine (Claude Code, Codex); do that separately with `tl clients activate`, or with an archive's `tl-setup`. Remove it with **TokenLighten: Uninstall TokenLighten from This Machine** from the command palette, or the absolute `tl install --uninstall` invocation described in [Uninstall](#uninstall) below.
 
@@ -184,6 +187,50 @@ hook configuration unchanged:
 tl workspace setup --clients vscode --copilot-session-context keep
 ```
 
+### Agent hooks
+
+Setup installs TokenLighten's agent hooks by default. `tl-setup <workspace>`
+(`tl install`) and `tl workspace setup` write them into the own hook
+configuration of every client they set up (the clients `--workspace-clients`,
+or `--clients` for `tl workspace setup`, selects or detects) and merge with
+whatever is already there: `.claude/settings.json` for Claude Code,
+`.codex/hooks.json` for Codex, and `.github/hooks/tokenlighten-hooks.json` for
+Copilot CLI and VS Code. A re-run changes nothing, and a hook file you edited
+by hand is preserved with a warning. To opt out, pass `--no-hooks`: setup then
+neither writes nor removes a hook file. `--remove-hooks` (or
+`tl install --uninstall`) removes only TokenLighten's entries. `--hooks` is
+still accepted and means the default. The hook commands name the launcher the
+way `.mcp.json` does (`${HOME}`, `${LOCALAPPDATA}` on Windows), so the files
+carry no machine path.
+
+| Hook | What it does | Claude Code | Copilot CLI / VS Code | Codex |
+|---|---|---|---|---|
+| Test/build output | After a recognised `npm test`, `npm run test*`/`build*`/`lint`, `vitest`, `jest`, `pytest`, `tsc`, `eslint`, `go test`, `cargo test`/`build` command (also via `npm.cmd`/`npx.cmd`) has run exactly as written, an output over about 4 KB is saved whole under `.tokenlighten/.runtime/run/` and replaced, for the model only, by the `tl run` compression: the failure blocks, the runner's summary and the log path. The command is never rewritten; permissions and prompts are untouched. Pipelines, redirections, background runs and anything else stay as they are. | PostToolUse `updatedToolOutput` for `Bash`. A command that exits non-zero fires PostToolUseFailure, which cannot replace output, so a failing run is shown whole | postToolUse `modifiedResult` for the `bash`, `powershell` and VS Code `run_in_terminal` tools; a failing run arrives as a result and is compressed with its exit-code line kept (VS Code's Local harness may ignore the replacement; the original output then stands) | Not available: no output-replacing hook is installed. Run `tl run -- <command>` by hand |
+| Compaction reset | Records `.tokenlighten/.runtime/compaction-epoch.json`; the MCP server `stat`s it once per tool call and, when it changed, serves content again instead of "already served" receipts for lines the model no longer sees | PreCompact, SessionStart (`clear`, `compact`) | preCompact, sessionStart (`new`) | PreCompact, SessionStart (`clear`, `compact`) |
+
+`tl run -- <command>` also works by hand, for any client, and is the way to get
+a failing run compressed on Claude Code. Refreshing setup also updates TokenLighten-managed hooks.
+`TL_COMPACTION_MARKER=0` turns the server-side check off.
+
+**Trust and enabling.** Setup writes the hook files; it never trusts a folder or
+enables hooks for you, so the hooks stay inactive until you do. Each host has
+its own gate; Codex and Copilot load project hooks only once the folder is
+trusted:
+
+- Claude Code requires its workspace trust and hook settings to allow hooks.
+- Codex requires trusted project configuration and approval of non-managed
+  hooks through its hook controls before they run.
+- Copilot CLI and VS Code require a trusted folder. VS Code hook behavior
+  also depends on its selected agent harness and hook settings.
+
+See your client's hook documentation for its current trust controls. Setup
+does not change those controls.
+
+Output shortening happens after execution and leaves the original command,
+its permission rules and its prompts unchanged. If the host cannot replace
+the output or the full log cannot be saved, the original output remains.
+Full logs may contain sensitive command output; review them before sharing.
+
 Custom clients must refresh the tool list and use `tl_read_file`,
 `tl_search_files`, and `tl_edit_file`. The old unprefixed names are refused;
 `TL_LEGACY_INPUT=accept` only bridges legacy argument fields.
@@ -256,4 +303,4 @@ Run `tl help` for the complete CLI reference. If you do not want TokenLighten ac
 - Deploying to a fleet or a policy-managed machine? See [Managed environments](managed-environments.md).
 - Review the [Privacy, security, and support](privacy-security-support.md) notes before enabling write access.
 - Configure optional [Local analysis engines](local-analysis.md), including model download and language servers.
-- Read the [v0.16.4 release notes](github-release-v0.16.4.md) for the current changes, compatibility, and known limitations.
+- Read the [v0.16.5 release notes](github-release-v0.16.5.md) for the current changes, compatibility, and known limitations.

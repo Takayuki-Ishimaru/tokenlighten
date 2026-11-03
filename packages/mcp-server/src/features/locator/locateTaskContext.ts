@@ -70,6 +70,7 @@ import { loadGraphIndex } from "../../graph/index.js";
 import { collectSymbols, type CollectedSymbol } from "../../symbols/collectSymbols.js";
 import { isMarkdownPath, parseMarkdownHeadings } from "../../util/markdownSections.js";
 import { trace } from "../../util/trace.js";
+import { noteWorkspaceWalkSize } from "../indexing/sourceIndexAccess.js";
 import { applyHybridRetrieval } from "../retrieval/index.js";
 import { applyCompoundRetrieval } from "../compound/index.js";
 import { composeEngineDiscovery } from "../engines/discovery.js";
@@ -2735,6 +2736,11 @@ async function locateTaskContextBase(workspace: string, input: LocateInput): Pro
   // bare walk — cross-root demotion is moot under an explicit scope anyway
   // (every candidate is confined to that one subtree).
   const rootFiles = walkCache.get(requestedScope ? { subPath: requestedScope } : {});
+  // The symbol lookups below take the source index without blocking on its
+  // build (`indexAccess:"background"`, features/indexing/sourceIndexAccess.ts);
+  // the walk size tells that policy whether this workspace is small enough to
+  // simply wait for the (sub-second) build.
+  noteWorkspaceWalkSize(workspace, rootFiles.length);
   const rootResolver = buildRootResolver(workspace, rootFiles.map((f) => f.relPath));
   const scope = requestedScope
     ?? inferQueryProjectScopeFromResolver(input.query, rootResolver, rootFiles.map((f) => f.relPath));
@@ -2760,6 +2766,7 @@ async function locateTaskContextBase(workspace: string, input: LocateInput): Pro
         ...(input.lang ? { lang: input.lang } : {}),
         ...(scope ? { path: scope } : {}),
         limit: 10,
+        indexAccess: "background",
       },
       workspace,
     );
@@ -2802,6 +2809,7 @@ async function locateTaskContextBase(workspace: string, input: LocateInput): Pro
         ...(input.lang ? { lang: input.lang } : {}),
         ...(scope ? { path: scope } : {}),
         limit: 10,
+        indexAccess: "background",
       },
       workspace,
     );
@@ -2862,6 +2870,7 @@ async function locateTaskContextBase(workspace: string, input: LocateInput): Pro
         ...(input.lang ? { lang: input.lang } : {}),
         ...(scope ? { path: scope } : {}),
         limit: 10,
+        indexAccess: "background",
       },
       workspace,
     );
@@ -2901,6 +2910,7 @@ async function locateTaskContextBase(workspace: string, input: LocateInput): Pro
       ...(input.lang ? { lang: input.lang } : {}),
       ...(scope ? { path: scope } : {}),
       limit: 10,
+      indexAccess: "background" as const,
     };
     const ownedByChain = (symbol: string): boolean =>
       symbol === chain.raw
@@ -2968,6 +2978,7 @@ async function locateTaskContextBase(workspace: string, input: LocateInput): Pro
           ...(input.lang ? { lang: input.lang } : {}),
           ...(scope ? { path: scope } : {}),
           limit: SYMBOL_SEARCH_FETCH_LIMIT,
+          indexAccess: "background",
         },
         workspace,
       );

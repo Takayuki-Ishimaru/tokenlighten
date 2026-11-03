@@ -225,7 +225,7 @@ describe("tl agents update (bare path -> injectAll)", () => {
     expect(full).not.toContain("TokenLighten MCP (medium)");
     // r12 (2026-10-04) dropped the full guide's "TokenLighten (TL) returns exact
     // slices" opener; this clause is still full-profile only.
-    expect(full).toContain("When TL is exposed, start EVERY file task");
+    expect(full).toContain("When TL is exposed, use it before Read/Grep/cat");
   });
 
   it("--profile compact is accepted (widened alongside agents-md's compact GuideProfile)", async () => {

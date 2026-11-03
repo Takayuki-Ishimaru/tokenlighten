@@ -3,6 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  NATIVE_READ_MAX_BYTES,
+  NATIVE_READ_MAX_LINES,
+  NATIVE_READ_MAX_TOKENS,
+} from "@tokenlighten/usage";
+import {
   baselinePathKey,
   emptyReadBaseline,
   measureReadBaseline,
@@ -19,9 +24,31 @@ const bigLine = (index: number): string =>
 const bigLines = Array.from({ length: LINES }, (_unused, index) => bigLine(index + 1));
 const bigContent = bigLines.join("");
 const bigBytes = Buffer.byteLength(bigContent);
+// `big.ts` (~130 KB) is over the native read limit of 100,000 bytes (25,000
+// tokens), so a whole-file read of it is credited one native window, not 130 KB.
+const bigWindowBytes = Math.min(bigBytes, NATIVE_READ_MAX_BYTES);
 /** Bytes of lines `start..end` (1-based inclusive) of `big.ts`. */
 const bytesOfLines = (start: number, end: number): number =>
   Buffer.byteLength(bigLines.slice(start - 1, end).join(""));
+
+/** A 1.59 MB source file, the size of the one in the field report: 20,000 lines of 80 bytes. */
+const HUGE_LINES = 20_000;
+const hugeLine = (index: number): string =>
+  `${`// huge ${String(index).padStart(5, "0")} `.padEnd(79, ".")}\n`;
+const hugeContent = Array.from({ length: HUGE_LINES }, (_unused, index) => hugeLine(index + 1)).join("");
+const hugeBytes = Buffer.byteLength(hugeContent);
+/** 10,000 lines of 10 bytes: 100,000 bytes, so only the 2,000-line limit can cut it. */
+const SHORT_LINES = 10_000;
+const shortLinesContent = "012345678\n".repeat(SHORT_LINES);
+/** `count` lines of 20 bytes each. */
+const linesContent = (count: number): string => "0123456789012345678\n".repeat(count);
+/** `total` bytes of 100-byte lines (the last line takes the remainder). */
+const fixedBytesContent = (total: number): string => {
+  const line = `${"x".repeat(99)}\n`;
+  const whole = Math.floor(total / line.length);
+  const rest = total - whole * line.length;
+  return line.repeat(whole) + (rest > 0 ? `${"y".repeat(rest - 1)}\n` : "");
+};
 
 let workspace = "";
 
@@ -30,6 +57,12 @@ beforeAll(() => {
   writeFileSync(join(workspace, "big.ts"), bigContent);
   writeFileSync(join(workspace, "small.ts"), "export const small = 1;\n");
   writeFileSync(join(workspace, "empty.ts"), "");
+  writeFileSync(join(workspace, "huge.ts"), hugeContent);
+  writeFileSync(join(workspace, "short-lines.ts"), shortLinesContent);
+  writeFileSync(join(workspace, "lines-2000.ts"), linesContent(NATIVE_READ_MAX_LINES));
+  writeFileSync(join(workspace, "lines-2001.ts"), linesContent(NATIVE_READ_MAX_LINES + 1));
+  writeFileSync(join(workspace, "exactly-cap.ts"), fixedBytesContent(NATIVE_READ_MAX_BYTES));
+  writeFileSync(join(workspace, "over-cap.ts"), fixedBytesContent(NATIVE_READ_MAX_BYTES + 100));
   writeFileSync(join(workspace, "no-eol.ts"), "alpha\nbeta\ngamma");
   writeFileSync(join(workspace, "crlf.ts"), "one\r\ntwo\r\nthree\r\nfour\r\n");
   mkdirSync(join(workspace, "src"));
@@ -48,10 +81,17 @@ const measure = (
 const credit = (measurement: ReadBaselineMeasurement): Set<string> =>
   new Set(measurement.uncreditedPaths);
 
-describe("read baseline: whole-file reads keep the full-file baseline", () => {
-  it("credits the file's byte size, labelled file-bytes", () => {
+describe("read baseline: a whole-file read is credited the file, up to one native read window", () => {
+  it("credits a file that fits one native read its byte size, labelled file-bytes", () => {
+    const small = measure({ path: "small.ts", mode: "full" });
+    expect(small.bytes).toBe(24);
+    expect(small.method).toBe("file-bytes");
+    expect(small.uncreditedPaths).toEqual([baselinePathKey(join(workspace, "small.ts"))]);
+  });
+
+  it("credits a file over the native read limit one window of it, labelled file-bytes", () => {
     const measurement = measure({ path: "big.ts", mode: "full" });
-    expect(measurement.bytes).toBe(bigBytes);
+    expect(measurement.bytes).toBe(bigWindowBytes);
     expect(measurement.method).toBe("file-bytes");
     expect(measurement.uncreditedPaths).toEqual([baselinePathKey(join(workspace, "big.ts"))]);
     expect(measurement.pendingSymbols).toEqual([]);
@@ -59,7 +99,7 @@ describe("read baseline: whole-file reads keep the full-file baseline", () => {
 
   it("sums a paths[] batch of bare strings and treats a nested path like any other", () => {
     const measurement = measure({ paths: ["big.ts", "small.ts", "src/nested.ts"] });
-    expect(measurement.bytes).toBe(bigBytes + 24 + 11);
+    expect(measurement.bytes).toBe(bigWindowBytes + 24 + 11);
     expect(measurement.method).toBe("file-bytes");
     expect(measurement.uncreditedPaths).toHaveLength(3);
   });
@@ -73,7 +113,7 @@ describe("read baseline: whole-file reads keep the full-file baseline", () => {
   it("treats a range that covers every line as a whole-file read", () => {
     for (const range of [`1-${LINES}`, `1-${LINES + 500}`, "full", "all", "1-", "1-end", `L1-L${LINES}`]) {
       const measurement = measure({ path: "big.ts", range, mode: "slice" });
-      expect(measurement.bytes, range).toBe(bigBytes);
+      expect(measurement.bytes, range).toBe(bigWindowBytes);
       expect(measurement.method, range).toBe("file-bytes");
       expect(measurement.uncreditedPaths, range).toHaveLength(1);
     }
@@ -135,7 +175,7 @@ describe("read baseline: a ranged read is not credited the whole file", () => {
     const second = measure({ path: "big.ts", range: "1-10" }, { credited: credit(first) });
     expect(second.bytes).toBe(first.bytes);
     const whole = measure({ path: "big.ts" }, { credited: credit(first) });
-    expect(whole.bytes).toBe(bigBytes);
+    expect(whole.bytes).toBe(bigWindowBytes);
   });
 
   it("counts line terminators, handles CRLF, a missing final newline and an empty file", () => {
@@ -155,7 +195,7 @@ describe("read baseline: a ranged read is not credited the whole file", () => {
     expect(measurement.bytes).toBe(0);
     expect(measurement.method).toBe("range-bytes");
     // A whole-file read of the same file is unaffected by the scan limit.
-    expect(measure({ path: "big.ts" }, { maxScannedFileBytes: 1024 }).bytes).toBe(bigBytes);
+    expect(measure({ path: "big.ts" }, { maxScannedFileBytes: 1024 }).bytes).toBe(bigWindowBytes);
   });
 
   it("mixes whole-file and ranged entries in one batch", () => {
@@ -249,7 +289,7 @@ describe("read baseline: a symbol read is credited the served symbol window", ()
 describe("read baseline: repeated whole-file reads are credited once", () => {
   it("credits a path the first time only, then records 0 (not null) for the repeat", () => {
     const first = measure({ path: "big.ts", mode: "full" });
-    expect(first.bytes).toBe(bigBytes);
+    expect(first.bytes).toBe(bigWindowBytes);
     const repeated = measure({ path: "big.ts", mode: "full" }, { credited: credit(first) });
     expect(repeated.bytes).toBe(0);
     expect(repeated.method).toBe("file-bytes");
@@ -257,6 +297,86 @@ describe("read baseline: repeated whole-file reads are credited once", () => {
     // Another path in the same call is still credited.
     const withNew = measure({ paths: ["big.ts", "small.ts"] }, { credited: credit(first) });
     expect(withNew.bytes).toBe(24);
+  });
+});
+
+describe("read baseline: no file is credited more than one native read window", () => {
+  const tokensOf = (bytes: number | null): number => Math.ceil((bytes ?? 0) / 4);
+
+  it("states the native limits: 2,000 lines and 25,000 tokens (100,000 bytes)", () => {
+    expect(NATIVE_READ_MAX_LINES).toBe(2_000);
+    expect(NATIVE_READ_MAX_TOKENS).toBe(25_000);
+    expect(NATIVE_READ_MAX_BYTES).toBe(100_000);
+  });
+
+  it("credits a 1.59 MB file's whole-file read at most 25,000 tokens, not the ~397,000 of its size", () => {
+    expect(hugeBytes).toBeGreaterThan(1_590_000);
+    const measurement = measure({ path: "huge.ts", mode: "full" });
+    expect(measurement.bytes).toBe(NATIVE_READ_MAX_BYTES);
+    expect(tokensOf(measurement.bytes)).toBe(NATIVE_READ_MAX_TOKENS);
+    expect(tokensOf(measurement.bytes)).toBeLessThan(tokensOf(hugeBytes) / 10);
+    expect(measurement.method).toBe("file-bytes");
+    // Still credited once per path: the repeat records 0, not another window.
+    const repeated = measure({ path: "huge.ts" }, { credited: credit(measurement) });
+    expect(repeated.bytes).toBe(0);
+  });
+
+  it("does not let the scan limit bring the whole file back, and reads only the first window", () => {
+    expect(measure({ path: "huge.ts" }, { maxScannedFileBytes: 1024 }).bytes)
+      .toBe(NATIVE_READ_MAX_BYTES);
+  });
+
+  it("cuts a file of many short lines after 2,000 lines even when it is under the byte limit", () => {
+    expect(Buffer.byteLength(shortLinesContent)).toBe(NATIVE_READ_MAX_BYTES);
+    expect(measure({ path: "short-lines.ts" }).bytes).toBe(NATIVE_READ_MAX_LINES * 10);
+  });
+
+  it("is unchanged exactly at the limits and capped one line or one byte-run past them", () => {
+    expect(measure({ path: "lines-2000.ts" }).bytes).toBe(NATIVE_READ_MAX_LINES * 20);
+    // 2,001 lines: the 2,001st is not part of a native read.
+    expect(measure({ path: "lines-2001.ts" }).bytes).toBe(NATIVE_READ_MAX_LINES * 20);
+    expect(measure({ path: "exactly-cap.ts" }).bytes).toBe(NATIVE_READ_MAX_BYTES);
+    expect(measure({ path: "over-cap.ts" }).bytes).toBe(NATIVE_READ_MAX_BYTES);
+    expect(measure({ path: "empty.ts" }).bytes).toBe(0);
+    expect(measure({ path: "no-eol.ts" }).bytes).toBe(Buffer.byteLength("alpha\nbeta\ngamma"));
+  });
+
+  it("applies the bound to each file of a batch, not to the batch", () => {
+    const measurement = measure({ paths: ["huge.ts", "big.ts", "small.ts"] });
+    expect(measurement.bytes).toBe(2 * NATIVE_READ_MAX_BYTES + 24);
+    expect(measurement.uncreditedPaths).toHaveLength(3);
+  });
+
+  it("bounds a ranged read by the same window (2,000 lines, 100,000 bytes)", () => {
+    // 5,000 lines of 80 bytes would be 400,000 bytes: the byte limit cuts them.
+    const huge = measure({ path: "huge.ts", range: "1-5000" });
+    expect(huge.bytes).toBe(NATIVE_READ_MAX_BYTES);
+    expect(huge.method).toBe("range-bytes");
+    expect(huge.uncreditedPaths).toEqual([]);
+    // 9,000 short lines: the line limit cuts them.
+    expect(measure({ path: "short-lines.ts", range: "1-9000" }).bytes).toBe(NATIVE_READ_MAX_LINES * 10);
+    // Lines accumulate across the windows of one file: 1,500 + 500 of the next.
+    expect(measure({ path: "short-lines.ts", ranges: ["1-1500", "3000-5000"] }).bytes)
+      .toBe(NATIVE_READ_MAX_LINES * 10);
+    // A window inside the limits is untouched.
+    expect(measure({ path: "huge.ts", range: "100-199" }).bytes).toBe(100 * 80);
+  });
+
+  it("bounds a symbol's served window too", () => {
+    const pending = measure({ path: "huge.ts", symbol: "anything" });
+    const settled = settleSymbolBaselines(pending, workspace, [
+      { path: "huge.ts", start: 1, end: 15_000 },
+    ]);
+    expect(settled.bytes).toBe(NATIVE_READ_MAX_BYTES);
+    const small = settleSymbolBaselines(pending, workspace, [{ path: "huge.ts", start: 10, end: 19 }]);
+    expect(small.bytes).toBe(10 * 80);
+  });
+
+  it("treats a handle window spanning a huge file as one bounded whole-file read", () => {
+    const resolveHandle = (): BaselineHandle => ({ path: "huge.ts", range: `1-${HUGE_LINES}` });
+    const measurement = measure({ handle: "hHuge" }, { resolveHandle });
+    expect(measurement.bytes).toBe(NATIVE_READ_MAX_BYTES);
+    expect(measurement.method).toBe("file-bytes");
   });
 });
 
@@ -337,7 +457,7 @@ describe("read baseline: handle slices", () => {
     expect(measure({ handle: "hBare" }, { resolveHandle }).bytes).toBeNull();
     expect(measure({ handle: "hMissing" }, { resolveHandle }).bytes).toBeNull();
     expect(measure({ handle: "hMissing" }).bytes).toBeNull();
-    expect(measure({ path: "big.ts", handle: "hBare" }, { resolveHandle }).bytes).toBe(bigBytes);
+    expect(measure({ path: "big.ts", handle: "hBare" }, { resolveHandle }).bytes).toBe(bigWindowBytes);
     // A stale handle beside a path self-heals to that path's own window.
     expect(measure({ path: "big.ts", handle: "hMissing", range: "1-4" }, { resolveHandle }).bytes)
       .toBe(bytesOfLines(1, 4));
@@ -345,7 +465,7 @@ describe("read baseline: handle slices", () => {
 
   it("treats a handle window that spans the whole file as a whole-file read", () => {
     const measurement = measure({ handle: "hWholeRange" }, { resolveHandle });
-    expect(measurement.bytes).toBe(bigBytes);
+    expect(measurement.bytes).toBe(bigWindowBytes);
     expect(measurement.method).toBe("file-bytes");
     const repeated = measure({ handle: "hWholeRange" }, { resolveHandle, credited: credit(measurement) });
     expect(repeated.bytes).toBe(0);

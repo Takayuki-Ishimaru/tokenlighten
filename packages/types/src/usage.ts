@@ -19,7 +19,10 @@ export type TokenLightenTool = "tl_read_file" | "tl_search_files" | "tl_edit_fil
  * (non-TL) agent read of the same files would have returned, not billed cost.
  *
  * - `"file-bytes"`: every measured path was a whole-file read, so the baseline
- *   is the file's byte size (counted once per path per lane).
+ *   is the file's byte size (counted once per path per lane), capped per file at
+ *   one native read window: at most 2,000 lines and 25,000 tokens, the most
+ *   Claude Code's Read returns for one file in one call. Events recorded before
+ *   that cap carry the uncapped size; summaries bound those again.
  * - `"range-bytes"` (v0.16.4): at least one measured path was a ranged, symbol
  *   or handle-slice read, so its baseline is the bytes of the requested line
  *   range / served symbol window a native ranged read would return, not the
@@ -137,6 +140,24 @@ export interface TokenLightenSessionEstimate {
   };
 }
 
+/**
+ * How a summary bounded the native-read baseline. A recorded baseline is an
+ * estimate of what a client without TokenLighten would have read; no client
+ * reads more than one capped window of a file per call, so a summary never
+ * counts more than `maxTokensPerCall` of baseline for one recorded call. The
+ * resulting "context avoided" is an estimated upper bound, not billing.
+ */
+export interface TokenLightenBaselineCap {
+  /** Ceiling on one recorded call's baseline, in tokens (one native read window). */
+  maxTokensPerCall: number;
+  /** The native Read line limit behind the recorder's per-file cap. */
+  maxLinesPerFile: number;
+  /** Successful baseline-bearing calls whose recorded baseline exceeded the ceiling. */
+  clampedCalls: number;
+  /** Tokens removed from the baseline by that clamp (recorded minus counted). */
+  clampedTokens: number;
+}
+
 export interface TokenLightenUsageSummary {
   schemaVersion: 2;
   generatedAt: string;
@@ -159,6 +180,11 @@ export interface TokenLightenUsageSummary {
    * set by `summarizeUsage`, optional only so older producers still type-check.
    */
   baselineBasis?: "native-read-estimate";
+  /**
+   * The native-read ceiling applied to the baseline and how much it removed.
+   * Additive: summaries from older producers omit it.
+   */
+  baselineCap?: TokenLightenBaselineCap;
   /**
    * Successful baseline-bearing calls by how their baseline was measured
    * (see `TokenLightenBaselineMethod`). Sums to `measuredBaselineCalls`.

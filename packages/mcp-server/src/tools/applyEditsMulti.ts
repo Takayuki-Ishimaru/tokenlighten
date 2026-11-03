@@ -46,6 +46,7 @@ import { batchCheckpoint } from "../write/checkpoint.js";
 import type { GuardedWorkspaceRoot } from "../write/guardedWorkspace.js";
 import { computeLineDelta, formatDelta, formatLines } from "../util/lineDelta.js";
 import {
+  alreadyAppliedForensics,
   fileHeadForensics,
   nearestMatchForensics,
   rangeMissForensics,
@@ -927,19 +928,26 @@ export async function applyEditsMulti(
 
     const editResult = applySingleEdit(currentText, edit.search, edit.replace);
     if (!editResult.ok) {
-      // The unique-match precondition reports zero matches under its own code;
-      // say so in the detail rather than a bare "not found" beside that code.
-      const zeroMatchesUnderUnique = edit.uniqueMatch && editResult.code === "not-found";
+      // 2026-11-02 (v0.16.4 field evaluation): zero matches are `not-found`
+      // under unique-match too; `search-not-unique` is kept for 2+ matches.
+      // A resent edit that already landed says so instead of asking for a
+      // whole-file re-read.
+      const zeroMatches = editResult.code === "not-found";
+      const applied = zeroMatches ? alreadyAppliedForensics(currentText, edit.search, edit.replace) : {};
       return {
         ok: false,
-        error: zeroMatchesUnderUnique
-          ? "unique-match precondition failed: the search string has no match in the file (exactly one is required)"
-          : editResult.error ?? "edit validation failed",
-        code: edit.uniqueMatch ? "search-not-unique" : editResult.code ?? "edit-error",
+        error: applied.already_applied
+          ? `the search string has no match and the replacement is already at lines ${applied.already_applied.range}: this edit is already applied`
+          : zeroMatches && edit.uniqueMatch
+            ? "the search string has no match in the file (unique-match needs exactly one)"
+            : editResult.error ?? "edit validation failed",
+        code: edit.uniqueMatch && !zeroMatches ? "search-not-unique" : editResult.code ?? "edit-error",
         ...(editResult.hint ? { hint: editResult.hint } : {}),
-        ...(editResult.code === "not-found"
-          ? nearestMatchForensics(currentText, edit.search, 1)
-          : {}),
+        ...(applied.already_applied
+          ? applied
+          : zeroMatches
+            ? nearestMatchForensics(currentText, edit.search, 1)
+            : {}),
       };
     }
 
@@ -1190,6 +1198,7 @@ export async function applyEditsMulti(
             // Forensics fields (2026-07-26 T09 R2) survive the step→result lift.
             ...(step.nearest_match ? { nearest_match: step.nearest_match } : {}),
             ...(step.actual ? { actual: step.actual } : {}),
+            ...(step.already_applied ? { already_applied: step.already_applied } : {}),
             ...(step.reason !== undefined ? { reason: step.reason } : {}),
             ...(step.file_line_count !== undefined ? { file_line_count: step.file_line_count } : {}),
           };

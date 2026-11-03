@@ -170,7 +170,15 @@ const PRODUCERS: readonly ProducerSpec[] = [
       },
       {
         enclosing: "buildTaskPackCore",
-        count: 1,
+        // 2026-11-02: the family-member seed plan (familyMemberSeeds.ts) is the
+        // second re-key, same shape as the inferred-scope retry; it adds only
+        // an advisory, never a surface.
+        // 2026-11-03: the literal-first seed plan (literalSeeds.ts,
+        // TL_LITERAL_FIRST_SEEDS) is the third, the same shape again: the
+        // seeded builder already booked its internal ranged request, and the
+        // re-key binds that finished pack to the caller's pathless one; it
+        // adds only an advisory, never a surface.
+        count: 3,
         reason:
           "CACHE RE-KEY, not a serve: rebinds a pack that ALREADY completed "
           + "dedupeTrimAndPersist (and therefore its own booking pass) from the internal "

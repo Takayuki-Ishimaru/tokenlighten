@@ -285,6 +285,7 @@ export type {
   TokenLightenReductionInterval,
   TokenLightenSummaryScope,
   TokenLightenSessionEstimate,
+  TokenLightenBaselineCap,
   TokenLightenUsageSummary,
   TokenLightenPrivacyReport,
   TokenLightenUsageExportManifest,
@@ -300,6 +301,15 @@ export type {
   CopilotGuideStatus,
   CopilotGuideReport,
 } from "./setup.js";
+
+export type {
+  AgentHookClient,
+  AgentHookEvent,
+  AgentHooksClientReport,
+  AgentHooksReport,
+  CompactionMarker,
+} from "./hooks.js";
+export { COMPACTION_MARKER_RELATIVE_PATH } from "./hooks.js";
 
 export type {
   TokenLightenRegistrationClient,

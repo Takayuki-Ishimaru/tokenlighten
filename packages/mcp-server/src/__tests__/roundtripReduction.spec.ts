@@ -230,7 +230,8 @@ describe("common read/continuation/edit recovery round trips", () => {
       editA, { path: "src/b.ts", search: "export function value() {\n  return 99;\n}", replace: "export function value() {\n  return 3;\n}", precondition: "unique-match", allowPathFallback: false },
     ] });
     expect(failed.kind).toBe("refusal");
-    expect(failed.code).toBe("search-not-unique");
+    // Zero matches are `not-found`, never "not unique" (v0.16.4 field evaluation).
+    expect(failed.code).toBe("not-found");
     expect(failed.failed_item.index).toBe(1);
     expect(failed.nearest_match.code).toContain("return 1;");
     expect(failed.next).toBeUndefined();
@@ -243,5 +244,31 @@ describe("common read/continuation/edit recovery round trips", () => {
     expect(retried.kind).toBe("edit.applied");
     expect(fs.readFileSync(path.join(root, "src/a.ts"), "utf8")).toContain("A = 2");
     expect(fs.readFileSync(path.join(root, "src/b.ts"), "utf8")).toContain("return 3;");
+  }, 30000);
+
+  // v0.16.4 field evaluation: resending an applied edit answered
+  // `search-not-unique` (zero matches) and a whole-file read `next`.
+  it("names a resent, already-applied edit as applied, with no read and no change", async () => {
+    const original = "export function greet(name: string): string {\n  return \"hello \" + name;\n}\n\nexport const LIMIT = 10;\n";
+    const root = workspace({ "src/a.ts": original });
+    const call = await server(root, { TOKENLIGHTEN_CLIENT: "claude-code" });
+    const edit = { path: "src/a.ts", search: "return \"hello \" + name;", replace: "return \"hi \" + name;", precondition: "unique-match" };
+    expect((await call("tl_edit_file", { edits: [edit] })).kind).toBe("edit.applied");
+    const applied = fs.readFileSync(path.join(root, "src/a.ts"), "utf8");
+    const resent = await call("tl_edit_file", { edits: [edit] });
+    expect(resent).toMatchObject({ kind: "refusal", code: "not-found", already_applied: { range: "2-2" }, failed_item: { index: 0 } });
+    expect(resent.next).toBeUndefined();
+    expect(resent.detail).toContain("already applied");
+    // In a batch, the applied item is named and nothing is written.
+    const batch = await call("tl_edit_file", { edits: [edit, { path: "src/a.ts", search: "LIMIT = 10", replace: "LIMIT = 20", precondition: "unique-match" }] });
+    expect(batch).toMatchObject({ kind: "refusal", code: "not-found", already_applied: { range: "2-2" }, failed_item: { index: 0 } });
+    expect(fs.readFileSync(path.join(root, "src/a.ts"), "utf8")).toBe(applied);
+    // A search that is simply absent stays an ordinary miss (its recovery is unchanged).
+    const missing = await call("tl_edit_file", { edits: [{ path: "src/a.ts", search: "return \"bye \" + name;", replace: "return \"ciao \" + name;", precondition: "unique-match" }] });
+    expect(missing).toMatchObject({ kind: "refusal", code: "not-found", actual: { range: "1-5" } });
+    expect(missing.already_applied).toBeUndefined();
+    // Two matches remain `search-not-unique`.
+    const twice = await call("tl_edit_file", { edits: [{ path: "src/a.ts", search: "name", replace: "who", precondition: "unique-match" }] });
+    expect(twice).toMatchObject({ kind: "refusal", code: "search-not-unique" });
   }, 30000);
 });

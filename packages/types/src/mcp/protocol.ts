@@ -214,6 +214,12 @@ export type EditToolCall = ToolCallOf<"tl_edit_file">;
  * positional-drift finding: `CertificateRef.workspace` (A.2.4) and
  * `SideEffectCore.workspace` (A.5.11–A.5.14 preamble). There is no third home,
  * and in particular NO top-level `workspace_state` field.
+ *
+ * 2026-11-03: on a task pack's certificate the wire (mcp-server
+ * protocol/wireTrim.ts, `TL_EFF_REPLY_TRIM`, default on) carries only
+ * `fingerprint` (shortened to `sha256:` + 12 hex), `scope` and
+ * `inventory_complete`; the two counts are server-side only. This type is the
+ * server's own record, which keeps all five.
  */
 export type WorkspaceMarker = {
   fingerprint: string;

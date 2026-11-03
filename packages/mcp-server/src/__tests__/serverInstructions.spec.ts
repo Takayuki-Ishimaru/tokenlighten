@@ -39,10 +39,18 @@ import { SERVER_INSTRUCTIONS } from "../protocol/serverInstructions.js";
 describe("issue #4: SERVER_INSTRUCTIONS content", () => {
   it("routes an unknown-location request verbatim before native discovery", () => {
     expect(SERVER_INSTRUCTIONS).toContain('tl_read_file {query:"<entire user request, verbatim>",task:{epoch:"new"}}');
-    expect(SERVER_INSTRUCTIONS).toContain("Unknown paths: omit targets");
-    expect(SERVER_INSTRUCTIONS).toContain("never keyword-shorten or drop constraints");
-    expect(SERVER_INSTRUCTIONS).toContain("Native if TL unavailable, user asks, incomplete scope or verified absence");
+    expect(SERVER_INSTRUCTIONS).toContain("never keyword-shorten");
     expect(SERVER_INSTRUCTIONS).toContain("Protocol: in your instructions.");
+  });
+
+  // 2026-11-03 routing: TL where its first pack pays for itself, native
+  // Read/Grep/Edit for small work the user located. The old "TL first for
+  // code/doc/config" made small known-location work cost more than native, and
+  // a wrong first guess paid twice.
+  it("sends unknown-location, multi-file/call-graph, Office/CSV/archive and large-file work to TL, and a user-named file with a small local task to native", () => {
+    expect(SERVER_INSTRUCTIONS).toContain("TL for unknown location, multi-file/call-graph, Office/CSV/archive/large files:");
+    expect(SERVER_INSTRUCTIONS).toContain("Native Read/Grep/Edit: user-named file/symbol + small local task; incomplete scope/verified absence.");
+    expect(SERVER_INSTRUCTIONS).not.toContain("TL first");
   });
 
   // B-F4 (2026-08-28): SERVER_INSTRUCTIONS is a fixed cost paid on every
@@ -57,7 +65,8 @@ describe("issue #4: SERVER_INSTRUCTIONS content", () => {
   // serverInstructions.ts's own doc comment for the full correction. The
   // ceiling has headroom for minor future wording fixes without becoming a
   // silent budget for creep back toward 592 B.
-  it("stays at or under its post-B-F4 byte ceiling (r12: 490 B measured; 520 B ceiling)", () => {
+  // 2026-11-03: the routing rewrite measures 489 B, one under r12's 490 B.
+  it("stays at or under its post-B-F4 byte ceiling (2026-11-03: 489 B measured, r12 was 490 B; 520 B ceiling)", () => {
     const bytes = Buffer.byteLength(SERVER_INSTRUCTIONS, "utf8");
     expect(bytes, `SERVER_INSTRUCTIONS grew to ${bytes} B — update this ceiling deliberately, with a reason, not by accident`).toBeLessThanOrEqual(520);
   });
@@ -70,14 +79,14 @@ describe("issue #4: SERVER_INSTRUCTIONS content", () => {
   // above.
   it("closes discovery and requires batching independent edits into one edits[] call", () => {
     expect(SERVER_INSTRUCTIONS).toContain(
-      "act.answer/act.edit: use exact evidence[].body with its paths/lines; no re-read.",
+      "act.answer/act.edit: use evidence[].body; no re-read.",
     );
     expect(SERVER_INSTRUCTIONS).toContain("Batch independent targets/edits[].");
   });
 
   it("tells a caller never to re-fetch bytes a receipt or a prior-tagged evidence item already served", () => {
     expect(SERVER_INSTRUCTIONS).toContain(
-      "use exact evidence[].body",
+      "use evidence[].body",
     );
   });
 

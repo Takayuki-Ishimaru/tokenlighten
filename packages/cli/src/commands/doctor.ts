@@ -564,7 +564,9 @@ export function checkNoNulBytes(opts: DoctorOptions = {}): DoctorCheck {
 function resolveWorkspaceIdentityPath(value: string, homeDirOverride?: string): string {
   const home = homeDirOverride ?? homedir();
   if (value.startsWith("${userHome}")) return home + value.slice("${userHome}".length);
-  if (value.startsWith("${HOME}")) return (process.env["HOME"] ?? home) + value.slice("${HOME}".length);
+  if (value.startsWith("${HOME}")) {
+    return (homeDirOverride ?? process.env["HOME"] ?? home) + value.slice("${HOME}".length);
+  }
   if (value.startsWith("${env:LOCALAPPDATA}")) {
     return (process.env["LOCALAPPDATA"] ?? "") + value.slice("${env:LOCALAPPDATA}".length);
   }
@@ -659,22 +661,35 @@ export function checkInstallConsistency(opts: DoctorOptions = {}): DoctorCheck {
     details.push(`VS Code extension ${extension.dir} bundles v${extension.version}, machine install is v${record.version}`);
   }
 
+  // Both project files that carry the launcher: `.vscode/mcp.json` (`servers`)
+  // and the Claude Code `.mcp.json` (`mcpServers`, committed by teams, so the
+  // most likely one to arrive from another machine or user).
+  const identityFiles: ReadonlyArray<{ relative: readonly string[]; key: "servers" | "mcpServers" }> = [
+    { relative: [".vscode", "mcp.json"], key: "servers" },
+    { relative: [".mcp.json"], key: "mcpServers" },
+  ];
   for (const workspace of record.workspaces) {
-    const mcpJsonPath = join(workspace.root, ".vscode", "mcp.json");
-    if (!existsSync(mcpJsonPath)) continue;
-    try {
-      const doc = JSON.parse(readFileSync(mcpJsonPath, "utf8")) as {
-        servers?: Record<string, { command?: unknown }>;
-      };
-      const command = doc.servers?.["tokenlighten"]?.command;
-      if (typeof command !== "string") continue;
-      const resolved = resolveWorkspaceIdentityPath(command, opts.homeDir);
-      if (!existsSync(resolved)) {
-        warning = true;
-        details.push(`workspace ${workspace.root}: identity does not resolve on this machine (${command})`);
+    for (const { relative, key } of identityFiles) {
+      const mcpJsonPath = join(workspace.root, ...relative);
+      if (!existsSync(mcpJsonPath)) continue;
+      try {
+        const doc = JSON.parse(readFileSync(mcpJsonPath, "utf8")) as Record<
+          string,
+          Record<string, { command?: unknown }> | undefined
+        >;
+        const command = doc[key]?.["tokenlighten"]?.command;
+        if (typeof command !== "string") continue;
+        const resolved = resolveWorkspaceIdentityPath(command, opts.homeDir);
+        if (!existsSync(resolved)) {
+          warning = true;
+          details.push(
+            `workspace ${workspace.root}: ${relative.join("/")} identity does not resolve on this machine (${command}); `
+              + "written on another machine or user? re-run tl-setup",
+          );
+        }
+      } catch {
+        // malformed workspace file — not this check's concern
       }
-    } catch {
-      // malformed workspace file — not this check's concern
     }
   }
 

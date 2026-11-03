@@ -39,6 +39,16 @@
  * evidence, batching, and explicit fallback. The schemas carry input homes;
  * keep this hint within the existing 520 B ceiling instead of copying a
  * client-specific SessionStart hook or tool-name prefix into other hosts.
+ *
+ * Routing (2026-11-03): TL where its first pack pays for itself (unknown
+ * location, several files or the call graph, Office/CSV/archive, large
+ * files); native Read/Grep/Edit when the user names the file (or the exact
+ * symbol and its file) and the task is small and local. Paired billing on
+ * Claude Code showed small known-location work costing more through TL (its
+ * speculative task pack is paid up front), and a wrong first guess paying
+ * twice. Held at the r12 byte count: "unknown paths: omit targets" and the
+ * "user asks"/"TL unavailable" native clauses went (the first call shape
+ * carries no targets; the guides keep both fallbacks).
  */
 export const SERVER_INSTRUCTIONS =
-  `TL first for code/doc/config: tl_read_file {query:"<entire user request, verbatim>",task:{epoch:"new"}}. Unknown paths: omit targets; never keyword-shorten or drop constraints. act.answer/act.edit: use exact evidence[].body with its paths/lines; no re-read. Batch independent targets/edits[]. Run next verbatim; lost context => task.force_serve:true. Native if TL unavailable, user asks, incomplete scope or verified absence. Stop after passing verification. Protocol: in your instructions.`;
+  `TL for unknown location, multi-file/call-graph, Office/CSV/archive/large files: tl_read_file {query:"<entire user request, verbatim>",task:{epoch:"new"}} (never keyword-shorten). Native Read/Grep/Edit: user-named file/symbol + small local task; incomplete scope/verified absence. act.answer/act.edit: use evidence[].body; no re-read. Batch independent targets/edits[]. Run next verbatim; lost context: task.force_serve:true. Stop after passing verification. Protocol: in your instructions.`;

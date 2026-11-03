@@ -36,6 +36,9 @@ export type TaskRef = {
    * honour a replay for this task; absence means re-packing requires resending
    * `query` — NOT that the task changed.
    * NOT an identity: two responses with different `replay` may share one `id`.
+   * 2026-11-03: omitted from a task pack whose top-level `qref` carries the
+   * same token (mcp-server protocol/wireTrim.ts, `TL_EFF_REPLY_TRIM`); pass
+   * that `qref` back instead.
    */
   replay?: string;
 
@@ -58,7 +61,9 @@ export type CoverageReason =
   | "candidate-list"
   | "missing-roles"
   | "concerns-uncovered"
-  | "diff-truncated";
+  | "diff-truncated"
+  /** The pack's symbol lookups ran while the workspace's source index was still building; served from text search (2026-11-02). */
+  | "index-warming";
 
 // ---------------------------------------------------------------------------
 // A.2.4 `CertificateRef`

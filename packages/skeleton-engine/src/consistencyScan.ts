@@ -195,21 +195,23 @@ export async function runConsistencyScan(
   const droppedPaths: string[] = [];
   let truncated = sample.length < candidates.length;
 
-  for (const relPath of sample) {
+  // 2026-11-03: the sample is re-read SCAN_CONCURRENCY files at a time. One
+  // at a time, the scan of a memo-warm reload (up to 200 files) cost more than
+  // a cold build of the same 300-file workspace once the build read ahead
+  // (indexStore.ts READ_AHEAD). The soft budget is checked per batch.
+  for (let start = 0; start < sample.length; start += SCAN_CONCURRENCY) {
     if (Date.now() - startedAtMs > maxDurationMs) {
       truncated = true;
       break;
     }
-    const entry = manifest.files[relPath];
-    if (entry === undefined) continue; // defensive — cannot happen, sample is drawn from these keys
-    scanned++;
-
-    const stale = await isEntryStale(root, entry);
-    if (stale) {
-      droppedPaths.push(relPath);
-    } else {
-      ok++;
-    }
+    // `defensive` filter — cannot happen, the sample is drawn from these keys
+    const batch = sample.slice(start, start + SCAN_CONCURRENCY).filter((relPath) => manifest.files[relPath] !== undefined);
+    scanned += batch.length;
+    const stale = await Promise.all(batch.map((relPath) => isEntryStale(root, manifest.files[relPath]!)));
+    batch.forEach((relPath, index) => {
+      if (stale[index]) droppedPaths.push(relPath);
+      else ok++;
+    });
   }
 
   const durationMs = Date.now() - startedAtMs;
@@ -242,6 +244,9 @@ export async function runConsistencyScan(
 
   return { manifest: healed, result };
 }
+
+/** How many sampled files the scan re-reads at once. */
+const SCAN_CONCURRENCY = 16;
 
 /** true = this entry's on-disk content no longer matches contentSha256 (or the file is gone). */
 async function isEntryStale(root: string, entry: IndexedFileV1): Promise<boolean> {

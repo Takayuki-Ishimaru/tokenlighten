@@ -65,6 +65,13 @@ import {
 import { wantsHelp } from "../util/helpFlag.js";
 import { resolveMcpBin } from "./mcp.js";
 import { COPILOT_SESSION_CONFIG, COPILOT_SESSION_RUNNER, installCopilotSessionHook } from "../copilotSessionHooks.js";
+import {
+  CLAUDE_HOOK_SETTINGS,
+  CODEX_HOOKS_FILE,
+  COPILOT_HOOKS_FILE,
+  installAgentHooks,
+  removeAgentHooks,
+} from "../agentHooksSetup.js";
 
 const CLIENTS = new Set<TokenLightenSetupClient>([
   "vscode",
@@ -74,9 +81,29 @@ const CLIENTS = new Set<TokenLightenSetupClient>([
 
 const WORKSPACE_USAGE = `\
 Usage:
-  tl workspace setup [--root DIR] [--clients vscode,codex,claude-code] [--read-only | --allow-write] [--guide-profile full|medium|compact|portable] [--tool-surface code|full] [--copilot-inline-results raise|keep] [--copilot-guide standalone|agents-md|keep] [--copilot-session-context install|keep] [--rules-only] [--json]
+  tl workspace setup [--root DIR] [--clients vscode,codex,claude-code] [--read-only | --allow-write] [--guide-profile full|medium|compact|portable] [--tool-surface code|full] [--copilot-inline-results raise|keep] [--copilot-guide standalone|agents-md|keep] [--copilot-session-context install|keep] [--no-hooks | --remove-hooks] [--rules-only] [--json]
   tl workspace status [--root DIR] [--json]
   tl workspace list [--json]
+
+Agent hooks (default ON): for each client this run sets up, setup writes
+TokenLighten's hooks into that client's own hook configuration (Claude Code:
+.claude/settings.json; Codex: .codex/hooks.json; VS Code and Copilot CLI:
+.github/hooks/tokenlighten-hooks.json). After a test or build command ran
+exactly as the agent wrote it, the hooks save its full output under
+.tokenlighten/.runtime/run/ and replace what the model sees with the 'tl run'
+compression (Claude Code and Copilot; on Claude Code a command that exits
+non-zero is shown whole, and Codex has no such hook, so run
+'tl run -- <command>' by hand there). They also record the compaction marker
+the MCP server checks, so a compacted or cleared conversation is served again
+instead of receiving "already served" receipts. Merging keeps every entry that
+is not TokenLighten's; a re-run changes nothing and replaces hooks an earlier
+install wrote; a hook file edited by hand is preserved with a warning.
+--no-hooks sets up without them and leaves every hook file as it is (nothing
+written, nothing removed); --remove-hooks takes TokenLighten's entries out
+again and leaves yours; --hooks is accepted and means the default. Commands
+are never rewritten and permissions and prompts are untouched. Codex and
+Copilot load project hooks only once the folder is trusted (Claude Code asks
+through its workspace trust dialog); setup does not trust a folder for you.
 
 Setup creates AI rules and project-scoped MCP settings. The GitHub Copilot
 guide (.github/copilot-instructions.md) and the Copilot agent file are written
@@ -116,6 +143,13 @@ VS Code setup also installs a context-only SessionStart hook for ordinary
 Agent sessions. It keeps every tool enabled and leaves hook permissions and
 chat.useHooks unchanged. --copilot-session-context keep leaves these hook
 files untouched. Existing or modified user hooks are always preserved.
+Sharing the generated files: .vscode/mcp.json and .codex/config.toml name this
+machine's absolute workspace path, so do not commit them (each developer runs
+setup). With the default install home .mcp.json is portable instead: the
+launcher is written as \${HOME} (\${LOCALAPPDATA} on Windows) and no workspace
+path is stored, because 'tl mcp start' takes the root from Claude Code's
+CLAUDE_PROJECT_DIR. With a custom install home, or a launcher outside the
+platform default, .mcp.json keeps absolute paths and is machine-specific too.
 `;
 
 function assertInsideRoot(root: string, target: string): void {
@@ -941,6 +975,10 @@ function serverConfig(
   // "claude-code": Claude Code and Codex never get this env var.
   linkTaskPackCeiling = false,
   writeEnabled = true,
+  // false only for the portable Claude Code `.mcp.json` (see `configureClaude`):
+  // the file then carries no machine path at all and `tl mcp start` takes the
+  // root from the host (`CLAUDE_PROJECT_DIR`, else the launch directory).
+  includeWorkspace = true,
 ): Record<string, unknown> {
   return {
     command: launcher.command,
@@ -950,8 +988,7 @@ function serverConfig(
       "start",
       "--stdio",
       ...(writeEnabled ? ["--allow-write"] : []),
-      "--workspace",
-      root,
+      ...(includeWorkspace ? ["--workspace", root] : []),
       // DESIGN-v0.15 §8.2 (R7 Part B): omitted (not merely "full") when the
       // caller did not opt in — the DEFAULT generated config must stay
       // byte-for-byte identical to before this flag existed.
@@ -1016,6 +1053,13 @@ function portableIdentity(
       ? [substitute(first), ...launcher.argsPrefix.slice(1)]
       : launcher.argsPrefix,
   };
+}
+
+/** True when {@link portableIdentity} replaced BOTH identity paths with a host variable form. */
+function isPortableIdentity(original: SetupLauncher, portable: SetupLauncher): boolean {
+  const first = original.argsPrefix[0];
+  return portable.command !== original.command
+    && (first === undefined || portable.argsPrefix[0] !== first);
 }
 
 function portableIdentityFor(
@@ -1101,12 +1145,21 @@ function configureClaude(
     && typeof (previous as Record<string, unknown>)["alwaysLoad"] === "boolean"
     ? (previous as Record<string, unknown>)["alwaysLoad"]
     : true;
+  // Project `.mcp.json` is the one generated file a team may commit. When the
+  // launcher paths were written as `${HOME}`/`${LOCALAPPDATA}` references (the
+  // default install home), the file also drops `--workspace <abs root>`: it
+  // is the last machine-specific value, and `tl mcp start` takes the root
+  // from Claude Code's `CLAUDE_PROJECT_DIR` (documented as the project root),
+  // else the launch directory (`implicitWorkspaceRoot` in mcp.ts). With a
+  // custom install home or an unsubstituted launcher the file is
+  // machine-specific anyway, so it keeps the explicit, absolute root.
+  const mcpJsonPortable = isPortableIdentity(launcher, portable);
   servers["tokenlighten"] = {
     type: "stdio",
     // This is a Claude CLIENT setting: a server env variable cannot make
     // the host wait. Only TL loads upfront; other servers stay deferred.
     alwaysLoad,
-    ...serverConfig(root, "claude-code", portable, schemaStamp, toolSurface, false, writeEnabled),
+    ...serverConfig(root, "claude-code", portable, schemaStamp, toolSurface, false, writeEnabled, !mcpJsonPortable),
   };
   // Project-shared, like .vscode/mcp.json above. Other servers' entries in an
   // existing .mcp.json may carry tokens, so replacing the file keeps its mode.
@@ -1214,6 +1267,14 @@ export async function setupWorkspace(options: {
   copilotGuide?: CopilotGuideRequest;
   /** Ordinary Agent entry hint; keep leaves existing hook files untouched. */
   copilotSessionContext?: "install" | "keep";
+  /**
+   * Agent hooks (2026-11-03): "install" writes TokenLighten's hooks into each
+   * selected client's hook configuration (agentHooksSetup.ts), "remove" takes
+   * them out; omitted leaves every hook file untouched. `tl workspace setup`
+   * and `tl install` pass "install" by default (default-on since 2026-11-03)
+   * and omit it only under `--no-hooks` (see `agentHooksMode`).
+   */
+  agentHooks?: "install" | "remove";
 }): Promise<TokenLightenWorkspaceSetupResult> {
   const requestedRoot = resolve(options.root);
   if (!existsSync(requestedRoot) || !lstatSync(requestedRoot).isDirectory()) {
@@ -1248,6 +1309,14 @@ export async function setupWorkspace(options: {
     ...(clients.includes("codex") ? [join(root, ".codex", "config.toml")] : []),
     ...(clients.includes("vscode") && options.copilotSessionContext !== "keep"
       ? [join(root, COPILOT_SESSION_CONFIG), join(root, COPILOT_SESSION_RUNNER)]
+      : []),
+    // Agent hooks: a hook file this run creates is removable by uninstall once empty.
+    ...(options.agentHooks === "install"
+      ? [
+        ...(clients.includes("claude-code") ? [join(root, CLAUDE_HOOK_SETTINGS)] : []),
+        ...(clients.includes("codex") ? [join(root, CODEX_HOOKS_FILE)] : []),
+        ...(clients.includes("vscode") ? [join(root, COPILOT_HOOKS_FILE)] : []),
+      ]
       : []),
     ...ruleTargets.flatMap((id) => {
       const file = STUB_TARGET_BY_ID[id]?.file;
@@ -1380,6 +1449,18 @@ export async function setupWorkspace(options: {
       configFilesWritten.push(configureClaude(root, launcher, schemaStamp, options.toolSurface, installHomeDefault, platform, permissions[client]!));
     }
   }
+  // Agent hooks (2026-11-03): the hook commands name the launcher the
+  // way `.mcp.json` does — a bare `tl`, or the `${HOME}`/`${LOCALAPPDATA}` form
+  // under the default install home — so the shared files carry no machine path.
+  let agentHooks: TokenLightenWorkspaceSetupResult["agentHooks"];
+  if (options.agentHooks !== undefined && clients.length > 0) {
+    const hookLauncher = portableIdentityFor(launcher, "mcp-json", installHomeDefault, platform);
+    agentHooks = options.agentHooks === "install"
+      ? installAgentHooks(root, { clients, launcher: { command: hookLauncher.command, argsPrefix: hookLauncher.argsPrefix } })
+      : removeAgentHooks(root, clients);
+    for (const report of agentHooks.clients) if (report.file !== undefined && agentHooks.action === "installed") configFilesWritten.push(report.file);
+    sessionWarnings.push(...agentHooks.warnings.map((warning) => `Agent hooks: ${warning}`));
+  }
   return {
     schemaVersion: 1,
     workspaceRoot: root,
@@ -1390,6 +1471,7 @@ export async function setupWorkspace(options: {
     rulesWritten,
     configFilesWritten,
     warnings: [...rules.drifted.map((item) => `Rule drift: ${item.path}`), ...sessionWarnings],
+    ...(agentHooks !== undefined ? { agentHooks } : {}),
     ...(managedCodexStartupGrace ? { managedCodexStartupGrace: true } : {}),
     ...(codexConfigCreated ? { codexConfigCreated: true } : {}),
     ...(copilotSettingsCreated ? { copilotSettingsCreated: true } : {}),
@@ -1608,6 +1690,91 @@ function clientServerEntry(root: string, client: TokenLightenSetupClient): unkno
   return (servers as Record<string, unknown>)["tokenlighten"];
 }
 
+/**
+ * The workspace clients whose project config already carries a `tokenlighten`
+ * server entry (any author). `tl install` keeps refreshing these on an upgrade
+ * even when host detection alone would no longer select them, so a workspace
+ * set up earlier with the full client set never keeps a stale identity or
+ * `TOKENLIGHTEN_SCHEMA_STAMP` in a file nobody re-generates.
+ */
+export function configuredWorkspaceClients(root: string): TokenLightenSetupClient[] {
+  const found: TokenLightenSetupClient[] = [];
+  for (const client of CLIENT_STATUS_ORDER) {
+    try {
+      const entry = clientServerEntry(root, client);
+      if (entry !== undefined && entry !== null) found.push(client);
+    } catch {
+      // Unreadable or malformed file: the setup run itself reports that.
+    }
+  }
+  return found;
+}
+
+export interface WorkspaceFileSharing {
+  /** Generated files that carry no machine-specific value (safe to commit). */
+  readonly portable: readonly string[];
+  /** Generated files that embed this machine's absolute paths. */
+  readonly machineSpecific: readonly string[];
+}
+
+/** Whether the generated Claude Code entry is the portable form written by `configureClaude`. */
+function isPortableMcpJsonEntry(entry: unknown): boolean {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+  const raw = entry as Record<string, unknown>;
+  const args = raw["args"];
+  return typeof raw["command"] === "string"
+    && raw["command"].startsWith("${")
+    && Array.isArray(args)
+    && args.every((value) => typeof value === "string")
+    && !args.includes("--workspace");
+}
+
+/**
+ * Classifies the per-client project files `clients` produced for the setup
+ * output: only the Claude Code `.mcp.json` can be portable (default install
+ * home); `.vscode/mcp.json` and `.codex/config.toml` always name this
+ * machine's absolute workspace root.
+ */
+export function workspaceFileSharing(
+  root: string,
+  clients: readonly TokenLightenSetupClient[],
+): WorkspaceFileSharing {
+  const portable: string[] = [];
+  const machineSpecific: string[] = [];
+  for (const client of CLIENT_STATUS_ORDER) {
+    if (!clients.includes(client)) continue;
+    const file = CLIENT_CONFIG_FILE[client];
+    let isPortable = false;
+    if (client === "claude-code") {
+      try {
+        isPortable = isPortableMcpJsonEntry(clientServerEntry(root, client));
+      } catch {
+        isPortable = false;
+      }
+    }
+    (isPortable ? portable : machineSpecific).push(file);
+  }
+  return { portable, machineSpecific };
+}
+
+/** Plain-text lines for `tl workspace setup` / `tl install` explaining what can be committed. */
+export function formatWorkspaceSharingLines(sharing: WorkspaceFileSharing): string[] {
+  return [
+    ...(sharing.portable.length > 0
+      ? [
+        `shareable: ${sharing.portable.join(", ")} (launcher via a host variable, no workspace path; `
+          + "teammates on the same OS still need TokenLighten installed, e.g. with tl-setup)",
+      ]
+      : []),
+    ...(sharing.machineSpecific.length > 0
+      ? [
+        `machine-specific: ${sharing.machineSpecific.join(", ")} (absolute paths on this machine; `
+          + "add to .gitignore, or have each developer run tl-setup / tl workspace setup)",
+      ]
+      : []),
+  ];
+}
+
 function hasValidClientServer(
   root: string,
   client: TokenLightenSetupClient,
@@ -1637,13 +1804,18 @@ function hasValidClientServer(
     const workspaceIndex = stringArgs.indexOf("--workspace");
     const configuredRoot = stringArgs[workspaceIndex + 1];
     const variables = env as Record<string, unknown>;
+    // The portable Claude Code `.mcp.json` (default install home) carries no
+    // `--workspace`: Claude Code hands the project root to `tl mcp start`
+    // (CLAUDE_PROJECT_DIR). Every other entry must name this workspace.
+    const workspaceNamed = workspaceIndex >= 0
+      && typeof configuredRoot === "string"
+      && existingWorkspacePathsEqual(configuredRoot, root);
+    const workspaceFromHost = workspaceIndex < 0 && client === "claude-code";
     return stringArgs.includes("mcp")
       && stringArgs.includes("start")
       && stringArgs.includes("--stdio")
       && stringArgs.includes("--allow-write") === writeEnabled
-      && workspaceIndex >= 0
-      && typeof configuredRoot === "string"
-      && existingWorkspacePathsEqual(configuredRoot, root)
+      && (workspaceNamed || workspaceFromHost)
       && variables["TOKENLIGHTEN_CLIENT"] === client
       && variables["TOKENLIGHTEN_USAGE_LOG"] === (usageLoggingEnabled ? "on" : "off");
   } catch {
@@ -2052,6 +2224,13 @@ export async function runWorkspace(
     process.exitCode = 1;
     return;
   }
+  const hookFlags = AGENT_HOOK_FLAGS.filter((flag) => rest.includes(flag));
+  if (hookFlags.length > 1) {
+    process.stderr.write(`tl workspace: choose one of ${AGENT_HOOK_FLAGS.join(", ")} (got ${hookFlags.join(" and ")})\n`);
+    process.exitCode = 1;
+    return;
+  }
+  const agentHooks = agentHooksMode(rest);
   // P2-3(1): arg parsing — resolve the profile setupWorkspace() will
   // actually write so --json (and the plain-text summary) can report the
   // real outcome instead of silently omitting it whenever --guide-profile
@@ -2075,6 +2254,7 @@ export async function runWorkspace(
     ...(copilotInlineResults !== undefined ? { copilotInlineResults } : {}),
     ...(copilotGuide !== undefined ? { copilotGuide } : {}),
     ...(copilotSessionContext !== undefined ? { copilotSessionContext } : {}),
+    ...(agentHooks !== undefined ? { agentHooks } : {}),
   });
   const registryTarget = options.registryPath ?? configFilePath();
   recordWorkspaceInInstall(options.installHome ?? resolveInstallHome(), result);
@@ -2103,6 +2283,7 @@ export async function runWorkspace(
   const copilotLine = formatCopilotInlineResultsLine(result.workspaceRoot, result.copilotInlineResults);
   const copilotGuideLine = formatCopilotGuideLine(result.workspaceRoot, result.copilotGuide);
   const guideProfileAdviceLine = formatGuideProfileAdviceLine(result.clients, effectiveGuideProfile, result.copilotGuide);
+  const sharingLines = formatWorkspaceSharingLines(workspaceFileSharing(result.workspaceRoot, result.clients));
   process.stdout.write(
     `TokenLighten is ready for ${result.clients.join(", ")}.\n`
       + `AI rules: ${result.rulesWritten.length} file(s)\n`
@@ -2118,6 +2299,51 @@ export async function runWorkspace(
       + (serverBuild !== undefined ? "server_build: " + serverBuild + "\n" : "")
       + (copilotLine !== undefined ? copilotLine + "\n" : "")
       + (copilotGuideLine !== undefined ? copilotGuideLine + "\n" : "")
-      + (guideProfileAdviceLine !== undefined ? guideProfileAdviceLine + "\n" : ""),
+      + (guideProfileAdviceLine !== undefined ? guideProfileAdviceLine + "\n" : "")
+      + sharingLines.map((line) => line + "\n").join("")
+      + formatAgentHooksLines(result.agentHooks).map((line) => line + "\n").join(""),
   );
+}
+
+/** The agent-hook flags of `tl workspace setup` and `tl install`; at most one per run. */
+export const AGENT_HOOK_FLAGS = ["--hooks", "--no-hooks", "--remove-hooks"] as const;
+
+/**
+ * Agent hooks are DEFAULT-ON (2026-11-03): every setup run installs them for
+ * the clients it sets up, `--hooks` is the explicit spelling of that default
+ * (kept so existing scripts work), `--remove-hooks` takes them out, and
+ * `--no-hooks` leaves every hook file untouched (undefined: nothing written,
+ * nothing removed). Callers refuse more than one of AGENT_HOOK_FLAGS first.
+ */
+export function agentHooksMode(args: readonly string[]): "install" | "remove" | undefined {
+  if (args.includes("--remove-hooks")) return "remove";
+  if (args.includes("--no-hooks")) return undefined;
+  return "install";
+}
+
+/** The clients whose hosts load project hooks only in a trusted folder, by host name. */
+const TRUST_GATED_HOSTS: Partial<Record<TokenLightenSetupClient, string>> = { vscode: "Copilot", codex: "Codex" };
+
+/** The agent-hook outcome, one line per client, plus what a client cannot do and how to opt out. */
+export function formatAgentHooksLines(report: TokenLightenWorkspaceSetupResult["agentHooks"]): string[] {
+  if (report === undefined) return [];
+  const lines: string[] = [];
+  for (const client of report.clients) {
+    const what = report.action === "installed"
+      ? (client.events.length > 0 ? `${client.events.join(", ")} in ${client.file ?? "(no file)"}` : "nothing written")
+      : (client.file !== undefined ? `removed from ${client.file}` : "nothing to remove");
+    lines.push(`Agent hooks (${client.client}): ${what}`);
+    for (const unsupported of client.unsupported) lines.push(`  not available for ${client.client}: ${unsupported}`);
+  }
+  const installed = report.action === "installed" ? report.clients.filter((client) => client.events.length > 0) : [];
+  if (installed.length > 0) {
+    // Default-on (2026-11-03): say once how to opt out, and that Codex and
+    // Copilot run the hooks only in a folder the user trusted.
+    const gated = installed.flatMap((client) => TRUST_GATED_HOSTS[client.client] ?? []);
+    const trust = gated.length > 0
+      ? `${gated.join(" and ")} load${gated.length === 1 ? "s" : ""} them only once the folder is trusted, which setup does not do for you; `
+      : "";
+    lines.push(`Agent hooks: ${trust}--no-hooks skips them, --remove-hooks removes them`);
+  }
+  return lines;
 }

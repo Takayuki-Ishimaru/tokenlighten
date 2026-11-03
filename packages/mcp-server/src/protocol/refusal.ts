@@ -892,7 +892,9 @@ export const REFUSAL_CALLER_RECOVERABLE_KEYS: readonly string[] = ["missing"];
 export const REFUSAL_WORKSPACE_RECOVERY_ADVISORY_KEYS: readonly string[] = ["cwd_candidates"];
 
 export const REFUSAL_ADVISORY_KEYS: readonly string[] = [
-  "candidates", "nearest_match", "actual", "expected_shapes", "alternatives",
+  // `already_applied` (2026-11-02): a resent edit whose replacement is already
+  // in the file (write/editForensics.ts `alreadyAppliedForensics`).
+  "candidates", "nearest_match", "actual", "already_applied", "expected_shapes", "alternatives",
   "frontier", "allowed_verification_calls", ...REFUSAL_WORKSPACE_RECOVERY_ADVISORY_KEYS, "failed_item",
   "hint", "current_sha", "served_sha", "file_line_count", "path",
   // The R1 markdown-navigation recovery index (2026-07-25), merged in here

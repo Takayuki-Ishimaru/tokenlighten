@@ -44,6 +44,7 @@ import {javaLoopGuardOrigin} from "../javaLoopGuardReview.js";
 import { emittableToolCall } from "./refusal.js";
 import { decisionGradeLiteralAbsenceSubject, discoveryBundleAdvisory, discoveryBundleNext, docZoomAllowed, explorationBudgetOf, unservedAddressableRepack, semanticFrontierNextAllowed, sanitizeSemanticFrontierNext, isSemanticFrontierDemotionEligible, sfAwaitInputCandidatePathsFor, parseLedgerMissingRow, isSupportingEvidenceWhy } from "../features/task-pack/canonicalDecision.js";
 import { effStructureMapEnabled, semanticFrontierGuardEnabled, sfDemoteEnabled } from "../util/flags.js";
+import { sourceIndexWarmingForCurrentRequest } from "../features/indexing/sourceIndexAccess.js";
 import { ELISION_MARKER_RE } from "../util/formatCompress.js";
 import { isSemanticFrontierContinuationOptional } from "../features/task-pack/semanticFrontier.js";
 import { noteSemanticFrontierDecisionSuppression, noteSemanticFrontierEvidenceSuppression, noteSemanticFrontierWithholding, semanticFrontierEvidenceWitnessId } from "./semanticFrontierTraceContext.js";
@@ -775,7 +776,7 @@ export function sanctionFromEvidence(evidence: readonly Evidence[]): SanctionedZ
 // ---------------------------------------------------------------------------
 
 const COVERAGE_REASONS: ReadonlySet<string> = new Set<CoverageReason>([
-  "single-site", "candidate-list", "missing-roles", "concerns-uncovered", "diff-truncated",
+  "single-site", "candidate-list", "missing-roles", "concerns-uncovered", "diff-truncated", "index-warming",
 ]);
 
 /**
@@ -789,8 +790,13 @@ export function projectTaskRef(
   fallbackId: string,
 ): TaskRef {
   const fingerprint = contract?.readiness_certificate?.task_fingerprint;
-  const coverage = result["coverage"];
-  const reason = result["coverage_reason"];
+  // 2026-11-02: a pack whose symbol lookups ran while the workspace's source
+  // index was still building (features/indexing/sourceIndexAccess.ts) was
+  // served from text search alone; whatever the builder concluded, that is
+  // partial coverage, and this is its reason.
+  const indexWarming = sourceIndexWarmingForCurrentRequest();
+  const coverage = indexWarming ? "partial" : result["coverage"];
+  const reason = indexWarming ? "index-warming" : result["coverage_reason"];
   const resolved: TaskRef["coverage"] =
     coverage === "complete" || coverage === "focused" || coverage === "partial"
       ? coverage
@@ -927,6 +933,15 @@ function projectCertificate(
               ? entry["empty_reason"]
               : "verified empty in the scanned workspace";
             return `explicit-gap:request-item-empty:${term} (${reason})`;
+          }
+          // 2026-11-02 (external evaluation T2): a name the request asks to
+          // ADD occurs nowhere yet by definition — the thing to create, never
+          // missing code. See `TaskPackResult.request_item_absences`' `create`.
+          if (entry["create"] === true) {
+            const reason = typeof entry["create_reason"] === "string" && entry["create_reason"] !== ""
+              ? entry["create_reason"]
+              : "the request adds this name; it occurs nowhere yet";
+            return `explicit-gap:request-item-create:${term} (${reason})`;
           }
           const scopeComplete = entry["scope_complete"] === true;
           const omittedCount = typeof entry["omitted_count"] === "number" ? entry["omitted_count"] : 0;

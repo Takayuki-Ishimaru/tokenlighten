@@ -3,7 +3,7 @@
 <!-- tl-instructions-sha256: {{SHA256}} -->
 ## TokenLighten MCP (compact)
 
-`tl_read_file`/`tl_edit_file`/`tl_search_files`を全workspace read/search/editに使う; build/tests/gitはshell. まずnative/Exploreより先に`tl_read_file {"cwd":"<workspace>","query":"<依頼全文を逐語で>","task":{"epoch":"new"}}`; 不明pathは`targets`省略. 引用/制約込みでquery逐語. user指定、TL不在・bypass、結果が使えない場合、scope不完全/不在時はnativeを使う。TLが使える場合は戻る. CSS/literal: `action:"find"`(参照:言語symbolのみ).
+`tl_read_file`/`tl_edit_file`/`tl_search_files`は所在不明・複数file/call graph・Office/CSV/archive・大fileに使う; build/tests/gitはshell. まずnative/Exploreより先に`tl_read_file {"cwd":"<workspace>","query":"<依頼全文を逐語で>","task":{"epoch":"new"}}`; 不明pathは`targets`省略. 引用/制約込みでquery逐語. user指定fileの小作業、user指定、TL不在・bypass、結果が使えない場合、scope不完全/不在時はnativeを使う。TLが使える場合は戻る. CSS/literal: `action:"find"`(参照:言語symbolのみ).
 各callはtop-level `cwd`必須(pwd不要; なければ`cwd-required-for-edit`); `next`にcwd追加禁止. 並列作業では初回から固定の`lane`. 同一依頼は最新`task.id`を`task.handle`へ; `epoch:"new"`禁止. user明示のread-only=`task.profile:"answer"`、変更=`"generic"`; 不明は省略.
 未知`kind`=SAFE-STOP: 報告のみ、edit/field推測禁止. `decision.kind`に従い、`act.answer`/`act.edit`でdiscovery終了. `decision.next[]`全call同一tool-call turnで逐語実行; refusal→`retry`のみ. 分岐/loop条件と引数の同一性を追跡; 名前/定義/ログ≠実行. `evidence[].body`は正確なsourceなので再読不要。`act.answer`後も必要な本文がなければそのtargetを読む. 独立read一括. 後続read=`targets:[{path|handle,range}]`、`query`なし; 文書=`select.sections`. `next`全体を逐語実行; hint参考. context消失時は同callに`task.force_serve:true`. `read.receipt`は`next`に従い、無ければ行動または停止. 応答の`edit_rules`に従う.
 <!-- tokenlighten:mcp-instructions:end -->

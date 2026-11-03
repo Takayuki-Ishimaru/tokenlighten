@@ -2,6 +2,29 @@
 
 User-facing release highlights for TokenLighten.
 
+## 0.16.5
+
+- Discovery prioritizes named product files and exact literals, follows relevant
+  inherited method calls, and locates related definitions and uses when adding
+  a configuration key or constant.
+- Symbol reads preserve the exact source for their reported ranges. Retrying
+  an edit that already succeeded reports where it was applied.
+- Large-workspace discovery can use text search while a reusable symbol index
+  builds in the background, with incomplete coverage clearly disclosed.
+- Updated routing guides and compact exploratory replies focus subsequent reads
+  on relevant candidates. Low Claude Code output limits are handled more reliably.
+- Setup detects workspace clients and installs their agent hooks by default.
+  Hooks support compact test/build output where the host permits it and context
+  resends after compaction. Opt-out and removal options are available.
+- `tl run -- <command>` provides compact command output and keeps a full local log.
+  Usage summaries label context avoided as a bounded estimate, not billing.
+
+Install the archive or VSIX, refresh workspace setup and reconnect your client.
+Review the new default hooks before refreshing; use `--no-hooks` to leave hook
+configuration unchanged. The three tools and supported canonical top-level
+request fields are unchanged from v0.16.4. See the
+[v0.16.5 release notes](release-docs/github-release-v0.16.5.md).
+
 ## 0.16.4
 
 - Supported CSV questions can return matching rows and whole-table match counts
