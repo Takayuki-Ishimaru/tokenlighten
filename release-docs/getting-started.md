@@ -78,7 +78,7 @@ files or changing host registrations. For example:
 |---|---|
 | `--clients <list>\|auto\|none` | Which hosts to register (default `auto`: whatever this machine has). |
 | `--workspace-clients auto\|all\|<list>` | Which clients get files in the workspace (default `auto`: the hosts found above; the full set when none is found or with `--from-extension`). |
-| `--no-hooks` / `--remove-hooks` | Agent hooks are installed by default into the hook configuration of each client the workspace is set up for. `--no-hooks` leaves every hook file as it is (nothing written, nothing removed); `--remove-hooks` takes TokenLighten's hooks out. `--hooks` is accepted and means the default — see [Agent hooks](#agent-hooks) below. |
+| `--no-hooks` / `--remove-hooks` | Agent hooks are installed by default into the hook configuration of each client the workspace is set up for. `--no-hooks` skips changes to these output and compaction hooks; `--remove-hooks` takes TokenLighten's hooks out. `--hooks` is accepted and means the default — see [Agent hooks](#agent-hooks) below. |
 | `--allow-root` | Allow installing as root/uid 0, e.g. in a root devcontainer or CI job (POSIX only). |
 | `--read-only` | Generated entries omit `--allow-write`. |
 | `--dry-run` | Print the plan and exit without writing anything. |
@@ -196,12 +196,22 @@ or `--clients` for `tl workspace setup`, selects or detects) and merge with
 whatever is already there: `.claude/settings.json` for Claude Code,
 `.codex/hooks.json` for Codex, and `.github/hooks/tokenlighten-hooks.json` for
 Copilot CLI and VS Code. A re-run changes nothing, and a hook file you edited
-by hand is preserved with a warning. To opt out, pass `--no-hooks`: setup then
-neither writes nor removes a hook file. `--remove-hooks` (or
+by hand is preserved with a warning. To skip changes to these output and
+compaction hooks, pass `--no-hooks`: setup then neither installs, updates nor
+removes those entries. `--remove-hooks` (or
 `tl install --uninstall`) removes only TokenLighten's entries. `--hooks` is
 still accepted and means the default. The hook commands name the launcher the
 way `.mcp.json` does (`${HOME}`, `${LOCALAPPDATA}` on Windows), so the files
 carry no machine path.
+
+The separate VS Code SessionStart context hint described above is controlled
+by `--copilot-session-context`, independently of `--no-hooks` and
+`--remove-hooks`. To leave both hook configurations unchanged during a
+VS Code workspace refresh, use:
+
+```bash
+tl workspace setup --clients vscode --no-hooks --copilot-session-context keep
+```
 
 Supported test/build commands include `npm test`, `npm run test*` /
 `build*` / `lint`, `vitest`, `jest`, `pytest`, `tsc`, `eslint`,

@@ -19,8 +19,10 @@ Workspace setup installs TokenLighten hooks for the clients it configures.
 Hooks can shorten supported test/build output after execution and record
 compaction or session-reset events so that source context can be sent again.
 They run under the host client's trust and hook settings. Use `--no-hooks`
-to leave hook configuration unchanged or `--remove-hooks` to remove
-TokenLighten's entries; setup preserves unrelated hooks.
+to skip changes to these output and compaction hooks or `--remove-hooks` to remove
+TokenLighten's entries; setup preserves unrelated hooks. VS Code's separate
+SessionStart context hint is controlled by `--copilot-session-context keep`
+on `tl workspace setup`.
 
 `tl run` and supported output-shortening hooks save full command output
 locally under `.tokenlighten/.runtime/run/`. These logs can contain source

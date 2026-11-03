@@ -42,9 +42,13 @@ adds agent hooks and a command runner for compact test and build output.
 
 Setup installs TokenLighten hooks for the clients it configures: Claude Code,
 Codex and GitHub Copilot. Existing user hook entries are preserved. Use
-`--no-hooks` to leave hook configuration unchanged, or `--remove-hooks` to
+`--no-hooks` to skip changes to these output and compaction hooks, or `--remove-hooks` to
 remove TokenLighten's entries. Hooks run subject to the client's trust and
 hook settings; setup does not grant trust.
+
+VS Code's separate SessionStart context hint has its own setup option. To
+leave both hook configurations unchanged during a VS Code workspace refresh,
+use `tl workspace setup --clients vscode --no-hooks --copilot-session-context keep`.
 
 For supported test and build commands, Claude Code and Copilot hooks can
 shorten the output shown to the agent after the command runs. The command

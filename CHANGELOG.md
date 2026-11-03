@@ -20,8 +20,8 @@ User-facing release highlights for TokenLighten.
   Usage summaries label context avoided as a bounded estimate, not billing.
 
 Install the archive or VSIX, refresh workspace setup and reconnect your client.
-Review the new default hooks before refreshing; use `--no-hooks` to leave hook
-configuration unchanged. The three tools and supported canonical top-level
+Review the new default hooks before refreshing; `--no-hooks` skips changes to
+these hooks. VS Code's separate SessionStart hint has its own keep option. The three tools and supported canonical top-level
 request fields are unchanged from v0.16.4. See the
 [v0.16.5 release notes](release-docs/github-release-v0.16.5.md).
 
