@@ -10,6 +10,7 @@ describe("unanchored query safety boundary", () => {
     "Add a Flask configuration key, with config docs and tests.",
     "How does TokenLighten choose a continuation?",
     "Explain the behavior. Include tests.",
+    "Explain the service: process incoming requests.",
     "Explain the service behavior, e.g. its results.",
     "Explain the behavior at https://flask.palletsprojects.com/en/stable/",
     "How does Flask choose a handler? Explain the order. Mention the default.",
@@ -17,7 +18,7 @@ describe("unanchored query safety boundary", () => {
     expect(needsQueryCandidateSelection({ query }, { namedFile: false, artifact: false })).toBe(true);
   });
 
-  it.each(["Explain _find_error_handler", "Explain rebuildMethod", "Explain Session.rebuild_auth", "Explain dispatch()", 'Where does the "Redirecting to" message come from?', "Fix the help so count options show [default: (unlimited)]"])("recognizes explicit code syntax: %s", (query) => {
+  it.each(["Explain _find_error_handler", "Explain rebuildMethod", "Explain Session.rebuild_auth", "Who calls Account::close?", "explain the callers of Foo::bar", "Who calls ns::Owner::run?", "Explain dispatch()", 'Where does the "Redirecting to" message come from?', "Fix the help so count options show [default: (unlimited)]"])("recognizes explicit code syntax: %s", (query) => {
     expect(hasQueryCodeAnchor(query)).toBe(true);
   });
 

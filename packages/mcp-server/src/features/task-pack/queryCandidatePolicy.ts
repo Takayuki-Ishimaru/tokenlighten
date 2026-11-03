@@ -21,7 +21,7 @@ export function hasQueryCodeAnchor(query: string): boolean {
   return requestAnchorsOf(query).literals.length > 0
     || names.some(name => /^[a-z_$]/.test(name) && /[a-z0-9][A-Z]/.test(name)
     || /[A-Za-z0-9]_[A-Za-z0-9]|^_[A-Za-z]/.test(name))
-    || /\b[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+(?![\w$.])/.test(source)
+    || /\b[A-Za-z_$][\w$]*(?:(?:::|\.)[A-Za-z_$][\w$]*)+(?![\w$.])/.test(source)
     || /\b[A-Za-z_$][\w$]*\(/.test(source)
     || /`[A-Za-z_$][\w$]*`|\([A-Z][A-Za-z0-9_$]*\)/.test(source);
 }
