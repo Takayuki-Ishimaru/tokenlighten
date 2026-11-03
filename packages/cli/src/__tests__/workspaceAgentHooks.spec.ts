@@ -21,8 +21,10 @@ const roots: string[] = [];
 function fixture(): string {
   const root = join(tmpdir(), `tokenlighten-hooks-ws-${randomUUID()}`);
   mkdirSync(join(root, ".git"), { recursive: true });
-  roots.push(root);
-  return root;
+  // macOS temp paths may use /var while setup reports canonical /private/var.
+  const canonicalRoot = realpathSync(root);
+  roots.push(canonicalRoot);
+  return canonicalRoot;
 }
 const isolatedInstallHome = join(tmpdir(), `tokenlighten-hooks-install-${randomUUID()}`);
 afterEach(() => {
