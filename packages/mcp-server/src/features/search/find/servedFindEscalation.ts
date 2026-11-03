@@ -325,9 +325,36 @@ export function applyServedFindProtocol(
       return { body: record, escalated: false };
     }
 
-    const annotated = files.map((file) =>
-      isGenuinelyServed(file) ? { ...file, served_this_session: true } : file,
-    );
+    // Line-level truth for KNOWN files, computed BEFORE the mixed
+    // served/fresh early-return so a mixed response carries it too:
+    // served_this_session is true ONLY when every matched line is proven
+    // held and nothing is undisclosed by more_lines; genuine file-level
+    // provenance without that proof rides file_partially_served instead.
+    const outsideByPath = new Map<string, number[]>();
+    const undisclosedByPath = new Set<string>();
+    for (const file of servedFiles) {
+      const p = String(file["path"]);
+      const outside = servedFindMatchLinesOutsideServed(workspace, p, fileLines(file));
+      if (outside.length > 0) outsideByPath.set(p, outside);
+      if ((typeof file["more_lines"] === "number" ? file["more_lines"] : 0) > 0) undisclosedByPath.add(p);
+    }
+    const provenHeld = (file: Record<string, unknown>): boolean =>
+      isGenuinelyServed(file) &&
+      !outsideByPath.has(String(file["path"])) &&
+      !undisclosedByPath.has(String(file["path"]));
+    const annotate = (file: Record<string, unknown>): Record<string, unknown> => {
+      if (!isGenuinelyServed(file)) return file;
+      const p = String(file["path"]);
+      const outside = outsideByPath.get(p);
+      const held = provenHeld(file);
+      return {
+        ...file,
+        ...(held ? { served_this_session: true } : { file_partially_served: true }),
+        lines_held: held,
+        ...(outside !== undefined ? { matched_lines_outside_served: outside.length } : {}),
+      };
+    };
+    const annotated = files.map(annotate);
 
     if (servedFiles.length < files.length) {
       // Case 1: at least one NOT-yet-served location. This is a legitimate
@@ -342,13 +369,7 @@ export function applyServedFindProtocol(
     // claim needs a LINE-level one. C3 (2026-08-09 range-honesty): check
     // every DISCLOSED matched line against this session's actual served
     // ranges before any residency prose or ledger accounting below runs.
-    const outsideByPath = new Map<string, number[]>();
-    for (const file of files) {
-      const outside = servedFindMatchLinesOutsideServed(workspace, String(file["path"]), fileLines(file));
-      if (outside.length > 0) outsideByPath.set(String(file["path"]), outside);
-    }
-
-    if (outsideByPath.size > 0) {
+    if (outsideByPath.size > 0 || undisclosedByPath.size > 0) {
       // State b: every matched file is known, but not every matched LINE is
       // held — a doc-sliver serve (or a governed full-mode downgrade) can
       // mark a whole path "read" on a sliver of it. This is real,
@@ -357,19 +378,15 @@ export function applyServedFindProtocol(
       // must NEVER touch the L2 ledger — a partial find is not a zero-info
       // repeat, and must never itself advance toward, or trigger, the
       // terminal brake.
-      const rangedFiles = annotated.map((file) => {
-        const outside = outsideByPath.get(String(file["path"]));
-        return {
-          ...file,
-          lines_held: outside === undefined,
-          ...(outside !== undefined ? { matched_lines_outside_served: outside.length } : {}),
-        };
-      });
+      const rangedFiles = annotated;
       const outsideTotal = [...outsideByPath.values()].reduce((sum, lines) => sum + lines.length, 0);
       const partialServedNote =
-        `matching files were only partially served this session — ${outsideTotal} matched ` +
-        `line${outsideTotal === 1 ? "" : "s"} ${outsideTotal === 1 ? "lies" : "lie"} outside the ranges you ` +
-        `hold; do not treat ${outsideTotal === 1 ? "it" : "them"} as already read`;
+        outsideTotal > 0
+          ? `matching files were only partially served this session — ${outsideTotal} matched ` +
+            `line${outsideTotal === 1 ? "" : "s"} ${outsideTotal === 1 ? "lies" : "lie"} outside the ranges you ` +
+            `hold; do not treat ${outsideTotal === 1 ? "it" : "them"} as already read`
+          : `matching files were only partially served this session — some matched lines were not ` +
+            `disclosed in full, so they cannot be proven inside the ranges you hold; do not treat them as already read`;
       return {
         body: { ...record, files: rangedFiles, partially_served: true, partial_served_note: partialServedNote },
         escalated: false,

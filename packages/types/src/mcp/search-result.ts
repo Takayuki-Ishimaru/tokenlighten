@@ -309,10 +309,13 @@ export type FindFileGroup = {
    * DISCLOSED EXTENSIONS, C2-4 (Revision-5 row) — the residency annotations
    * `servedFindEscalation.ts` stamps onto `files[]` after `findText.ts` built
    * them. A.5.8's `FindFileGroup` transcription predates them. They are the
-   * 2026-08-09 range-honesty fix: `served_this_session` says this file's bytes
-   * are already in the caller's context (:220), `lines_held` says whether EVERY
-   * matched line is (not merely the file), and `matched_lines_outside_served`
-   * counts the ones that are not (:278). Dropping them would restore the
+   * 2026-08-09 range-honesty fix, tightened 2026-11-03: `served_this_session`
+   * is true ONLY when EVERY matched line is proven inside served ranges and no
+   * matched line is undisclosed (`more_lines` zero/absent) — never for a mere file span. `lines_held` states that
+   * line-level proof per known file, `matched_lines_outside_served` counts the
+   * disclosed ones that are not, and `file_partially_served` carries the
+   * genuine FILE-level provenance (bytes served, lines not all held) that the
+   * old `served_this_session` conflated. Dropping them would restore the
    * defect that fix removed — a whole path marked "read" on a sliver of it.
    */
   served_this_session?: true;
@@ -320,6 +323,15 @@ export type FindFileGroup = {
   lines_held?: boolean;
   /** As `served_this_session`. */
   matched_lines_outside_served?: number;
+  /** File bytes were served this session, but not every matched line is proven held. */
+  file_partially_served?: true;
+  /**
+   * The file's primary symbol / one-line purpose (file-level metadata from
+   * role derivation) — NOT the callable enclosing the matched lines. find
+   * results carry this instead of `role`; a hit's enclosing scope is never
+   * claimed from file-level metadata.
+   */
+  file_role?: string;
 
   /**
    * DISCLOSED EXTENSIONS, C2-4 — the archive-scoped find's per-entry

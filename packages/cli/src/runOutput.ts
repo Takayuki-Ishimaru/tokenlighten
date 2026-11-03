@@ -397,6 +397,73 @@ function rankUnknown(lines: readonly string[]): number[] {
   return tiers;
 }
 
+/**
+ * Groups identical tsc messages and continuation details. Source locations
+ * remain explicit; a different detail is a different diagnostic. The full
+ * log retains every occurrence when the summary budget omits locations.
+ */
+function collapseRepeatedTscBlocks(lines: readonly string[]): string[] {
+  const header = /(^|\s)error TS\d+:/;
+  const blocks: Array<{ start: number; end: number }> = [];
+  for (let i = 0; i < lines.length;) {
+    if (!header.test(lines[i]!)) { i += 1; continue; }
+    let end = i + 1;
+    // A following diagnostic starts a new block even when indented.
+    while (end < lines.length
+      && !header.test(lines[end]!)
+      && (lines[end]!.trim() === "" || /^\s+\S/.test(lines[end]!))) end += 1;
+    while (end > i + 1 && lines[end - 1]!.trim() === "") end -= 1;
+    blocks.push({ start: i, end });
+    i = end;
+  }
+  if (blocks.length < 2) return [...lines];
+  const locationOf = (line: string): RegExpExecArray | null => /^\s*(.+\(\d+,\d+\)):\s+(error TS\d+:.*)$/.exec(line);
+  const keyOf = (b: { start: number; end: number }): string =>
+    [locationOf(lines[b.start]!)?.[2] ?? lines[b.start]!, ...lines.slice(b.start + 1, b.end)].join("\n");
+  const counts = new Map<string, number>();
+  const locations = new Map<string, Set<string>>();
+  for (const b of blocks) {
+    const key = keyOf(b);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    const location = locationOf(lines[b.start]!)?.[1];
+    if (location) {
+      const set = locations.get(key) ?? new Set<string>();
+      set.add(location); locations.set(key, set);
+    }
+  }
+  const seen = new Set<string>();
+  const drop = new Set<number>();
+  const rewrite = new Map<number, string>();
+  const append = new Map<number, string[]>();
+  for (const b of blocks) {
+    const key = keyOf(b);
+    const n = counts.get(key)!;
+    if (n > 1 && seen.has(key)) { for (let i = b.start; i < b.end; i++) drop.add(i); continue; }
+    seen.add(key);
+    if (n > 1) {
+      const sites = [...(locations.get(key) ?? [])];
+      rewrite.set(b.start, `${lines[b.start]!} (${n} occurrences${sites.length > 1 ? ` at ${sites.length} locations; all in full log` : ""})`);
+      if (sites.length > 1) {
+        const rows: string[] = [];
+        let row = "  locations: ";
+        for (const site of sites) {
+          if (row.length + site.length + 2 > MAX_LINE_CHARS && row !== "  locations: ") { rows.push(row); row = "  locations: "; }
+          row += (row === "  locations: " ? "" : ", ") + site;
+        }
+        rows.push(row);
+        append.set(b.end - 1, rows);
+      }
+    }
+  }
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (drop.has(i)) continue;
+    out.push(rewrite.get(i) ?? lines[i]!);
+    out.push(...(append.get(i) ?? []));
+  }
+  return out;
+}
+
 const RANKERS: Readonly<Record<RunnerId, Ranker>> = {
   vitest: rankVitest,
   jest: rankJest,
@@ -552,23 +619,11 @@ export function compressRunOutput(input: RunOutputSummaryInput): string {
   const lines = text.split("\n");
   if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
   const runner = input.runner ?? detectRunner(input.command, text);
-  const tiers = RANKERS[runner](lines);
-  applyFailureSafetyNet(lines, tiers, runner !== "unknown");
-  // A passing run has no failure block to show, so a short tail rides along
-  // when there is room: the last lines a human would glance at. A failing
-  // run gets exactly what its ranker kept; the tail would only re-admit the
-  // code frames and passing lines it dropped. (The unknown ranker already
-  // ranks its own head and tail.)
-  if (input.exitCode === 0 && runner !== "unknown") {
-    let tail = 0;
-    for (let index = lines.length - 1; index >= 0 && tail < TAIL_LINES; index--) {
-      if (lines[index]!.trim() === "") continue;
-      tiers[index] = Math.min(tiers[index]!, 5);
-      tail += 1;
-    }
-  }
+  const ranked = runner === "tsc" ? collapseRepeatedTscBlocks(lines) : lines;
+  const tiers = RANKERS[runner](ranked);
+  applyFailureSafetyNet(ranked, tiers, runner !== "unknown");
   const candidates: Candidate[] = [];
-  lines.forEach((line, index) => {
+  ranked.forEach((line, index) => {
     if (Number.isFinite(tiers[index])) candidates.push({ index, text: clip(line), tier: tiers[index]! });
   });
   const failureHeaders = candidates.filter((candidate) => candidate.tier === 1).length;
@@ -587,8 +642,8 @@ export function compressRunOutput(input: RunOutputSummaryInput): string {
   let { chosen, omittedFailureLines } = select(candidates, Math.max(0, limit - headerBytes - reserve));
   const footerFor = (omitted: number): string[] =>
     omitted > 0 ? [`… ${omitted} more failure line${omitted === 1 ? "" : "s"} in the log`] : [];
-  const contentBefore = new Array<number>(lines.length + 1).fill(0);
-  lines.forEach((line, index) => { contentBefore[index + 1] = contentBefore[index]! + (line.trim() === "" ? 0 : 1); });
+  const contentBefore = new Array<number>(ranked.length + 1).fill(0);
+  ranked.forEach((line, index) => { contentBefore[index + 1] = contentBefore[index]! + (line.trim() === "" ? 0 : 1); });
   let result = render(header, chosen, footerFor(omittedFailureLines), contentBefore);
   while (bytesOf(result) > limit && chosen.length > 0) {
     // Drop the least important chosen line (highest tier, then latest).

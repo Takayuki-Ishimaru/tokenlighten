@@ -40,7 +40,7 @@ import { COMPACTION_MARKER_RELATIVE_PATH } from "@tokenlighten/types";
 import { compactionMarkerEnabled } from "../util/flags.js";
 import { clearServedSurfaces, clearServedWindowsForScope } from "../util/packServeLog.js";
 import { clearPriorPackObligations } from "../features/task-pack/priorPackStore.js";
-import { clearServedPackClaimsForWorkspace } from "../features/task-pack/readCodeTaskPack.js";
+import { clearServedPackClaimsForWorkspace } from "../features/task-pack/engine/packState.js";
 import { clearServedContentState } from "./session.js";
 
 /** Workspace root → the marker's stat signature this process saw last ("absent" for no marker). */

@@ -79,6 +79,57 @@ describe("deriveServerBuildId", () => {
     expect(id).toBe(`${stat.mtime.toISOString()}-${stat.size}`);
   });
 
+  it("hashes source paths and bytes, independent of mtimes and root ordering", () => {
+    const dir = makeDir("source");
+    const moduleFile = path.join(dir, "server.ts");
+    const helper = path.join(dir, "runtime", "helper.ts");
+    fs.mkdirSync(path.dirname(helper));
+    fs.writeFileSync(moduleFile, "entry");
+    fs.writeFileSync(helper, "first");
+    const url = pathToFileURL(moduleFile).href;
+    const roots = ["server.ts", "runtime"];
+    const first = deriveServerBuildId(url, roots);
+    expect(first).toMatch(/^1970-01-01T00:00:00\.000Z-[a-f0-9]{64}$/);
+    fs.utimesSync(helper, new Date(0), new Date(0));
+    expect(deriveServerBuildId(url, [...roots].reverse())).toBe(first);
+    fs.writeFileSync(helper, "other"); // same length, and restore the original mtime
+    fs.utimesSync(helper, new Date(0), new Date(0));
+    const changed = deriveServerBuildId(url, roots);
+    expect(changed).not.toBe(first);
+    fs.renameSync(helper, path.join(dir, "runtime", "renamed.ts"));
+    expect(deriveServerBuildId(url, roots)).not.toBe(changed);
+  });
+
+  it("fails closed for missing or escaping source roots", () => {
+    const dir = makeDir("missing-source");
+    const moduleFile = path.join(dir, "server.ts");
+    fs.writeFileSync(moduleFile, "entry");
+    const url = pathToFileURL(moduleFile).href;
+    expect(deriveServerBuildId(url, ["server.ts", "missing"])).toBeUndefined();
+    expect(deriveServerBuildId(url, ["../outside"])).toBeUndefined();
+    expect(deriveServerBuildId(url, [])).toBeUndefined();
+  });
+
+  it("refuses symlinks inside source roots", () => {
+    const dir = makeDir("source-link");
+    const outside = makeDir("source-link-target");
+    const moduleFile = path.join(dir, "server.ts");
+    fs.writeFileSync(moduleFile, "entry");
+    fs.writeFileSync(path.join(outside, "helper.ts"), "helper");
+    fs.mkdirSync(path.join(dir, "runtime"));
+    fs.symlinkSync(outside, path.join(dir, "runtime", "linked"), "junction");
+    expect(deriveServerBuildId(pathToFileURL(moduleFile).href, ["server.ts", "runtime"])).toBeUndefined();
+  });
+
+  it("preserves stamp priority even when source roots are unavailable", () => {
+    const dir = makeDir("source-stamp");
+    const moduleFile = path.join(dir, "server.js");
+    fs.writeFileSync(moduleFile, "entry");
+    const stamp = "2026-07-31T00:00:00.000Z-abcdef123456";
+    fs.writeFileSync(path.join(dir, ".build-stamp"), stamp);
+    expect(deriveServerBuildId(pathToFileURL(moduleFile).href, ["missing"])).toBe(stamp);
+  });
+
   it("returns undefined when the module has no on-disk file", () => {
     expect(deriveServerBuildId(pathToFileURL(path.join(os.tmpdir(), "definitely-missing.js")).href)).toBeUndefined();
   });

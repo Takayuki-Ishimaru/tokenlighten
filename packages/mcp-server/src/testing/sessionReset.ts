@@ -39,20 +39,14 @@ import { resetTaskContractStoreForTest } from "../features/task-pack/taskContrac
 import { resetPriorPackStoreForTest } from "../features/task-pack/priorPackStore.js";
 import { resetFacetPlansForTest } from "../features/task-pack/facetGate.js";
 import { resetSfPackContextTokensForTest } from "../features/task-pack/sfSatisfaction.js";
-import {
-  resetArtifactSectionPrefetch,
-  resetCallerExpansionEntryCountForTest,
-  resetCertifiedWorkingSets,
-  resetClosureExecutedCallsForTest,
-  resetConcernRecoveryEntryCountForTest,
-  resetFacetClosureEntryCountForTest,
-  resetIdentifierGroundingScanCountForTest,
-  resetManagedGuideBlockSpanCacheForTest,
-  resetPackDedupeCache,
-  resetPendingCandidatePaths,
-  resetReceiptRepairTraceOnceForTest,
-  resetRoleInventoryCache,
-} from "../features/task-pack/readCodeTaskPack.js";
+import { resetArtifactSectionPrefetch, resetManagedGuideBlockSpanCacheForTest } from "../features/task-pack/engine/guideAndArtifactSurfaces.js";
+import { resetCallerExpansionEntryCountForTest, resetConcernRecoveryEntryCountForTest } from "../features/task-pack/engine/answerPackBuilder.js";
+import { resetCertifiedWorkingSets, resetPendingCandidatePaths } from "../features/task-pack/engine/epochContract3.js";
+import { resetClosureExecutedCallsForTest } from "../features/task-pack/engine/recursiveClosure2.js";
+import { resetFacetClosureEntryCountForTest } from "../features/task-pack/engine/facetClosure.js";
+import { resetIdentifierGroundingScanCountForTest, resetReceiptRepairTraceOnceForTest } from "../features/task-pack/engine/identifierAbsence2.js";
+import { resetPackDedupeCache } from "../features/task-pack/engine/packState.js";
+import { resetRoleInventoryCache } from "../features/task-pack/engine/roleAndConcernScope.js";
 import { resetSfAwaitInputInvariantFallbackCountForTest } from "../features/task-pack/canonicalDecision.js";
 import {
   resetClauseLocateAttemptCountForTest,

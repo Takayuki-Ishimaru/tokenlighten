@@ -90,7 +90,7 @@ files or changing host registrations. For example:
 
 ## Install the VS Code extension without building
 
-Users can download **[tokenlighten-vscode-extension-0.16.5.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.16.5/tokenlighten-vscode-extension-0.16.5.vsix)** from the v0.16.5 GitHub Release and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
+Users can download **[tokenlighten-vscode-extension-0.16.6.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.16.6/tokenlighten-vscode-extension-0.16.6.vsix)** from the v0.16.6 GitHub Release and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
 
 Open a trusted project folder, open the TokenLighten view, and choose **Set up this workspace**. This runs the same machine install described above (`tl install --from-extension --clients none`), using VS Code's own Node.js runtime instead of a bundled one: it stages the extension's bundled CLI as the machine install and sets up the current workspace, all in one operation — it does not register other hosts on the machine (Claude Code, Codex); do that separately with `tl clients activate`, or with an archive's `tl-setup`. Remove it with **TokenLighten: Uninstall TokenLighten from This Machine** from the command palette, or the absolute `tl install --uninstall` invocation described in [Uninstall](#uninstall) below.
 
@@ -122,6 +122,19 @@ From the repository you want to use with an MCP-capable coding agent:
 ```bash
 tl workspace setup
 ```
+
+To preview setup for a specific workspace without changing files, hooks or
+the workspace registry, use:
+
+```bash
+tl workspace setup --root /path/to/project --dry-run
+```
+
+Use `--root DIR` for a workspace path; positional paths are not accepted.
+Unknown options, missing or repeated option values and unsupported clients
+are rejected before setup changes are made. Add `--json` for a structured
+plan. An unreadable existing configuration reports its write permission as
+unknown; a preview does not establish that the configuration can be merged.
 
 The setup flow configures supported clients for the workspace and manages TokenLighten's own instruction blocks. Content outside TokenLighten-managed blocks is preserved. (An archive install or the VS Code extension's **Set up this workspace** already runs this step as part of `tl install`; use `tl workspace setup` directly when you built from source, or to set up an additional workspace without touching the machine install.)
 
@@ -326,4 +339,4 @@ Run `tl help` for the complete CLI reference. If you do not want TokenLighten ac
 - Deploying to a fleet or a policy-managed machine? See [Managed environments](managed-environments.md).
 - Review the [Privacy, security, and support](privacy-security-support.md) notes before enabling write access.
 - Configure optional [Local analysis engines](local-analysis.md), including model download and language servers.
-- Read the [v0.16.5 release notes](github-release-v0.16.5.md) for the current changes, compatibility, and known limitations.
+- Read the [v0.16.6 release notes](github-release-v0.16.6.md) for the current changes, compatibility, and known limitations.

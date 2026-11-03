@@ -140,6 +140,8 @@ interface WorkspaceTaskContract {
   epochTokens: string[];
   /** First non-empty query seen in this epoch; never overwritten while the epoch stands. */
   query: string;
+  /** Admission provenance only; never evidence that the request is answered. */
+  naturalQueryOrigin?: true;
   /** The ledger is the sole mutable source for requirements and proofs. */
   ledger: ObligationLedger;
   scope: TaskContractScope;
@@ -392,6 +394,7 @@ interface PersistedTaskContract {
   readonly scope: TaskContractScope;
   readonly epochTokens: string[];
   readonly query: string;
+  readonly naturalQueryOrigin?: true;
   readonly ledger: ObligationLedgerSnapshot;
   readonly pendingNexts?: string[];
 }
@@ -465,6 +468,7 @@ function _load(workspaceRoot: string, scope?: TaskContractScope): WorkspaceTaskC
   const record: WorkspaceTaskContract = {
     epochTokens: persisted.epochTokens.filter((token): token is string => typeof token === "string"),
     query: persisted.query,
+    ...(persisted.naturalQueryOrigin === true ? { naturalQueryOrigin: true as const } : {}),
     ledger: ObligationLedger.fromSnapshot(snapshot),
     scope: normalized,
     pendingNexts: Array.isArray(persisted.pendingNexts)
@@ -483,6 +487,7 @@ function _persist(workspaceRoot: string, record: WorkspaceTaskContract): void {
     epochTokens: [...record.epochTokens],
     query: record.query,
     ledger: snapshot,
+    ...(record.naturalQueryOrigin === true ? { naturalQueryOrigin: true as const } : {}),
     pendingNexts: [...record.pendingNexts],
   };
   const store = stateStoreFor(workspaceRoot);
@@ -687,11 +692,35 @@ export function recordTaskContract(
   _persist(workspaceRoot, record);
 }
 
-/**
- * Discharge already-recorded query concerns from same-epoch evidence.  This is
- * deliberately narrower than `recordTaskContract`: continuations may prove
- * only obligations the source pack minted, never add new query vocabulary.
+/** Remember the canonical first-hop route in the existing scoped task record.
+ * The marker survives target selection and restart, but grants no source proof.
+ * Call only after the original canonical input admitted an unanchored query.
  */
+export function recordNaturalQueryOrigin(workspaceRoot: string, query: string, scope?: TaskContractScope): boolean {
+  const record = _load(workspaceRoot, _effectiveScope(scope));
+  if (record === undefined || record.query !== query || query.trim() === "") return false;
+  record.naturalQueryOrigin = true;
+  _persist(workspaceRoot, record);
+  return true;
+}
+
+/** The full original request, only for a task admitted by the natural route. */
+export function naturalQueryForScope(workspaceRoot: string, scope?: TaskContractScope): string | undefined {
+  const record = _load(workspaceRoot, _effectiveScope(scope));
+  return record?.naturalQueryOrigin === true ? record.query : undefined;
+}
+
+/** Resume an authenticated task or an exact unbound restatement.
+ * Bound narrowed requests retain the original query and its complete duties.
+ */
+export function naturalQueryForRequest(workspaceRoot: string, requestQuery: string | undefined, scope?: TaskContractScope): string | undefined {
+  const effective = _effectiveScope(scope);
+  const original = naturalQueryForScope(workspaceRoot, effective);
+  if (original === undefined) return undefined;
+  return effective?.taskHandle !== undefined || requestQuery === original ? original : undefined;
+}
+
+/** Discharge only query concerns the original task already required. */
 export function recordServedConcernEvidence(
   workspaceRoot: string,
   tokens: readonly string[],

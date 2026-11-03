@@ -90,6 +90,45 @@ afterEach(async () => {
 });
 
 describe("built MCP wiring integration", () => {
+  it("grounds supported prose in executable source and defers unsupported questions in the built server", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "tl-dist-query-"));
+    tmpDirs.push(workspace);
+    writeFixture(workspace, "src/app.py", [
+      "class Flask:",
+      "    def _find_error_handler(self, error):",
+      "        for cls in type(error).__mro__:",
+      "            handler = self.handlers.get(cls)",
+      "            if handler is not None:",
+      "                return handler",
+      "        return None", "",
+    ].join("\n"));
+    writeFixture(workspace, "docs/conf.py", "project = 'Flask'\nconfig_docs = 'DECOY_BODY'\n");
+    const server = startDistServer(workspace);
+    await server.initialize();
+    const first = parseBody(await server.rpc(2, "tools/call", {
+      name: "tl_read_file", arguments: { cwd: workspace, query: "How does Flask decide which error handler to use?", task: { epoch: "new", profile: "answer" } },
+    }));
+    expect(first.decision.kind).toBe("act.answer");
+    expect(first.evidence.some((item: any) => item.path === "src/app.py"
+      && item.body?.includes("for cls in type(error).__mro__:")
+      && item.body?.includes("handler = self.handlers.get(cls)")
+      && item.body?.includes("return handler"))).toBe(true);
+    expect(JSON.stringify(first)).not.toContain("DECOY_BODY");
+    const unsupported = parseBody(await server.rpc(4, "tools/call", {
+      name: "tl_read_file", arguments: { cwd: workspace, query: "When following redirects, how does requests remove authentication headers?", task: { epoch: "new", profile: "answer" } },
+    }));
+    expect(unsupported.decision).toMatchObject({ kind: "await_input", code: "name-intended-target" });
+    expect(unsupported.evidence).toEqual([]);
+    expect(unsupported.decision.certificate).toBeUndefined();
+    expect(unsupported.decision.next).toBeUndefined();
+    expect(JSON.stringify(unsupported)).not.toContain("DECOY_BODY");
+    const named = parseBody(await server.rpc(3, "tools/call", {
+      name: "tl_read_file", arguments: { cwd: workspace, query: "Explain _find_error_handler.", task: { epoch: "new", profile: "answer" } },
+    }));
+    expect(named.decision.kind).toBe("act.answer");
+    expect(JSON.stringify(named.evidence)).toContain("return handler");
+  }, 60_000);
+
   it("prepares the correct consumer, edits its insertion handle, and passes behavior verification", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "tl-dist-wiring-"));
     tmpDirs.push(workspace);

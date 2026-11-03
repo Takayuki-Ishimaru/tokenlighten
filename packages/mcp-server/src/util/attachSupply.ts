@@ -50,7 +50,7 @@ import {
 // never at module-evaluation time, so Node's live-binding ESM semantics
 // resolve the cycle the same way `laneKey.ts`'s `runWithSessionLane` already
 // does for `state/session.ts`.
-import { taskPackRecoveryFor } from "../server.js";
+import { taskPackRecoveryFor } from "../serverOwned/task-pack-recovery.js";
 
 /**
  * Envelope key names banned as top-level fields in any successful response

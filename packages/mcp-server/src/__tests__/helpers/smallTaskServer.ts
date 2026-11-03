@@ -56,6 +56,8 @@ export interface StartOptions {
   readonly env?: Readonly<Record<string, string>>;
   /** Send `initialize` + `notifications/initialized` before returning (default true). */
   readonly handshake?: boolean;
+  /** Pass the server CLI --allow-write flag (default false). */
+  readonly allowWrite?: boolean;
 }
 
 export async function startSmallTaskServer(ws: string, options: StartOptions = {}): Promise<SmallTaskServer> {
@@ -65,7 +67,7 @@ export async function startSmallTaskServer(ws: string, options: StartOptions = {
   Object.assign(env, { HOME: home, USERPROFILE: home }, options.env ?? {});
   const child: ChildProcess = spawn(
     process.execPath,
-    [...TSX_NODE_ARGS, BIN_TS, ws],
+    [...TSX_NODE_ARGS, BIN_TS, ...(options.allowWrite === true ? ["--allow-write"] : []), ws],
     { cwd: ws, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", env },
   );
   let stdoutBuf = "";

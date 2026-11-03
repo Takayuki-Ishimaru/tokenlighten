@@ -47,8 +47,11 @@ describe("issue #4: SERVER_INSTRUCTIONS content", () => {
   // Read/Grep/Edit for small work the user located. The old "TL first for
   // code/doc/config" made small known-location work cost more than native, and
   // a wrong first guess paid twice.
-  it("sends unknown-location, multi-file/call-graph, Office/CSV/archive and large-file work to TL, and a user-named file with a small local task to native", () => {
-    expect(SERVER_INSTRUCTIONS).toContain("TL for unknown location, multi-file/call-graph, Office/CSV/archive/large files:");
+  it("uses whole requests for source questions, including unanchored prose", () => {
+    expect(SERVER_INSTRUCTIONS).toContain("Any source question/request incl. prose:");
+    expect(SERVER_INSTRUCTIONS).toContain("read-only question=>task.profile:\"answer\"");
+    expect(SERVER_INSTRUCTIONS).toContain("change/fix=>generic (mixed=>generic)");
+    expect(SERVER_INSTRUCTIONS).toContain("Candidates unverified: select target.");
     expect(SERVER_INSTRUCTIONS).toContain("Native Read/Grep/Edit: user-named file/symbol + small local task; incomplete scope/verified absence.");
     expect(SERVER_INSTRUCTIONS).not.toContain("TL first");
   });
@@ -66,9 +69,10 @@ describe("issue #4: SERVER_INSTRUCTIONS content", () => {
   // ceiling has headroom for minor future wording fixes without becoming a
   // silent budget for creep back toward 592 B.
   // 2026-11-03: the routing rewrite measures 489 B, one under r12's 490 B.
-  it("stays at or under its post-B-F4 byte ceiling (2026-11-03: 489 B measured, r12 was 490 B; 520 B ceiling)", () => {
+  // Explicitly budget the safety distinction and missing-evidence recovery.
+  it("keeps the routing safety instructions within 600 bytes", () => {
     const bytes = Buffer.byteLength(SERVER_INSTRUCTIONS, "utf8");
-    expect(bytes, `SERVER_INSTRUCTIONS grew to ${bytes} B — update this ceiling deliberately, with a reason, not by accident`).toBeLessThanOrEqual(520);
+    expect(bytes, `SERVER_INSTRUCTIONS grew to ${bytes} B — update this ceiling deliberately, with a reason, not by accident`).toBeLessThanOrEqual(600);
   });
 
   // v0.12 C2 (W4 channel v2): guide-less stop discipline, grounded in the T13
@@ -79,7 +83,7 @@ describe("issue #4: SERVER_INSTRUCTIONS content", () => {
   // above.
   it("closes discovery and requires batching independent edits into one edits[] call", () => {
     expect(SERVER_INSTRUCTIONS).toContain(
-      "act.answer/act.edit: use evidence[].body; no re-read.",
+      "act.answer/act.edit: use evidence[].body; fetch missing bodies.",
     );
     expect(SERVER_INSTRUCTIONS).toContain("Batch independent targets/edits[].");
   });

@@ -2,6 +2,25 @@
 
 User-facing release highlights for TokenLighten.
 
+## 0.16.6
+
+- English and Japanese code discovery follows the requested operations and
+  relationships and retains unanswered points across continued reads.
+- Outlines after partial source reads return the requested signatures. Search
+  results distinguish previously read matches from new matches and avoid
+  assigning hits in several functions to one enclosing function.
+- Edit summaries compare original and final text for line counts and report
+  applied operations separately from changed files.
+- `tl workspace setup --dry-run` previews configuration without writing.
+  Invalid options, values, clients and positional arguments fail before setup.
+- Command summaries group repeated TypeScript diagnostics; full logs retain
+  every occurrence. Usage summaries explain the limits of session estimates.
+
+Install the archive or VSIX, refresh workspace setup and reconnect your client.
+The three tools and supported canonical top-level request fields are unchanged
+from v0.16.5. See the
+[v0.16.6 release notes](release-docs/github-release-v0.16.6.md).
+
 ## 0.16.5
 
 - Discovery prioritizes named product files and exact literals, follows relevant

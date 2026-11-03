@@ -45,7 +45,7 @@ import { startupWarmupEnabled } from "./flags.js";
 import { languageForPath } from "./languages.js";
 import { collectSymbols, symbolCollectorSupports } from "../symbols/collectSymbols.js";
 import { getParserCtor } from "../skeleton/treeSitter.js";
-import { autoBoundTaskProfile } from "../features/task-pack/readCodeTaskPack.js";
+import { autoBoundTaskProfile } from "../features/task-pack/engine/coverageAndContinuation4.js";
 import { extractFacetRequirements, isStructuralOnlyRequest } from "../features/task-pack/requestFacets.js";
 import { extractRequestItems } from "../features/task-pack/requestItems.js";
 import { extractIdentifiers } from "../features/locator/locateTaskContext.js";

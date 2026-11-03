@@ -1,3 +1,4 @@
+import { queryCandidateSelectionOf, QUERY_CANDIDATE_GUIDANCE } from "./queryCandidatePolicy.js";
 import type { TaskExecutionContract, TaskReadinessObligation, ToolCall } from "@tokenlighten/types";
 import {
   enforceContinuationBudget,
@@ -2136,6 +2137,9 @@ function deriveCanonicalTaskDecisionRaw(result: TaskPackResult): CanonicalTaskDe
  * first statement is that exact flag check.
  */
 export function deriveCanonicalTaskDecision(result: TaskPackResult): CanonicalTaskDecision | undefined {
+  if (queryCandidateSelectionOf(result) !== undefined) {
+    return { kind: "await-input", reason: QUERY_CANDIDATE_GUIDANCE };
+  }
   return applySemanticFrontierNextArbitration(result, deriveCanonicalTaskDecisionRaw(result));
 }
 

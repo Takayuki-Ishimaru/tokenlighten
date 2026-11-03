@@ -14,7 +14,7 @@ describe("explicit read-only code guide", () => {
     const readonly = renderReadOnlyCodeBlock("test-version");
     expect(readonly).toContain("test-version-read-only-code");
     expect(readonly).toBe(renderReadOnlyCodeBlock("test-version"));
-    expect(ordinary).toContain("First lookup:");
+    expect(ordinary).toContain("First lookup for every source question");
     expect(ordinary).not.toContain("read-only-code");
     expect(renderBlock(undefined, "en", undefined, "compact", "code")).toBe(ordinary);
   });

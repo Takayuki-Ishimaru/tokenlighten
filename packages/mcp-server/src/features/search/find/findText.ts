@@ -1184,6 +1184,8 @@ export interface FindFileGroup {
    * filler. See "Role annotations" section below for full rationale.
    */
   role?: string;
+  /** find results: file primary symbol/description (see canonical FindFileGroup.file_role); never the hit's enclosing callable. */
+  file_role?: string;
   /** Full hit count before the byte cap trims this file's lines. */
   match_count?: number;
   /** Edit-grade range, present only for a uniquely dominant code cluster. */
@@ -2691,6 +2693,19 @@ export function deriveRoleFromText(text: string, relPath: string): string | unde
  * near the top of a file, and this is a best-effort annotation, not a
  * correctness-critical read).
  */
+/**
+ * find-only: the derived role describes the file's PRIMARY symbol/purpose,
+ * not the callable enclosing the matched lines — publish it as `file_role`
+ * and never as `role`, which callers read as the hit's enclosing scope.
+ */
+function toFileRoleRows<T extends { role?: string; file_role?: string }>(items: readonly T[]): T[] {
+  return items.map((item) => {
+    if (item.role === undefined) return item;
+    const { role, ...rest } = item;
+    return { ...rest, file_role: role } as T;
+  });
+}
+
 export function deriveFileRole(workspace: string, relPath: string): string | undefined {
   const absPath = path.join(workspace, relPath);
   let size: number;
@@ -3591,7 +3606,7 @@ function buildFindResponseImpl(
     };
     const buildWithExtra = (fs: FindFileGroup[]): FindResponse => build(fs, responseExtra);
     const fitted = fitFilesToCap(snippetCap.groups, buildWithExtra, findResponseCapBytes());
-    const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, findResponseCapBytes());
+    const roledFiles = toFileRoleRows(applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), (rows) => buildWithExtra(toFileRoleRows(rows)), findResponseCapBytes()));
     return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions) || coverage.undecodable.size > 0);
   };
 
@@ -3614,7 +3629,7 @@ function buildFindResponseImpl(
     const responseExtra: Record<string, unknown> = { ...omittedExtra, ...(hint ? { hint } : {}), ...snippetCap.extra };
     const buildWithExtra = (fs: FindFileGroup[]): FindResponse => build(fs, responseExtra);
     const fitted = fitFilesToCap(snippetCap.groups, buildWithExtra, findResponseCapBytes());
-    const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, findResponseCapBytes());
+    const roledFiles = toFileRoleRows(applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), (rows) => buildWithExtra(toFileRoleRows(rows)), findResponseCapBytes()));
     return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions) || coverage.undecodable.size > 0);
   }
 
@@ -3647,7 +3662,7 @@ function buildFindResponseImpl(
       };
       const buildWithExtra = (fs: FindFileGroup[]): FindResponse => build(fs, responseExtra);
       const fitted = fitFilesToCap(snippetCap.groups, buildWithExtra, findResponseCapBytes());
-      const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, findResponseCapBytes());
+      const roledFiles = toFileRoleRows(applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), (rows) => buildWithExtra(toFileRoleRows(rows)), findResponseCapBytes()));
       return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions) || coverage.undecodable.size > 0);
     }
   }
@@ -3819,7 +3834,7 @@ function buildFindResponseImpl(
   };
   const buildWithExtra = (fs: FindFileGroup[]): FindResponse => build(fs, responseExtra);
   const fitted = fitFilesToCap(snippetCap.groups, buildWithExtra, findResponseCapBytes());
-  const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, findResponseCapBytes());
+  const roledFiles = toFileRoleRows(applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), (rows) => buildWithExtra(toFileRoleRows(rows)), findResponseCapBytes()));
 
   return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions) || coverage.undecodable.size > 0);
 }
@@ -4099,7 +4114,7 @@ function buildFindResponseForQueriesImpl(input: FindTextMultiInput, workspace: s
   const buildWithExtra = (fs: FindFileGroup[]): FindResponse => build(fs, responseExtra);
 
   const fitted = fitFilesToCap(snippetCap.groups, buildWithExtra, findResponseCapBytes());
-  const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, findResponseCapBytes());
+  const roledFiles = toFileRoleRows(applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), (rows) => buildWithExtra(toFileRoleRows(rows)), findResponseCapBytes()));
 
   return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions) || coverage.undecodable.size > 0);
 }

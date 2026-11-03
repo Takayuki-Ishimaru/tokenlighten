@@ -44,7 +44,7 @@ import {
 } from "../write/textEdit.js";
 import { batchCheckpoint } from "../write/checkpoint.js";
 import type { GuardedWorkspaceRoot } from "../write/guardedWorkspace.js";
-import { computeLineDelta, formatDelta, formatLines } from "../util/lineDelta.js";
+import { changedLineCounts, computeLineDelta, formatDelta, formatLines } from "../util/lineDelta.js";
 import {
   alreadyAppliedForensics,
   fileHeadForensics,
@@ -454,6 +454,7 @@ export function rollbackRecoveryHint(ledger: RollbackFileState[]): string {
 export type ApplyEditsMultiResult =
   | {
       ok: true;
+      operations_applied: number;
       files: EditFileResult[];
       checkpoint: string | null;
       /**
@@ -1166,8 +1167,6 @@ export async function applyEditsMulti(
 
     let currentText = existingContent;
     let lastLines = "";
-    let totalAdded = 0;
-    let totalRemoved = 0;
     let totalReplaced = 0;
     let pathNormalizedEscapes = false;
     let pathNormalizedWhitespace = false;
@@ -1205,8 +1204,6 @@ export async function applyEditsMulti(
         }
         currentText = step.newText;
         lastLines = step.lines;
-        totalAdded += step.added;
-        totalRemoved += step.removed;
         if (step.replaced !== undefined) totalReplaced += step.replaced;
         if (rangeOnlyGroup) clusterLineDelta += step.added - step.removed;
         if (step.normalizedEscapes) pathNormalizedEscapes = true;
@@ -1216,6 +1213,7 @@ export async function applyEditsMulti(
     if (pathNormalizedEscapes) normalizedEscapePaths.push(rel);
     if (pathNormalizedWhitespace) normalizedWhitespacePaths.push(rel);
 
+    const changedLines = changedLineCounts(existingContent, currentText);
     prepared.push({
       rel,
       abs,
@@ -1223,13 +1221,10 @@ export async function applyEditsMulti(
       existingContent,
       mode: existingMode,
       // A merged chain reports the FINAL edit's line range (where the file
-      // ended up, directly re-readable) and the SUMMED added/removed across
-      // the whole chain (coordinate-system-independent, unlike naively
-      // min/maxing per-step ranges that were each computed against a
-      // different intermediate text). A single-edit group's summary is
-      // identical to the pre-merge per-edit lines/delta.
-      lines: lastLines,
-      delta: formatDelta(totalAdded, totalRemoved),
+      // ended up, directly re-readable). Delta compares the original and final
+      // file so unchanged context and intermediate edits do not inflate it.
+      lines: currentText === "" ? "" : lastLines,
+      delta: changedLines ? formatDelta(changedLines.added, changedLines.removed) : "",
       ...(totalReplaced > 0 ? { replaced: totalReplaced } : {}),
     });
   }
@@ -1439,6 +1434,7 @@ export async function applyEditsMulti(
 
   return {
     ok: true,
+    operations_applied: input.edits.length,
     files,
     checkpoint,
     ...(mergedPaths.length > 0 ? { merged_paths: mergedPaths } : {}),

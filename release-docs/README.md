@@ -1,6 +1,6 @@
 # TokenLighten release documentation
 
-This directory contains the public documentation for TokenLighten v0.16.5.
+This directory contains the public documentation for TokenLighten v0.16.6.
 
 ## Start here
 
@@ -14,7 +14,9 @@ This directory contains the public documentation for TokenLighten v0.16.5.
 - [Privacy, security, and support](privacy-security-support.md).
 - [Licensing](licensing.md).
 - [Local analysis engines](local-analysis.md) — defaults, model download and language-server configuration.
-- [GitHub Release v0.16.5](github-release-v0.16.5.md) — focused discovery, exact
+- [GitHub Release v0.16.6](github-release-v0.16.6.md) — English/Japanese code
+  discovery, continued reads, edit summaries and workspace setup previews.
+- [Historical GitHub Release v0.16.5](github-release-v0.16.5.md) — focused discovery, exact
   symbol reads, background indexing, agent hooks and clearer usage estimates.
 - [Historical GitHub Release v0.16.4](github-release-v0.16.4.md) — CSV lookups,
   focused code discovery, continued reads and edits, and MCP startup.

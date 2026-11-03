@@ -35,6 +35,7 @@ import { describe, it, expect } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
+import * as ts from "typescript";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC = path.resolve(HERE, "..");
@@ -102,59 +103,115 @@ const WRITE_ENTRY_POINTS: ReadonlyArray<{ file: string; fn: string }> = [
 interface DispatchCase {
   name: string;
   body: string;
+  handler: { file: string; name: string };
 }
 
-/** The `dispatchTool` function body, from its signature to its closing brace. */
-function dispatchToolSource(): string {
-  const start = serverSource.indexOf("async function dispatchTool(");
-  expect(start, "dispatchTool not found in server.ts — did it move or get renamed?").toBeGreaterThan(-1);
-  // The function is declared at column 0, so the next line that is exactly "}"
-  // closes it.
-  const rest = serverSource.slice(start);
-  const end = rest.indexOf("\n}\n");
-  expect(end, "could not find the end of dispatchTool").toBeGreaterThan(-1);
-  return rest.slice(0, end);
+const DISPATCH_DIR = path.join(SRC, "mcp", "dispatch");
+function parseSource(file: string): ts.SourceFile {
+  return ts.createSourceFile(file, fs.readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 }
-
-/**
- * Top-level `case "<name>": {` labels inside dispatchTool's switch, with the
- * source of each case up to the next label (or `default:`). A top-level label
- * is indented exactly four spaces; anything deeper belongs to an inner switch.
- */
-function parseDispatchCases(): DispatchCase[] {
-  const source = dispatchToolSource();
-  const label = /^ {4}case "([a-z_]+)":/gm;
-  const marks: Array<{ name: string; at: number }> = [];
-  for (let m = label.exec(source); m !== null; m = label.exec(source)) {
-    marks.push({ name: m[1]!, at: m.index });
+function importedFunctions(file: string): Map<string, { file: string; name: string }> {
+  const source = parseSource(file);
+  const out = new Map<string, { file: string; name: string }>();
+  for (const node of source.statements) {
+    if (!ts.isImportDeclaration(node) || !ts.isStringLiteral(node.moduleSpecifier)) continue;
+    const bindings = node.importClause?.namedBindings;
+    if (!bindings || !ts.isNamedImports(bindings) || !node.moduleSpecifier.text.startsWith(".")) continue;
+    const resolved = path.resolve(path.dirname(file), node.moduleSpecifier.text.replace(/\.js$/, ".ts"));
+    for (const element of bindings.elements) if (!element.isTypeOnly) {
+      out.set(element.name.text, { file: resolved, name: (element.propertyName ?? element.name).text });
+    }
   }
-  const defaultAt = source.search(/^ {4}default:/m);
-  return marks.map((mark, i) => ({
-    name: mark.name,
-    body: source.slice(mark.at, marks[i + 1]?.at ?? (defaultAt > -1 ? defaultAt : source.length)),
-  }));
+  return out;
 }
-
-/** Every tool name ALL_TOOLS advertises or keeps dispatchable. */
+function directFunction(file: string, name: string): ts.FunctionDeclaration {
+  const source = parseSource(file);
+  const found = source.statements.filter((node): node is ts.FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) && node.name?.text === name && node.body !== undefined);
+  if (found.length !== 1) throw new Error(`expected exactly one ${name} in ${file}; found ${found.length}`);
+  return found[0]!;
+}
+function callNames(node: ts.Node): string[] {
+  const calls: string[] = [];
+  const visit = (part: ts.Node): void => {
+    if (ts.isCallExpression(part) && ts.isIdentifier(part.expression)) calls.push(part.expression.text);
+    ts.forEachChild(part, visit);
+  };
+  visit(node);
+  return calls;
+}
+/** Inventory the actual top-level switch; accept only literal cases. */
+function parseCaseClauses(fn: ts.FunctionDeclaration): Array<{ name: string; node: ts.CaseClause }> {
+  const switches = fn.body!.statements.filter(ts.isSwitchStatement);
+  if (switches.length !== 1) throw new Error(`dispatchTool must have one direct switch, got ${switches.length}`);
+  return switches[0]!.caseBlock.clauses.filter(ts.isCaseClause).map(node => {
+    if (!ts.isStringLiteral(node.expression)) throw new Error(`unclassified nonliteral dispatch case: ${node.expression.getText()}`);
+    return { name: node.expression.text, node };
+  });
+}
+function findDeclarationFile(name: string, kind: "function" | "variable"): string {
+  const paths = [SERVER_TS, ...fs.readdirSync(path.join(SRC, "serverOwned")).filter(name => name.endsWith(".ts")).map(name => path.join(SRC, "serverOwned", name))];
+  const found = paths.filter(file => parseSource(file).statements.some(node => kind === "function"
+    ? ts.isFunctionDeclaration(node) && node.name?.text === name
+    : ts.isVariableStatement(node) && node.declarationList.declarations.some(d => ts.isIdentifier(d.name) && d.name.text === name)));
+  if (found.length !== 1) throw new Error(`expected one owner of ${name}, found ${found.join(", ")}`);
+  return found[0]!;
+}
+const DISPATCH_OWNER = findDeclarationFile("dispatchTool", "function");
+const DISPATCH_SOURCE = fs.readFileSync(DISPATCH_OWNER, "utf8");
+function parseDispatchCases(): DispatchCase[] {
+  const imports = importedFunctions(DISPATCH_OWNER);
+  return parseCaseClauses(directFunction(DISPATCH_OWNER, "dispatchTool")).map(({ name, node }) => {
+    const calls = callNames(node);
+    const handlers = calls.map(name => imports.get(name)).filter((v): v is { file: string; name: string } => v !== undefined && path.dirname(v.file) === DISPATCH_DIR);
+    if (calls.length !== 1 || handlers.length !== 1) throw new Error(`${name} must call exactly one imported handler and no unclassified call; got ${calls.join(", ")}`);
+    return { name, body: node.getText(), handler: handlers[0]! };
+  });
+}
+/** ALL_TOOLS is read from its actual declaration, not a hard-coded inventory. */
 function allToolNames(): string[] {
-  const start = serverSource.indexOf("const ALL_TOOLS: ToolEntry[] = [");
-  expect(start, "ALL_TOOLS not found in server.ts").toBeGreaterThan(-1);
-  const end = serverSource.indexOf("\n];", start);
-  expect(end, "could not find the end of ALL_TOOLS").toBeGreaterThan(-1);
-  const block = serverSource.slice(start, end);
-  const names = new Set<string>();
-  const nameRe = /\bname: "([a-z_]+)"/g;
-  for (let m = nameRe.exec(block); m !== null; m = nameRe.exec(block)) names.add(m[1]!);
-  return [...names].sort();
+  const file = findDeclarationFile("ALL_TOOLS", "variable"), source = parseSource(file);
+  const statement = source.statements.find(node => ts.isVariableStatement(node) && node.declarationList.declarations.some(d => ts.isIdentifier(d.name) && d.name.text === "ALL_TOOLS")) as ts.VariableStatement;
+  const declaration = statement.declarationList.declarations.find(d => ts.isIdentifier(d.name) && d.name.text === "ALL_TOOLS")!;
+  if (!declaration.initializer || !ts.isArrayLiteralExpression(declaration.initializer)) throw new Error("ALL_TOOLS is not a literal array");
+  return declaration.initializer.elements.map(element => {
+    if (!ts.isObjectLiteralExpression(element)) throw new Error("ALL_TOOLS has nonliteral entry");
+    const field = element.properties.find(p => ts.isPropertyAssignment(p) && p.name.getText(source) === "name");
+    if (!field || !ts.isPropertyAssignment(field) || !ts.isStringLiteral(field.initializer)) throw new Error("ALL_TOOLS entry has nonliteral name");
+    return field.initializer.text;
+  }).sort();
 }
-
 const CASES = parseDispatchCases();
 const CASE_NAMES = CASES.map((c) => c.name).sort();
-
 function caseBody(name: string): string {
   const found = CASES.find((c) => c.name === name);
   expect(found, `no dispatch case named "${name}"`).toBeDefined();
-  return found!.body;
+  // Guard ordering is checked in the actual handler, not in a synthetic join.
+  return directFunction(found!.handler.file, found!.handler.name).getText();
+}
+/** Follow only actual calls to imported dispatch leaves. Other services keep
+ * their existing contracts; an uncalled import cannot satisfy this check. */
+function reachableDispatchBodies(name: string): Array<{ body: string; calls: string[] }> {
+  const found = CASES.find(c => c.name === name);
+  if (!found) throw new Error(`no dispatch case ${name}`);
+  const seen = new Set<string>(), bodies: Array<{ body: string; calls: string[] }> = [];
+  const visit = (target: { file: string; name: string }): void => {
+    const key = `${target.file}#${target.name}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const fn = directFunction(target.file, target.name);
+    const imports = importedFunctions(target.file);
+    const calls = callNames(fn.body!);
+    bodies.push({ body: fn.getText(), calls: calls.map(call => imports.get(call)?.name ?? call) });
+    for (const call of calls) {
+      const next = imports.get(call);
+      if (!next) continue;
+      const rel = path.relative(DISPATCH_DIR, next.file);
+      if (rel !== "" && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)) visit(next);
+    }
+  };
+  visit(found.handler);
+  return bodies;
 }
 
 /** Index of the first match, or -1. Used for "guard ran BEFORE resolve" order. */
@@ -188,6 +245,13 @@ describe("dispatch guard conformance — case inventory", () => {
     ).toEqual(["tl_edit_file", "tl_read_file", "tl_search_files"]);
   });
 
+  it("detects a newly added unclassified switch case", () => {
+    const source = ts.createSourceFile("synthetic.ts", 'async function dispatchTool(name: string) { switch(name) { case "tl_read_file": return 1; case "tl_unclassified": return 2; } }', ts.ScriptTarget.Latest, true);
+    const fn = source.statements.find(ts.isFunctionDeclaration)!;
+    const unclassified = parseCaseClauses(fn).map(c => c.name).filter(name => !(name in CASE_CLASSIFICATION));
+    expect(unclassified).toEqual(["tl_unclassified"]);
+  });
+
   it("classifies EVERY dispatch case — an unclassified case fails by name", () => {
     const classified = Object.keys(CASE_CLASSIFICATION).sort();
     const unclassified = CASE_NAMES.filter((n) => !(n in CASE_CLASSIFICATION));
@@ -209,8 +273,8 @@ describe("dispatch guard conformance — case inventory", () => {
     // fourth renamed alias could map onto a case this spec never checked; now
     // the only way a name reaches a case is by being that case's own label.
     expect(
-      serverSource,
-      "server.ts declares a CANON rewrite table again — that re-opens the accepted-but-unadvertised name class D2/D11 closed; delete it or re-teach this spec deliberately",
+      `${serverSource}\n${DISPATCH_SOURCE}`,
+      "the server declares a CANON rewrite table again — that re-opens the accepted-but-unadvertised name class D2/D11 closed; delete it or re-teach this spec deliberately",
     ).not.toContain("const CANON: Record<string, string> = {");
     expect(Object.keys(EXPECTED_CANON)).toEqual([]);
 
@@ -307,8 +371,8 @@ describe("dispatch guard conformance — read cases reach no write entry point",
 
   for (const name of readCases) {
     it(`${name}: calls none of ${writeFns.length} write entry points`, () => {
-      const body = caseBody(name);
-      const reached = writeFns.filter((fn) => new RegExp(`\\b${fn}\\s*\\(`).test(body));
+      const bodies = reachableDispatchBodies(name);
+      const reached = writeFns.filter((fn) => bodies.some(entry => entry.calls.includes(fn) || new RegExp(`\\b${fn}\\s*\\(`).test(entry.body)));
       expect(
         reached,
         `case "${name}" is classified read-only but reaches ${reached.join(", ")}. Either it is not read-only — reclassify it as "write" and give it the full guard stack — or the call does not belong there.`,

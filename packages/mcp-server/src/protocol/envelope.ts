@@ -155,6 +155,8 @@ export const PROTOCOL_META: Readonly<Record<string, number>> = Object.freeze({
 // ---------------------------------------------------------------------------
 
 export interface ProtocolCallContext {
+  /** Input operation count captured before canonical single-item unwrapping. */
+  editOperationCount?: number;
   /** Canonical advertised tool this call dispatched to. */
   readonly tool: string;
   /**
@@ -420,6 +422,9 @@ export interface ProtocolCallContext {
 const _protocolCall = new AsyncLocalStorage<ProtocolCallContext>();
 
 export function runWithProtocolCall<T>(context: ProtocolCallContext, fn: () => T): T {
+  if (context.tool === "tl_edit_file" && Array.isArray(context.args?.["edits"])) {
+    context.editOperationCount = context.args["edits"].length;
+  }
   return _protocolCall.run(context, () => runWithSemanticFrontierTrace(fn));
 }
 

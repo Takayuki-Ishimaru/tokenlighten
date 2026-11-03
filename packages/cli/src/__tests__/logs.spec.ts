@@ -201,7 +201,8 @@ describe("tl logs summary scoping", () => {
     expect(json.measurementDisplay.wire).toMatchObject({ status: "measured", calls: 4, events: 4 });
     expect(json.measurementDisplay.mcpResponse.status).toBe("estimated");
     expect(json.measurementDisplay.contextAvoided.status).toBe("unavailable");
-    expect(json.measurementDisplay.session.net.status).toBe("estimated");
+    expect(json.measurementDisplay.session.net.status).toBe("unavailable");
+    expect(json.measurementDisplay.session.net.tokens).toBeNull();
 
     writes.length = 0;
     await runLogs(["summary", "--workspace-root", toolRoot]);
@@ -211,7 +212,9 @@ describe("tl logs summary scoping", () => {
     expect(text).toContain("TL response tokens: ~100 (est.)\n");
     expect(text).toContain("TL response measurement method: file-bytes\n");
     expect(text).toContain("Context avoided: unavailable (unavailable; basis:");
-    expect(text).toContain("Session net: -600 tokens (estimated; basis:");
+    expect(text).toContain("Session net: unavailable");
+    expect(text).toMatch(/paired.*verified|verified.*paired/i);
+    expect(text).toMatch(/exploration|task outcome/i);
     expect(text).toContain("By tool: tl_read_file 2, tl_search_files 1, tl_edit_file 1\n");
     // The measured block above comes only from local TL usage events, never
     // from AI-provider session logs, so it renders even though this fresh

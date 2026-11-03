@@ -17,19 +17,21 @@
  * synchronous, and needs nothing but `fs.statSync`.
  */
 
-import { readFileSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
  * Shape of a dist/.build-stamp line (see scripts/write-build-stamp.mjs):
  * `<ISO of newest dist mtime>-<8..64 hex of the dist content sha256>`.
- * Anything else falls back to the single-file stat fingerprint below.
+ * Anything else falls back to the optional source hash or single-file stat.
  */
 const BUILD_STAMP_RE = /^\d{4}-\d{2}-\d{2}T[0-9:.]+Z-[0-9a-f]{8,64}$/;
 
 /**
- * Derives a build identifier from the mtime+size of the file backing
+ * Derives a build identifier from a build stamp, an optional source tree hash,
+ * or the mtime+size of the file backing
  * `moduleUrl`. Pass the CALLER's own `import.meta.url` — server.ts's, in
  * practice, since that module holds the dispatch/schema logic this id is
  * meant to distinguish between builds; a util file that rarely changes
@@ -44,7 +46,43 @@ const BUILD_STAMP_RE = /^\d{4}-\d{2}-\d{2}T[0-9:.]+Z-[0-9a-f]{8,64}$/;
  * gets once-per-process computation for free, with no separate cache flag
  * to keep in sync.
  */
-export function deriveServerBuildId(moduleUrl: string): string | undefined {
+// The source tier is bounded and hashes names and bytes, never timestamps.
+// A fixed ISO prefix keeps the existing wire shape while identical bytes stay stable.
+function sourceBuildId(base: string, roots: readonly string[]): string {
+  if (roots.length === 0 || roots.length > 128) throw new Error("invalid source roots");
+  const files = new Map<string, Buffer>();
+  let totalBytes = 0;
+  const visit = (relative: string, depth: number): void => {
+    if (depth > 32) throw new Error("source tree too deep");
+    const parts = relative.split(/[\\/]/);
+    if (isAbsolute(relative) || parts.some(part => !part || part === "." || part === "..")) throw new Error("invalid source path");
+    let current = base;
+    for (const part of parts) {
+      current = join(current, part);
+      if (lstatSync(current).isSymbolicLink()) throw new Error("source symlink");
+    }
+    const stat = lstatSync(current);
+    if (stat.isDirectory()) {
+      for (const child of readdirSync(current).sort()) visit(`${relative}/${child}`, depth + 1);
+    } else if (stat.isFile()) {
+      const key = parts.join("/");
+      if (files.has(key)) return;
+      if (files.size >= 10000 || stat.size > 100 * 1024 * 1024 - totalBytes) throw new Error("source tree too large");
+      const bytes = readFileSync(current);
+      totalBytes += bytes.length;
+      if (totalBytes > 100 * 1024 * 1024) throw new Error("source tree too large");
+      files.set(key, bytes);
+    } else throw new Error("unsupported source entry");
+  };
+  for (const root of roots) visit(root, 0);
+  const hash = createHash("sha256");
+  for (const [name, bytes] of [...files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+    hash.update(`${Buffer.byteLength(name)}:`).update(name).update(`${bytes.length}:`).update(bytes);
+  }
+  return `1970-01-01T00:00:00.000Z-${hash.digest("hex")}`;
+}
+
+export function deriveServerBuildId(moduleUrl: string, sourceRoots?: readonly string[]): string | undefined {
   try {
     const filePath = fileURLToPath(moduleUrl);
     // Tier 1: the build stamp written next to the module by
@@ -60,6 +98,7 @@ export function deriveServerBuildId(moduleUrl: string): string | undefined {
     } catch {
       // no readable stamp — fall through to the stat fingerprint
     }
+    if (sourceRoots !== undefined) return sourceBuildId(dirname(filePath), sourceRoots);
     const stat = statSync(filePath);
     return `${stat.mtime.toISOString()}-${stat.size}`;
   } catch {
@@ -76,7 +115,7 @@ const SERVER_PACKAGE_NAME = "@tokenlighten/mcp-server";
  * version, so it cannot drift silently the way the previous hardcoded
  * serverInfo "0.2.0" did.
  */
-export const SERVER_PACKAGE_VERSION_FALLBACK = "0.16.5";
+export const SERVER_PACKAGE_VERSION_FALLBACK = "0.16.6";
 
 /**
  * Resolve the running server's own package version by walking up from the

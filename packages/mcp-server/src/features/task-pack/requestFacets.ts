@@ -902,7 +902,11 @@ function hasReversedSubjectBeforeVerb(gap: string): boolean {
 /** `re` must have exactly one capture group: the gap between the wh-word and the verb (CALLERS_WHICH_VERB_RE / CALLERS_WHICH_READ_RE's own shape). */
 function matchesInCallersDirection(clause: string, re: RegExp): boolean {
   const match = re.exec(clause);
-  return match !== null && !hasReversedSubjectBeforeVerb(match[1] ?? "");
+  if (match === null) return false;
+  const gap = match[1] ?? "";
+  // "which handler to call/use" asks about a choice made by the subject,
+  // rather than the callers of that subject.
+  return !/\bto\s*$/i.test(gap) && !hasReversedSubjectBeforeVerb(gap);
 }
 
 function isCallersReadClause(guardedClause: string): boolean {

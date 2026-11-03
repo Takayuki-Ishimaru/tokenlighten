@@ -1,3 +1,4 @@
+import { queryCandidateDecision } from "../features/task-pack/queryCandidatePolicy.js";
 // ---------------------------------------------------------------------------
 // protocol v1 — the single decision on the wire, and the affordances it is
 // derived from (C2-2).
@@ -2166,6 +2167,8 @@ function projectSemanticFrontierNext(
  */
 export function projectTaskDecision(input: DecisionProjectionInput): TaskDecision | undefined {
   const { result, contract, canonicalKind, evidence, consumed } = input;
+  const candidateDecision = queryCandidateDecision(result);
+  if (candidateDecision !== undefined) return candidateDecision;
   if (canonicalKind === undefined || contract === undefined) return undefined;
 
   // W9: `gapNamedNext` is the LAST of the three, so it can only supply a call

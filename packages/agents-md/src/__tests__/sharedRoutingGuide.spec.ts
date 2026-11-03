@@ -32,6 +32,8 @@ describe("r12: shared routing reaches Codex and Claude without a second guide co
           expect(claude).not.toContain("evidence[].body");
           expect(agents).not.toContain("mcp__tokenlighten_");
           expect(agents).toMatch(/task:\{epoch:"new"\}|"task":\{"epoch":"new"\}/);
+          if (locale === "en") expect(agents).toMatch(/First lookup for every source question\/request|Every source question\/request/);
+          else expect(agents).toMatch(/自然文(?:を|のみも)?含む全source質問\/依頼/);
           expect(agents).toContain("evidence[].body");
           expect(agents).toContain("targets:[");
           expect(agents).toContain("task.force_serve:true");
@@ -45,6 +47,7 @@ describe("r12: shared routing reaches Codex and Claude without a second guide co
             // compact: "`evidence[].body` exact source: act on path/range, no reread."
             expect(agents).toMatch(/paths\/line ranges|act on path\/range|is exact source/);
             expect(agents).toMatch(/without re-reading served bytes|no re-?read|without rereading/);
+            expect(agents).toMatch(/fetch required missing bodies|fetch missing required bodies|If required body is missing/);
             // v115: compact says "Native only if the user asks"; full/medium keep the older wording.
             // v119-v128: compact drops the article ("Native only if user asks").
             // 2026-11-03: compact says "Native Read/Grep/Edit: ..., or if requested, ..."; full and
@@ -53,11 +56,12 @@ describe("r12: shared routing reaches Codex and Claude without a second guide co
           } else {
             expect(agents).toContain("<依頼全文を逐語で>");
             // v119-v128: compact "引用/制約込みでquery逐語" replaces "キーワード化・引用/制約文の省略禁止".
-            expect(agents).toMatch(/キーワード化・引用\/制約文の省略禁止|引用\/制約込みでquery逐語/);
+            expect(agents).toMatch(/キーワード化・引用\/制約文の省略禁止|引用\/制約込みでquery逐語|引用\/制約を保持|引用\/制約も保持/);
             expect(agents).toMatch(/`targets`(?:を省略|省略)/);
             // compact: "`evidence[].body`正確なsource: path/rangeで行動、再読禁止"
             expect(agents).toMatch(/path\/行範囲|path\/rangeで行動|正確なsource/);
             expect(agents).toMatch(/再読せず|再読禁止|再読不要/);
+            expect(agents).toMatch(/必須body未配信なら|必要な本文がなければ/);
             expect(agents).toMatch(/user(?:がnativeを明示指定|のnative明示指定|指定)|nativeはuser(?:の明示指定|明示)/);
           }
           expect((await injectAll(options)).wrote).toEqual([]);

@@ -76,6 +76,7 @@ import type {
 } from "@tokenlighten/types";
 
 import { shaOfText, shortSha } from "../util/handles.js";
+import { protocolCallContext } from "./envelope.js";
 
 type Body = Record<string, unknown>;
 
@@ -688,7 +689,7 @@ function reclassificationReceipt(body: Body): EditReclassification | undefined {
  * A.5.11's own instruction and loses nothing.
  */
 const KEPT_ON_APPLIED = [
-  "path", "lines", "delta", "handle", "sha",
+  "path", "lines", "delta", "handle", "sha", "operations_applied",
   "bytes", "total_lines", "read_back", "create_target", "cwd_source",
   "from", "to", "changed_files", "total_replacements", "skipped",
   "review", "review_note", "verification", "verify_note", "closure", "change_contract", "unread_note",
@@ -740,6 +741,10 @@ function projectApplied(body: Body, root: string | undefined): Body {
   if (checkpoint !== undefined) projected["checkpoint"] = checkpoint;
   keep(projected, body, ["applied_note"]);
   keep(projected, body, KEPT_ON_APPLIED);
+  const inputEdits = protocolCallContext()?.args?.["edits"];
+  if (Array.isArray(inputEdits) && inputEdits.length > 0) projected["operations_applied"] = inputEdits.length;
+  const inputCount = protocolCallContext()?.editOperationCount;
+  if (inputCount !== undefined && inputCount > 0) projected["operations_applied"] = inputCount;
   return projected;
 }
 

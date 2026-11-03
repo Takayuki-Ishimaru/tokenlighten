@@ -67,7 +67,7 @@ import {
 // this avoids is graph-evidence/relationGraphPort.ts importing it directly,
 // which — now that THIS file is that module's sanctioned production
 // importer — would close a loop back through graph-evidence.
-import { resolveQualifiedSymbolAnchors } from "./readCodeTaskPack.js";
+import { resolveQualifiedSymbolAnchors } from "./engine/wiringEvidence3.js";
 import type { SfConcernAnchor, SfStructuralConcern } from "./sfConcerns.js";
 import type { SfConcernProof, SfRelationPacketView, SfSatisfactionResult } from "./sfSatisfaction.js";
 import type {

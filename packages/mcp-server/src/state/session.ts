@@ -5701,6 +5701,11 @@ export function guardExecutionDiscovery(
   const challenged = applyChallenge(session, fence, args, workspaceRoot);
   if (challenged !== undefined) return challenged;
 
+  // An outline is a structural representation, not a repeat of source bytes.
+  // A source-range receipt cannot answer it, even when this task holds the
+  // entire file. Let the outline dispatcher apply its own bounds.
+  if (tool === "tl_read_file" && args["mode"] === "skeleton") return { allowed: true };
+
   const signature = discoveryCallSignature(tool, args);
   const seen = fence.discoverySignatures.get(signature) ?? 0;
   fence.discoverySignatures.set(signature, seen + 1);

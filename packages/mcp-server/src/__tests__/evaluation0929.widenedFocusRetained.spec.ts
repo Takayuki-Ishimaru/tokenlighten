@@ -82,21 +82,74 @@ const WORKER = [
 ].join("\n");
 
 describe("a callers clause after a same-file widening keeps the pack's focus (never the file's first callable)", () => {
+  it("keeps the caller-selected range's callable after value widening", async () => {
+    const query = "How does the scheduler decide whether to requeue a job: what is the max job attempts constant's configured value, and who calls the requeue decision?";
+    const ws = workspace({ "src/scheduler.ts": schedulerSource(), "src/worker.ts": WORKER });
+    const server = startDevServer(ws, "default");
+    servers.push(server);
+    await server.initialize();
+    const first = await server.callTool("tl_read_file", { query, cwd: ws, task: { epoch: "new", profile: "answer" } });
+    expect(first.body.kind).toBe("read.task_pack");
+    expect(first.body.evidence).toEqual([]);
+    expect(first.body.decision.kind).toBe("await_input");
+    expect(first.body.decision.next).toBeUndefined();
+    const task = first.body.task.id;
+    expect(typeof task).toBe("string");
+    const chain = await followNextToEnd(server, {
+      tool: "tl_read_file", arguments: { query, cwd: ws, task: { handle: task }, targets: [{ path: "src/scheduler.ts", range: "243-248" }] },
+    }, { cwd: ws, hopCap: 6 });
+    const servedText = JSON.stringify(chain.hops.map((s) => s.response));
+    expect(finalDecisionKind(chain), servedText).toBe("act.answer");
+    expect(servedText).toContain("shouldRequeueJob(job, attempts) ?");
+    expect(servedText).toContain("request-item:facet-2:callers");
+    expect(servedText).toContain("MAX_JOB_ATTEMPTS = 7");
+    expect(servedText).not.toMatch(/request-item-empty:callers/u);
+  }, 90_000);
+
+  it.each([
+    ["a constant with no callable", "243-243"],
+    ["two unrelated callables", "3-9"],
+  ])("never chooses an arbitrary function from %s", async (_label, range) => {
+    const query = "How does the scheduler decide whether to requeue a job: what is the max job attempts constant's configured value, and who calls the requeue decision?";
+    const ws = workspace({ "src/scheduler.ts": schedulerSource(), "src/worker.ts": WORKER });
+    const server = startDevServer(ws, "default");
+    servers.push(server);
+    await server.initialize();
+    const first = await server.callTool("tl_read_file", { query, cwd: ws, task: { epoch: "new", profile: "answer" } });
+    expect(first.body.kind).toBe("read.task_pack");
+    expect(first.body.evidence).toEqual([]);
+    expect(first.body.decision.kind).toBe("await_input");
+    expect(first.body.decision.next).toBeUndefined();
+    expect(typeof first.body.task.id).toBe("string");
+    const chain = await followNextToEnd(server, {
+      tool: "tl_read_file", arguments: { query, cwd: ws, task: { handle: first.body.task.id }, targets: [{ path: "src/scheduler.ts", range }] },
+    }, { cwd: ws, hopCap: 6 });
+    const text = JSON.stringify(chain.hops.map((s) => s.response));
+    // Neither decoy is a supported answer to the request, regardless of
+    // whether the planner finds a real focus or leaves the callers gap open.
+    expect(text).not.toMatch(/request-item-empty:callers:formatJobLabel/u);
+    expect(text).not.toMatch(/closure:callers formatJobLabel/u);
+  }, 90_000);
+
   it("value clause widens the focused function's file, then an identifier-free callers clause", async () => {
     const query = "How does the scheduler decide whether to requeue a job: what is the max job attempts constant's configured value, and who calls the requeue decision?";
     const ws = workspace({ "src/scheduler.ts": schedulerSource(), "src/worker.ts": WORKER });
     const server = startDevServer(ws, "default");
     servers.push(server);
     await server.initialize();
+    const first = await server.callTool("tl_read_file", { query, cwd: ws, task: { epoch: "new", profile: "answer" } });
+    expect(first.body.evidence).toEqual([]);
+    expect(first.body.decision.kind).toBe("await_input");
     const chain = await followNextToEnd(
       server,
-      { tool: "tl_read_file", arguments: { query, cwd: ws, task: { epoch: "new", profile: "answer" } } },
+      { tool: "tl_read_file", arguments: { query, cwd: ws, task: { handle: first.body.task.id }, targets: [{ path: "src/scheduler.ts", range: "244-247" }] } },
       { cwd: ws, hopCap: 6 },
     );
     const servedText = JSON.stringify(chain.hops.map((s) => s.response));
     expect(finalDecisionKind(chain), servedText).toBe("act.answer");
-    // The real caller is served as the callers facet's evidence ...
-    expect(servedText, servedText).toMatch(/closure:callers shouldRequeueJob/u);
+    // The real caller's executable body and the callers obligation are held;
+    // optional wire `why` labels are not needed to establish that identity.
+    expect(servedText).toContain("request-item:facet-2:callers");
     expect(servedText, servedText).toContain("shouldRequeueJob(job, attempts) ?");
     // ... and no "0 call sites" is certified for an arbitrary declaration.
     expect(servedText, servedText).not.toMatch(/request-item-empty:callers:formatJobLabel/u);
@@ -104,4 +157,48 @@ describe("a callers clause after a same-file widening keeps the pack's focus (ne
     // The value clause still binds the constant (WP-C4 unchanged).
     expect(servedText, servedText).toContain("MAX_JOB_ATTEMPTS = 7");
   }, 90_000);
+
+  it("keeps the selected method when another class declares the same name", async () => {
+    const query = "How does the scheduler decide whether to retry: what is the retry limit constant's configured value, and who calls the retry decision?";
+    const ws = workspace({
+      "src/scheduler.ts": [
+        "export const RETRY_LIMIT = 7;",
+        "export class Alpha {",
+        "  retry(attempts: number): boolean { return false; }",
+        "}",
+        "export class Beta {",
+        "  retry(attempts: number): boolean {",
+        "    return attempts < RETRY_LIMIT;",
+        "  }",
+        "}", "",
+      ].join("\n"),
+      "src/worker.ts": [
+        'import { Beta } from "./scheduler.js";',
+        "export function finishAttempt(attempts: number): boolean {",
+        "  const scheduler = new Beta();",
+        "  return scheduler.retry(attempts);",
+        "}", "",
+      ].join("\n"),
+    });
+    const server = startDevServer(ws, "default");
+    servers.push(server);
+    await server.initialize();
+    const first = await server.callTool("tl_read_file", { query, cwd: ws, task: { epoch: "new", profile: "answer" } });
+    expect(first.body.decision.kind).toBe("await_input");
+    expect(first.body.evidence).toEqual([]);
+    const chain = await followNextToEnd(server, {
+      tool: "tl_read_file", arguments: {
+        query, cwd: ws, task: { handle: first.body.task.id },
+        targets: [{ path: "src/scheduler.ts", range: "6-8" }],
+      },
+    }, { cwd: ws, hopCap: 6 });
+    const text = JSON.stringify(chain.hops.map(hop => hop.response));
+    expect(finalDecisionKind(chain), text).toBe("act.answer");
+    // Alpha.retry has no caller. The selected Beta.retry has this executable
+    // call: retaining only the bare name would falsely certify zero callers.
+    expect(text).toContain("return scheduler.retry(attempts)");
+    expect(text).not.toMatch(/request-item-empty:callers/u);
+    expect(text).toContain("RETRY_LIMIT = 7");
+  }, 90_000);
+
 });

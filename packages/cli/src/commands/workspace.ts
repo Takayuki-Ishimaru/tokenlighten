@@ -81,7 +81,7 @@ const CLIENTS = new Set<TokenLightenSetupClient>([
 
 const WORKSPACE_USAGE = `\
 Usage:
-  tl workspace setup [--root DIR] [--clients vscode,codex,claude-code] [--read-only | --allow-write] [--guide-profile full|medium|compact|portable] [--tool-surface code|full] [--copilot-inline-results raise|keep] [--copilot-guide standalone|agents-md|keep] [--copilot-session-context install|keep] [--no-hooks | --remove-hooks] [--rules-only] [--json]
+  tl workspace setup [--root DIR] [--clients vscode,codex,claude-code] [--read-only | --allow-write] [--guide-profile full|medium|compact|portable] [--tool-surface code|full] [--copilot-inline-results raise|keep] [--copilot-guide standalone|agents-md|keep] [--copilot-session-context install|keep] [--no-hooks | --remove-hooks] [--rules-only] [--dry-run] [--json]
   tl workspace status [--root DIR] [--json]
   tl workspace list [--json]
 
@@ -160,9 +160,13 @@ function assertInsideRoot(root: string, target: string): void {
 }
 
 function assertNotSymlink(target: string): void {
-  if (existsSync(target) && lstatSync(target).isSymbolicLink()) {
-    throw new Error(`Refusing to replace symlinked setup file: ${target}`);
+  let link;
+  try { link = lstatSync(target); }
+  catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
   }
+  if (link.isSymbolicLink()) throw new Error(`Refusing to replace symlinked setup file: ${target}`);
 }
 
 /** Optional serialization style for `writeJsonAtomic` — lets a caller that
@@ -2086,6 +2090,41 @@ function jsonWarnings(
   return warnings;
 }
 
+/** Per-subcommand flag spec for `tl workspace`: value flags take one argument, boolean flags take none. */
+const WORKSPACE_SUBCOMMAND_FLAGS: Record<string, { value: readonly string[]; boolean: readonly string[] }> = {
+  setup: {
+    value: ["--root", "--clients", "--guide-profile", "--tool-surface", "--copilot-inline-results", "--copilot-guide", "--copilot-session-context"],
+    boolean: ["--read-only", "--allow-write", "--rules-only", "--json", "--dry-run", "--hooks", "--no-hooks", "--remove-hooks"],
+  },
+  status: { value: ["--root"], boolean: ["--json"] },
+  list: { value: [], boolean: ["--json"] },
+};
+
+/** Rejects unknown flags, missing option values, repeated value options, and positional paths before any side effect. */
+function validateWorkspaceArgs(sub: string, rest: readonly string[]): string | undefined {
+  const spec = WORKSPACE_SUBCOMMAND_FLAGS[sub];
+  if (!spec) return undefined;
+  const seen = new Set<string>();
+  for (let i = 0; i < rest.length; i += 1) {
+    const token = rest[i];
+    if (!token.startsWith("--")) {
+      return `unexpected argument '${token}' (a workspace path goes after --root DIR)`;
+    }
+    if (spec.boolean.includes(token)) continue;
+    if (!spec.value.includes(token)) {
+      return `unknown flag '${token}'`;
+    }
+    if (seen.has(token)) return `duplicate ${token} (give it one value)`;
+    seen.add(token);
+    const value = rest[i + 1];
+    if (value === undefined || value.startsWith("--")) {
+      return `${token} requires a value`;
+    }
+    i += 1;
+  }
+  return undefined;
+}
+
 export async function runWorkspace(
   args: string[],
   options: RunWorkspaceOptions = {},
@@ -2093,6 +2132,12 @@ export async function runWorkspace(
   const [sub, ...rest] = args;
   if (!sub || wantsHelp(args)) {
     process.stdout.write(WORKSPACE_USAGE);
+    return;
+  }
+  const argError = validateWorkspaceArgs(sub, rest);
+  if (argError !== undefined) {
+    process.stderr.write(`tl workspace: ${argError}\n${WORKSPACE_USAGE}`);
+    process.exitCode = 1;
     return;
   }
   if (sub === "status") {
@@ -2168,6 +2213,14 @@ export async function runWorkspace(
   const clients = rawClients
     ? rawClients.split(",").map((item) => item.trim()) as TokenLightenSetupClient[]
     : undefined;
+  const unknownClients = (clients ?? []).filter((client) => !CLIENTS.has(client));
+  if (unknownClients.length > 0) {
+    process.stderr.write(
+      `tl workspace: unsupported client '${unknownClients.join(", ")}' (expected ${[...CLIENTS].join(", ")})\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
   const rulesOnly = rest.includes("--rules-only");
   const readOnly = rest.includes("--read-only");
   if (readOnly && rest.includes("--allow-write")) {
@@ -2238,6 +2291,69 @@ export async function runWorkspace(
   // the same two inputs; this mirrors that derivation for reporting only
   // (an explicit --guide-profile still always wins, here and there).
   const effectiveGuideProfile = guideProfile ?? defaultGuideProfileForSurface(toolSurface);
+  if (rest.includes("--dry-run")) {
+    // Plan only: validate options/clients/root above, then print what setup
+    // WOULD do. Never call setupWorkspace, resolve a launcher, probe the
+    // server build, touch runtime dirs, hooks, or the registry.
+    const requestedDryRoot = resolve(valueAfter(rest, "--root") ?? process.cwd());
+    if (!existsSync(requestedDryRoot) || !lstatSync(requestedDryRoot).isDirectory()) {
+      process.stderr.write(`tl workspace: workspace folder does not exist: ${requestedDryRoot}\n`);
+      process.exitCode = 1;
+      return;
+    }
+    const dryRoot = realpathSync(requestedDryRoot);
+    const dryClients: TokenLightenSetupClient[] = rulesOnly
+      ? []
+      : clients && clients.length > 0
+        ? [...new Set(clients)]
+        : ["vscode", "codex", "claude-code"];
+    const dryRequested = readOnly ? false : rest.includes("--allow-write") ? true : undefined;
+    const dryPermissions = Object.fromEntries(dryClients.map((client) => {
+      try {
+        return [client, dryRequested ?? existingClientWriteEnabled(dryRoot, client)];
+      } catch {
+        // A malformed or symlinked client config makes the existing posture
+        // unknown; a plan must not claim a merge it did not perform.
+        return [client, null];
+      }
+    })) as Partial<Record<TokenLightenSetupClient, boolean | null>>;
+    const dryWriteEnabled = dryClients.length > 0
+      ? dryClients.some(client => dryPermissions[client] === null) ? null : dryClients.every((client) => dryPermissions[client] === true)
+      : dryRequested ?? true;
+    const dryPlan = {
+      dryRun: true,
+      workspaceRoot: dryRoot,
+      clients: dryClients,
+      rulesOnly,
+      writeEnabled: dryWriteEnabled,
+      ...(dryClients.length > 0 && dryClients.some((client) => dryPermissions[client] !== dryWriteEnabled)
+        ? { writeEnabledByClient: dryPermissions }
+        : {}),
+      guideProfile: effectiveGuideProfile,
+      ...(toolSurface !== undefined ? { toolSurface } : {}),
+      ...(copilotInlineResults !== undefined ? { copilotInlineResults } : {}),
+      ...(copilotGuide !== undefined ? { copilotGuide } : {}),
+      ...(copilotSessionContext !== undefined ? { copilotSessionContext } : {}),
+      ...(agentHooks !== undefined ? { agentHooks } : {}),
+    };
+    if (rest.includes("--json")) {
+      process.stdout.write(`${JSON.stringify(dryPlan)}\n`);
+      return;
+    }
+    process.stdout.write(
+      `TokenLighten workspace dry-run — nothing was written.\n`
+        + `Workspace: ${dryRoot}\n`
+        + `Clients: ${dryClients.length > 0 ? dryClients.join(", ") : "(rules only)"}\n`
+        + `Guide profile: ${effectiveGuideProfile}\n`
+        + (toolSurface !== undefined ? `Tool surface: ${toolSurface}\n` : "")
+        + `Write tools: ${dryClients.length > 0
+          ? dryClients.map((client) => `${client}=${dryPermissions[client] === null ? "unknown (configuration unreadable)" : dryPermissions[client] ? "enabled" : "disabled"}`).join(", ")
+          : "not configured (--rules-only)"}\n`
+        + `Agent hooks: ${agentHooks ?? "left untouched (--no-hooks)"}\n`
+        + "Run 'tl workspace setup' without --dry-run to apply.\n",
+    );
+    return;
+  }
   const launcher = options.launcher
     ?? resolveStableLauncher({ allowBareFallback: true, installHome: options.installHome });
   const serverBuild = rulesOnly

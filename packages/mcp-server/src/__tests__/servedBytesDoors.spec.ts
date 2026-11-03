@@ -49,7 +49,7 @@ const SRC = path.resolve(__dirname, "..");
  * NOT here is out of scope for this guard and must not read file bytes for the
  * wire (the three tool dispatchers all live in this list).
  */
-const WIRE_SERVING_MODULES = [
+const ORIGINAL_WIRE_SERVING_MODULES = [
   "server.ts",
   "features/task-pack/readCodeTaskPack.ts",
   "features/task-pack/evidenceResolution.ts",
@@ -64,6 +64,19 @@ const WIRE_SERVING_MODULES = [
   "state/readRequestStore.ts",
   "state/stateStore.ts",
 ] as const;
+
+const WIRE_SERVING_ROOTS = ["serverOwned", "runtime", "mcp/dispatch", "features/task-pack/engine"] as const;
+function modulesUnder(directory: string): string[] {
+  return fs.readdirSync(path.join(SRC, directory), { withFileTypes: true }).flatMap(entry => {
+    const relative = `${directory}/${entry.name}`;
+    return entry.isDirectory() ? modulesUnder(relative) : entry.isFile() && entry.name.endsWith(".ts") ? [relative] : [];
+  }).sort();
+}
+const WIRE_SERVING_MODULES = [...new Set([
+  ...ORIGINAL_WIRE_SERVING_MODULES,
+  ...WIRE_SERVING_ROOTS.flatMap(modulesUnder),
+  ...fs.readdirSync(path.join(SRC, "features/task-pack")).filter(name => /^natural.*\.ts$/.test(name)).map(name => `features/task-pack/${name}`),
+])].sort();
 
 /**
  * Every primitive that can turn bytes on disk into a string this process could
@@ -211,15 +224,19 @@ describe("served-bytes doors — every byte-read primitive in a wire-serving mod
   });
 
   it("server.ts obtains served text ONLY through servedTextForRoute (BLOCKERs 52/53's root cause)", () => {
-    const lines = fs.readFileSync(path.join(SRC, "server.ts"), "utf8").split("\n");
     const offenders: string[] = [];
+    // These roots contain exactly the dispatch implementation moved from server.ts.
+    for (const module of WIRE_SERVING_MODULES.filter(name => name === "server.ts"
+      || ["serverOwned/", "runtime/", "mcp/dispatch/"].some(prefix => name.startsWith(prefix)))) {
+    const lines = fs.readFileSync(path.join(SRC, module), "utf8").split("\n");
     lines.forEach((line, index) => {
       if (isCommentOrTypeOnly(line)) return;
       if (!/\breadServedTextSafe\s*\(/.test(line)) return;
       // The funnel's own body is the one sanctioned caller.
       if (line.includes("const verdict = await readServedTextSafe(rel, workspace)")) return;
-      offenders.push(`server.ts:${index + 1}  ${line.trim()}`);
+      offenders.push(`${module}:${index + 1}  ${line.trim()}`);
     });
+    }
     expect(
       offenders,
       "Call servedTextForRoute(rel, workspace), not readServedTextSafe directly:"
@@ -253,10 +270,11 @@ describe("served-bytes doors — every byte-read primitive in a wire-serving mod
   });
 
   it("the two BLOCKER routes go through the funnel, with the tag in their own comment block", () => {
-    const lines = fs.readFileSync(path.join(SRC, "server.ts"), "utf8").split("\n");
+    const sources = WIRE_SERVING_MODULES.map(module => ({ module, lines: fs.readFileSync(path.join(SRC, module), "utf8").split("\n") }));
     const gated = (needle: string): boolean => {
-      const index = lines.findIndex((line) => line.includes(needle));
-      expect(index, `call site not found: ${needle}`).toBeGreaterThan(-1);
+      const matches = sources.flatMap(source => source.lines.flatMap((line, index) => line.includes(needle) ? [{...source, index}] : []));
+      expect(matches, `exactly one call site must exist: ${needle}`).toHaveLength(1);
+      const {lines, index} = matches[0]!;
       // The tag must sit in THIS call's own preceding comment block, not
       // somewhere else in a 20k-line file.
       return lines.slice(Math.max(0, index - 25), index + 1).some((line) => line.includes(SERVED_TAG));
@@ -268,6 +286,18 @@ describe("served-bytes doors — every byte-read primitive in a wire-serving mod
     // The two doors round 10 did NOT name, found by this wave's own enumeration.
     expect(gated("const servedBack = servedTextOrUndefined(path.join(workspace, f.path));")).toBe(true);
     expect(gated("const cursorVerdict = await servedTextForRoute(target.path, workspace);")).toBe(true);
+  });
+  it("includes every moved implementation module and the source-cache read doors", () => {
+    for (const root of WIRE_SERVING_ROOTS) for (const module of modulesUnder(root)) expect(WIRE_SERVING_MODULES).toContain(module);
+    expect(new Set(WIRE_SERVING_MODULES).size).toBe(WIRE_SERVING_MODULES.length);
+    const hits = collectHits();
+    const cache = WIRE_SERVING_MODULES.filter(module => module.startsWith("features/task-pack/engine/")
+      && fs.readFileSync(path.join(SRC, module), "utf8").includes("export class FileReadCache"));
+    expect(cache).toHaveLength(1);
+    expect(hits.some(hit => hit.module === cache[0] && hit.text.includes("readFileForRequest("))).toBe(true);
+    for (const prefix of ["serverOwned/", "mcp/dispatch/", "features/task-pack/engine/"]) {
+      expect(new Set(hits.filter(hit => hit.module.startsWith(prefix)).map(hit => hit.module)).size).toBeGreaterThanOrEqual(9);
+    }
   });
 });
 

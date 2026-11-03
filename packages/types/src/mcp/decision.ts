@@ -124,6 +124,10 @@ export type CertificateRef = {
  * `plan`, not `decision.await_input.candidates`.
  */
 export type Candidate = {
+  /** 1-based inclusive location window; no implementation body is implied. */
+  range?: string;
+  /** Declaration name, when the retrieval engine resolved one. */
+  symbol?: string;
   /** Present on both live forms; the only field a caller can always use to
    *  tell two candidates apart. */
   path: string;

@@ -17,6 +17,19 @@ function facetsOf(query: string): RequestFacet[] {
   return extractFacetRequirements(query).map((r) => r.facet);
 }
 
+describe("infinitival handler questions", () => {
+  it.each([
+    "How does Flask decide which error handler to use?",
+    "How does Flask decide which handler to call?",
+    "Which file to read when the cache is empty?",
+  ])("does not infer callers from %s", (query) => {
+    expect(facetsOf(query)).not.toContain("callers");
+  });
+  it.each(["Which modules call Flask?", "Which handlers use the cache?", "Which files read CONFIG_KEY?"])("preserves affirmative callers: %s", (query) => {
+    expect(facetsOf(query)).toContain("callers");
+  });
+});
+
 describe("extractFacetRequirements: EN positives", () => {
   const cases: ReadonlyArray<readonly [string, RequestFacet]> = [
     ["What is the default timeout for the HTTP client?", "value"],

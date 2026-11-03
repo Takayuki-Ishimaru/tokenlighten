@@ -94,6 +94,32 @@ export function formatReductionRange(
     : `Reduction range: ${interval.low.toFixed(1)}–${interval.high.toFixed(1)}% (95%)\n`;
 }
 
+/**
+ * Why `tl logs summary` never prints a session-level net figure: local usage
+ * logs count TL's own calls and bytes, but cannot measure the extra
+ * exploration a client does around them nor the task outcome, so a number
+ * here would be fabricated from per-call telemetry with no paired verified
+ * control.
+ */
+export const SESSION_NET_UNAVAILABLE_BASIS =
+  "local usage logs cannot measure extra exploration or task outcome; "
+  + "a paired verified control (the same task run with and without TL, outcome-checked) is required";
+
+/**
+ * Labels a printed full-session reduction as a model estimate when it came
+ * from the analytic fallback calibration (no paired observed/predicted data),
+ * so it never reads as a verified measurement. Paired-derived estimates and
+ * unavailable figures print unchanged.
+ */
+function sessionEstimateCaveat(
+  session: { calibration?: { source?: string } | undefined },
+  available: boolean,
+): string {
+  return available && session.calibration?.source === "analytic-fallback"
+    ? " (model estimate from the analytic fallback; not a verified measurement)"
+    : "";
+}
+
 function valueAfter(args: readonly string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
   return index >= 0 ? args[index + 1] : undefined;
@@ -198,12 +224,31 @@ export async function runLogs(args: string[]): Promise<void> {
         + "the baseline is an estimate of native reads of the same files/ranges, not billed cost, "
         + `capped at one native read per call (2,000 lines / 25,000 tokens): an estimated upper bound${clampNote}`;
     }
+    // A per-call usage log records what TL returned, never what the agent
+    // would have done without TL: extra exploration and the task outcome are
+    // unobservable here, so no session-level net saving is derivable without
+    // a paired verified control (the same task run with and without TL,
+    // outcome-checked). The engine's `net` is built from this fabricated
+    // per-call shape, so the CLI reports it unavailable instead.
+    const display = buildMeasurementDisplay(decomposition);
+    const measurementDisplay = {
+      ...display,
+      session: {
+        ...display.session,
+        net: {
+          status: "unavailable" as const,
+          basis: SESSION_NET_UNAVAILABLE_BASIS,
+          tokens: null,
+          cashUsd: null,
+        },
+      },
+    };
     const summary = {
       ...canonicalSummary,
       totalResponseBytes,
       method: "file-bytes" as const,
       baselineNote: BASELINE_NOTE,
-      measurementDisplay: buildMeasurementDisplay(decomposition),
+      measurementDisplay,
       ...(measurementUnavailableReason ? { measurementUnavailableReason } : {}),
     };
     if (rest.includes("--json")) {
@@ -250,16 +295,16 @@ export async function runLogs(args: string[]): Promise<void> {
         + `TL response measurement method: ${summary.method}\n`
         + formatBaselineLine(summary.measuredBaselineCallsByMethod)
         + formatContextAvoidedLine(summary.measurementDisplay.contextAvoided)
-        + `Session net: ${summary.measurementDisplay.session.net.tokens === null ? "unavailable" : `${summary.measurementDisplay.session.net.tokens} tokens`} (${summary.measurementDisplay.session.net.status}; basis: ${summary.measurementDisplay.session.net.basis})\n`
+        + `Session net: ${measurementDisplay.session.net.tokens === null ? "unavailable" : `${measurementDisplay.session.net.tokens} tokens`} (${measurementDisplay.session.net.status}; basis: ${measurementDisplay.session.net.basis})\n`
         + `By tool: tl_read_file ${summary.byTool.tl_read_file}, `
         + `tl_search_files ${summary.byTool.tl_search_files}, `
         + `tl_edit_file ${summary.byTool.tl_edit_file}\n`
         + `Matched AI sessions: ${session.matchedSessions}\n`
         + `Observed full-session tokens: ${session.actualTotalTokens ?? "unavailable"}\n`
-        + `Predicted no-TL tokens: ${session.predictedWithoutTlTokens ?? "unavailable"}\n`
-        + `Model-estimated full-session token reduction: ${tokenReduction}\n`
+        + `Predicted no-TL tokens: ${session.predictedWithoutTlTokens ?? "unavailable"}${sessionEstimateCaveat(session, session.predictedWithoutTlTokens !== null)}\n`
+        + `Model-estimated full-session token reduction: ${tokenReduction}${sessionEstimateCaveat(session, tokenReduction !== "unavailable")}\n`
         + formatReductionRange(session.tokenReductionPercent95)
-        + `Model-estimated full-session cost reduction: ${costReduction}\n`
+        + `Model-estimated full-session cost reduction: ${costReduction}${sessionEstimateCaveat(session, costReduction !== "unavailable")}\n`
         + residencyLine
         + `Confidence: ${session.confidence}\n`,
     );

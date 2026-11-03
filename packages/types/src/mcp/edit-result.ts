@@ -52,7 +52,7 @@ export type SideEffectCore = {
   workspace: WorkspaceMarker;
 };
 
-/** The four counts §4.2.1(3) names: landed, attempted, reverted, unproven. */
+/** File counts: landed, attempted, reverted, unproven. Multiple input edits to one file count once. */
 export type EditCounts = {
   applied: number;
   attempted: number;
@@ -297,6 +297,9 @@ export type EditApplied = {
   kind: "edit.applied";
   core: SideEffectCore;
   applied: AppliedEntry[];
+  /** Successful input edits in an atomic edits[] batch. A replace-all is one
+   * operation; core.counts counts files. Absent on other edit forms. */
+  operations_applied?: number;
   /**
    * OPERATION REPLAY MARKER (2026-08-27 field-eval T4, additive/optional —
    * protocol v1's frozen kind set is unaffected, this is a field, not a new

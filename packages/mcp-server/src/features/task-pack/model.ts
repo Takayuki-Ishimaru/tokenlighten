@@ -5,6 +5,7 @@
  * MCP wire contracts remain canonical in @tokenlighten/types.
  */
 import type {
+  Candidate,
   CreateTarget,
   LikelyEditHint,
   McpLang,
@@ -242,6 +243,8 @@ export interface ArtifactTaskPackSectionEntry {
 }
 
 export interface TaskPackResult {
+  /** Internal location proposals; never evidence or an automatic continuation. */
+  query_candidate_selection?: { candidates: Candidate[] };
   /** Opaque replay reference attached by the task-pack dispatcher. */
   qref?: string;
   mode: "task_pack";
@@ -857,6 +860,8 @@ export interface TaskPackArgs {
    * field — most unit tests — keeps its exact prior behavior.
    */
   writeAllowed?: boolean;
+  /** Server-derived canonical query safety policy; legacy/internal callers omit it. */
+  queryCandidatePolicy?: "unanchored";
   /**
    * R5 (DESIGN-v0.15-exploration-continuation-reliability.md §7): true only
    * on an INTERNAL recursive `buildSeededTaskPack({...args, paths:[...]})`
@@ -876,6 +881,8 @@ export interface TaskPackArgs {
    * Server-derived; internal only, never serialized or fingerprinted.
    */
   autoDiscoveredLocation?: boolean;
+  /** Internal provenance for runtime-witness targets selected by natural retrieval. */
+  naturalInferredTargets?: true;
   /**
    * Set only by buildTaskPackCore's named-project-scope rewrite, which replaces
    * a pathless or directory-guess request's paths with the project the query

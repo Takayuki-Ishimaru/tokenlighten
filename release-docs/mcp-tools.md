@@ -101,6 +101,7 @@ Task packs can return a decision to answer, edit, discover, await input, or stop
 - Every requirement of a ready `act.answer` is backed by a body in that response or by a range already served in the task; when a size limit or a later step removes the evidence a requirement needs, the pack answers `discover` with a ranged `next`, or discloses the point, instead of keeping the claim.
 - `inventory_complete` reports how much of the workspace a scan covered, never whether an answer is complete: readiness is `decision.kind` together with `certificate.obligations`, and every `explicit-gap:` entry is part of the answer.
 - Continuing the same task retains its requirements and completed steps.
+- English and Japanese requests can describe operations and relationships without naming a symbol. Matching declarations, comments or documentation alone do not prove the requested behavior; incomplete or unsupported discovery retains its limitations when you select a candidate or narrow a later read.
 
 **Absent and undetermined points.** A point whose status cannot be determined is never reported absent: it keeps the task open (`next`, or `await_input` naming it in `unresolved[]`) or, when it does not block the answer, is named in `decision.certificate.gaps` as `explicit-gap:request-item-undetermined:<term> (<reason>)`; on an intermediate `discover` the same disclosure appears in `decision.gaps` with the code `request-item-undetermined` and carries no call. A certified `act.answer`/`act.edit` decision can still disclose a verified absence: `decision.certificate.gaps` names a request point with no occurrence in the scanned workspace files, and each entry says whether the scan was complete or how many paths were excluded from it (the same scope the `tl_search_files` absence reports). This is distinct from `decision.gaps`, which appears only while the pack is still discovering.
 
@@ -123,6 +124,12 @@ Replay-safe writes use `operation_id`. Reusing the same identifier returns the r
 ## Read and search
 
 `tl_read_file` can return source ranges, symbols, repository maps, task-oriented context packs, and selected document or archive content. `tl_search_files` reports whether its scanned scope was complete; a complete zero-match result can serve as authoritative absence.
+
+For text matches, `served_this_session` is set only when every matched line
+is already covered by source returned in the current session. A partly
+read file can instead carry `file_partially_served` and
+`matched_lines_outside_served`. `file_role` describes the file's purpose; it
+does not identify a function enclosing every match.
 
 Budgets are structural objects. Read budgets can constrain bytes, tokens, items, rows, cells, and full-content expansion; search budgets constrain bytes, tokens, and items. `budget.bytes` and `budget.tokens` cap one response (the MCP text result).
 
@@ -349,8 +356,8 @@ the workspace; values depending on them are disclosed as unresolved.
 - When the built-in parser cannot resolve a declaration in a file, a decision that depends on that file closes only after the whole file has been served at its current hash; the returned `next` names the unserved range.
 - When a quoted literal occurs twice in one large file, occurrence-level discovery may serve only one of the occurrences; read the other explicitly before an edit that must change both.
 - The pathless task-pack locator's primary index covers files through 1 MiB. Exact identifier routing adds a wide scan for the 1–8 MiB band; larger files remain readable by explicit path and range.
-- On very large repositories, the on-disk source-index cache is capped at 32 MiB. A larger index is rebuilt for each new server process, so the first call may take longer.
-- In `edit.applied`, `core.counts` counts edited files, not individual edit items.
+- Large persisted source indexes use a sharded cache. Startup still checks the current workspace files, so a reusable cache does not eliminate all first-call indexing work.
+- In `edit.applied`, `core.counts` counts edited files; `operations_applied` reports the number of applied edit operations. Per-file `delta` compares the original and final text, excluding unchanged context and intermediate edits. The statistic can be omitted for a rewrite that exceeds the line-count processing limit.
 - Under a host byte ceiling the `applied[].after` window is cut from its tail, so an edited line can fall outside it (`remaining` names it), and a hunk that only deletes lines is not named.
 - A `content:"auto"` read of a whole file of 300 or more lines at a 6,144-byte budget is refused as `cap-exceeded` without a `next`; use `content:"full"`. A continuation the server builds without a caller budget can exceed VS Code's response limit.
 - The `scope` parameter is advertised without `"type":"object"`; a JSON-string `scope` is accepted.

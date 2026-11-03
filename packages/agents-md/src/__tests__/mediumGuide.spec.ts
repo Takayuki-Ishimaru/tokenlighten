@@ -14,7 +14,11 @@ describe("medium guide profile (E8)", () => {
   it("keeps the exercised v75 rules", () => {
     const medium = renderMediumBlock();
     for (const rule of [
-      "tl_read_file {query",
+      "Every source question/request (prose too)",
+      "Read-only question",
+      "mixed requests use generic",
+      "candidates are unverified",
+      "tl_read_file {\"cwd\"",
       "decision.kind",
       "refusal",
       "retry",
@@ -63,6 +67,9 @@ describe("medium guide profile (E8)", () => {
       "cwd",
       "SAFE-STOP",
       "native-bypass",
+      "自然文のみも含む全source質問/依頼",
+      "読取質問=`task.profile:\"answer\"`",
+      "候補は未検証",
       "edits[]",
     ]) {
       expect(mediumJp, rule).toContain(rule);
