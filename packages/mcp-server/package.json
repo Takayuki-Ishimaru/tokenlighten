@@ -61,10 +61,10 @@
     "web-tree-sitter": "^0.23.0"
   },
   "devDependencies": {
-    "@modelcontextprotocol/client": "^2.2.0",
+    "@modelcontextprotocol/client": "^2.4.0",
     "@types/node": "^20",
     "ajv": "^8.20.0",
-    "vitest": "^4.1.11"
+    "vitest": "^5.1.0"
   },
   "files": [
     "dist",
